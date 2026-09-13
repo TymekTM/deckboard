@@ -27,11 +27,40 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(deckboard_db::default_db_path);
     let db = deckboard_db::Db::open_read_only(Some(&db_path))
         .with_context(|| format!("opening {}", db_path.display()))?;
-    let backend = Arc::new(SqlBackend::new(db));
+
+    // Original Deckboard extensions: same directory and settings.json the
+    // original app uses. The manager owns one JS runtime per package.
+    let home = dirs::home_dir().context("home directory")?;
+    let settings = std::fs::read_to_string(home.join("deckboard/settings.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let (ext_manager, mut ext_events) = deckboard_ext::ExtManager::load(
+        &home.join("deckboard/extensions"),
+        &settings,
+    );
+    for (package, name, error) in ext_manager.summary() {
+        match error {
+            Some(e) => tracing::warn!(package, name, error = e, "extension disabled"),
+            None => tracing::info!(package, name, "extension ready"),
+        }
+    }
+    let backend = Arc::new(SqlBackend::new(db).with_extensions(ext_manager.clone()));
 
     let state = Arc::new(AppState {
         hub: Arc::new(Hub::new()),
         backend: backend as Arc<dyn deckboard_legacy::Backend>,
+    });
+
+    // Extensions push custom values (graph/button state); the original
+    // forwards them to every client as app_status_update APP_CUSTOM_VALUE.
+    let hub = state.hub.clone();
+    tokio::spawn(async move {
+        while let Some(deckboard_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
+            let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
+            let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+            hub.broadcast("app_status_update", Some(&payload)).await;
+        }
     });
 
     // TEMPORARY default 8501: the original desktop app still owns 8500 and
