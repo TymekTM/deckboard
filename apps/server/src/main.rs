@@ -34,10 +34,15 @@ async fn main() -> anyhow::Result<()> {
         backend: backend as Arc<dyn deckboard_legacy::Backend>,
     });
 
+    // TEMPORARY default 8501: the original desktop app still owns 8500 and
+    // the DB. Note the stock Android client hardcodes port 8500 - testing
+    // with the real tablet requires closing the old app so we can bind 8500
+    // (set DECKBOARD_PORT=8500), or waiting for protocol v2 (our client).
+    // Flip the default back to 8500 when the original app is retired.
     let port: u16 = std::env::var("DECKBOARD_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8500);
+        .unwrap_or(8501);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("deckboard legacy server listening on {addr}");

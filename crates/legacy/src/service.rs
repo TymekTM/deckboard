@@ -41,7 +41,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 async fn health_page() -> Html<String> {
     Html(
         "<html><body><h3>Deckboard Server is live.</h3>\
-         <p>Legacy socket.io v2 endpoint on /socket.io/ (port 8500).</p>\
+         <p>Legacy socket.io v2 endpoint on /socket.io/.</p>\
          </body></html>"
             .into(),
     )

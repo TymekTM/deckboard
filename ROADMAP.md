@@ -49,7 +49,11 @@ through a legacy compatibility layer until the new client ships.
 - **Twitter removed** everywhere (commands, services, OAuth route).
 - **Single port 8500** for both protocols: legacy lives at
   `/socket.io/?EIO=3...`, protocol v2 at `/v2/ws` (plain WebSocket, JSON
-  frames, see `deckboard-proto`).
+  frames, see `deckboard-proto`). **Temporary:** the server binary defaults
+  to **8501** while the original desktop app is still in use (it owns 8500
+  and the DB); note the stock Android client hardcodes 8500, so real-tablet
+  testing means closing the original app and running with
+  `DECKBOARD_PORT=8500` (or after the default is flipped back).
 - **ffmpeg optional**: transcoding/normalization happens only when a
   `ffmpeg` binary is found in PATH; otherwise assets are served as-is and
   the client decodes natively (H.264/VP9 in WebView/Media3).
