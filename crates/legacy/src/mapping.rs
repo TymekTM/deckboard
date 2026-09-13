@@ -23,11 +23,6 @@ impl Mapper {
     /// Full board payload for one grid variant.
     /// `max_w`/`max_h`: pass the board dimensions for pro, (4, 3) for basic.
     pub fn board_payload(&self, board: &BoardRow, buttons: &[ButtonRow], pro: bool) -> Value {
-        let (max_w, max_h) = if pro {
-            (board.width, board.height)
-        } else {
-            (4, 3)
-        };
         let shortcuts = self.shortcuts_payload(board, buttons, pro);
         json!({
             "id": board.id,
@@ -45,7 +40,6 @@ impl Mapper {
             "staggered": true,
             "shortcuts": shortcuts,
         })
-        .tap_clamp(max_w, max_h)
     }
 
     /// Mapped buttons + filler cells, filtered to the variant's grid.
@@ -79,27 +73,24 @@ impl Mapper {
 
         mapped
             .into_iter()
-            .filter(|v| {
-                let (x, y, mut w, mut h) = (
-                    v["x"].as_i64().unwrap_or(0),
-                    v["y"].as_i64().unwrap_or(0),
-                    v["w"].as_i64().unwrap_or(1),
-                    v["h"].as_i64().unwrap_or(1),
-                );
+            .filter_map(|mut v| {
+                let x = v["x"].as_i64().unwrap_or(0);
+                let y = v["y"].as_i64().unwrap_or(0);
                 if pro {
-                    x < board.width && y < board.height
+                    (x < board.width && y < board.height).then_some(v)
+                } else if x >= 4 || y >= 3 {
+                    None
                 } else {
-                    if x >= 4 || y >= 3 {
-                        return false;
-                    }
                     // basic variant crops oversized buttons to the 4x3 grid
+                    let w = v["w"].as_i64().unwrap_or(1);
+                    let h = v["h"].as_i64().unwrap_or(1);
                     if x + w - 1 >= 4 {
-                        w = 4 - x;
+                        v["w"] = json!(4 - x);
                     }
                     if y + h - 1 >= 3 {
-                        h = 3 - y;
+                        v["h"] = json!(3 - y);
                     }
-                    true
+                    Some(v)
                 }
             })
             .collect()
@@ -109,7 +100,7 @@ impl Mapper {
     pub fn shortcut_payload(&self, b: &ButtonRow) -> Value {
         let props = self.resolver.props_for(&b.kind, b.command.as_deref());
         let command = transform_command(&b.kind, b.command.as_deref(), &props);
-        let extra = extra_listener(&b.kind, b.command.as_deref(), b.mode.as_str(), &props, &command);
+        let extra = extra_listener(&b.kind, b.command.as_deref(), b.mode.as_str(), &props);
         let mut app = props.app.clone();
 
         // icon from db overrides the type default; prefix follows the icon
@@ -143,13 +134,13 @@ impl Mapper {
         o.insert("board_id".into(), json!(b.board_id));
         o.insert("type".into(), json!(b.kind));
         o.insert("command".into(), json!(command));
-        insert_opt(&mut o, "color", b.color.clone(), props.color, FALLBACK_COLOR);
+        insert_opt(&mut o, "color", b.color.clone(), props.color.clone(), FALLBACK_COLOR);
         insert_opt(&mut o, "color2", b.color2.clone(), props.color.clone(), "");
         insert_opt(&mut o, "img", b.img.clone(), None, "");
         insert_opt(&mut o, "img2", b.img2.clone(), None, "");
         insert_opt(&mut o, "icon_color", b.icon_color.clone(), None, "");
         insert_opt(&mut o, "icon_color2", b.icon_color2.clone(), None, "");
-        insert_opt(&mut o, "position", b.position.map(Value::from), None, "");
+        o.insert("position".into(), json!(b.position));
         o.insert("title".into(), json!(b.title));
         o.insert("title_position".into(), json!(b.title_position));
         o.insert("title_position2".into(), json!(b.title_position2));
@@ -214,7 +205,7 @@ fn transform_command(kind: &str, command: Option<&str>, props: &Props) -> String
 }
 
 /// The `extra` field: which state key the client watches for toggles/graphs.
-fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props, transformed: &str) -> String {
+fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props) -> String {
     let raw = command.unwrap_or_default();
     if let Some(lk) = &props.json_key {
         let _ = lk; // jsonKey types use the type as listener key
@@ -256,14 +247,6 @@ fn parsed(raw: &str, key: &str) -> String {
         .and_then(|v| v.get(key).and_then(Value::as_str).map(str::to_string))
         .unwrap_or_default()
 }
-
-// tiny helper to keep board_payload tidy
-trait TapClamp {
-    fn tap_clamp(self, _w: i64, _h: i64) -> Value {
-        self
-    }
-}
-impl TapClamp for Value {}
 
 #[cfg(test)]
 mod tests {

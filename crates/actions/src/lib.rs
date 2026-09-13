@@ -9,6 +9,8 @@ use std::time::Duration;
 use serde_json::Value;
 use thiserror::Error;
 
+use enigo::{Keyboard as _, Mouse as _};
+
 #[derive(Error, Debug)]
 pub enum ActionError {
     #[error("unsupported command type: {0}")]
@@ -209,7 +211,7 @@ pub fn run_command(
 }
 
 /// Slider value change (`exec_slider {id, value}`), value in 0..1.
-pub fn run_slider_command(input: &mut dyn Input, cmd: &Command, _value: f64) -> Result<()> {
+pub fn run_slider_command(_input: &mut dyn Input, cmd: &Command, _value: f64) -> Result<()> {
     match cmd.kind.as_str() {
         "speaker-volume" | "wheels-volume" | "slider-obs-audio" | "slider-slobs-audio"
         | "obs-audio-slider" | "slobs-audio-slider" => {
@@ -265,7 +267,7 @@ fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Comman
                     .as_deref()
                     .and_then(|s| serde_json::from_str::<Value>(s).ok())
                     .and_then(|v| v.get("id").cloned())
-                    .and_then(Value::as_i64)
+                    .and_then(|v| v.as_i64())
                     .or_else(|| step_cmd.command.as_deref().and_then(|s| s.parse().ok()));
                 if let Some(id) = id {
                     sink.change_board(id);
@@ -363,7 +365,7 @@ fn run_open_file(input: &mut dyn Input, cmd: &Command) -> Result<()> {
     }
     match &cmd.options {
         Some(opts) if !opts.trim().is_empty() => {
-            let args = opts.split_whitespace().map(str::to_string).collect();
+            let args: Vec<String> = opts.split_whitespace().map(str::to_string).collect();
             input.spawn(path, &args)
         }
         _ => input.open_url(path),
@@ -478,12 +480,12 @@ impl Input for EnigoInput {
     fn media(&mut self, key: MediaKey) -> Result<()> {
         use enigo::Key as K;
         let k = match key {
-            MediaKey::PlayPause => K::PlayPause,
-            MediaKey::NextTrack => K::NextTrack,
-            MediaKey::PrevTrack => K::PrevTrack,
+            MediaKey::PlayPause => K::MediaPlayPause,
+            MediaKey::NextTrack => K::MediaNextTrack,
+            MediaKey::PrevTrack => K::MediaPrevTrack,
             MediaKey::VolumeUp => K::VolumeUp,
             MediaKey::VolumeDown => K::VolumeDown,
-            MediaKey::Mute => K::Mute,
+            MediaKey::Mute => K::VolumeMute,
         };
         self.enigo
             .key(k, enigo::Direction::Click)
@@ -625,7 +627,10 @@ mod tests {
         );
         run_command(&mut input, &mut sink, &c, false).unwrap();
         assert!(input.effects.contains(&Effect::Sleep(100)));
-        assert!(input.effects.contains(&Effect::KeyTap(vec![Return])));
+        // multiaction `key` steps perform a full tap: down, 150 ms, up
+        assert!(input.effects.contains(&Effect::KeyDown(vec![Return])));
+        assert!(input.effects.contains(&Effect::Sleep(150)));
+        assert!(input.effects.contains(&Effect::KeyUp(vec![Return])));
         assert!(input.effects.contains(&Effect::OpenUrl("https://example.com".into())));
         assert_eq!(sink.boards, vec![7]);
     }

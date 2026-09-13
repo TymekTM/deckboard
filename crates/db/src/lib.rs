@@ -72,6 +72,7 @@ pub struct ButtonRow {
     pub options: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct Db {
     conn: Connection,
 }

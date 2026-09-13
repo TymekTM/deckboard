@@ -1,0 +1,19 @@
+[package]
+name = "deckboard-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "deckboard-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+deckboard-db = { path = "../../crates/db" }
+deckboard-actions = { path = "../../crates/actions" }
+deckboard-legacy = { path = "../../crates/legacy" }

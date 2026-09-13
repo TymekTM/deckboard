@@ -1,0 +1,57 @@
+//! deckboard-server: M0 spike binary. Serves the legacy socket.io v2
+//! protocol on port 8500 from the existing `~/deckboard/database.db`.
+
+mod backend;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::Context;
+use deckboard_legacy::{router, AppState, Hub};
+use tracing_subscriber::EnvFilter;
+
+use crate::backend::SqlBackend;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .init();
+
+    // Single-writer rule: while this server runs, the original Deckboard
+    // desktop app must be closed (docs/decisions.md). We open read-only so
+    // we can never fight over the file.
+    let db_path = std::env::args()
+        .nth(1)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(deckboard_db::default_db_path);
+    let db = deckboard_db::Db::open_read_only(Some(&db_path))
+        .with_context(|| format!("opening {}", db_path.display()))?;
+    let backend = Arc::new(SqlBackend::new(db));
+
+    let state = Arc::new(AppState {
+        hub: Arc::new(Hub::new()),
+        backend: backend as Arc<dyn deckboard_legacy::Backend>,
+    });
+
+    let port: u16 = std::env::var("DECKBOARD_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8500);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("deckboard legacy server listening on {addr}");
+
+    let hub = state.hub.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let connected = hub.len().await;
+            tracing::debug!(connected, "session stats");
+        }
+    });
+
+    axum::serve(listener, router(state)).await?;
+    Ok(())
+}
