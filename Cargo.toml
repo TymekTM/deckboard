@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/db", "crates/actions", "crates/proto", "crates/legacy", "apps/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+enigo = "0.2"
+open = "5"
+rand = "0.8"
+futures-util = "0.3"
+tokio-tungstenite = "0.24"

@@ -1,0 +1,20 @@
+[package]
+name = "deckboard-legacy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+futures-util = { workspace = true }
+deckboard-db = { path = "../db" }
+deckboard-actions = { path = "../actions" }
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }
+tempfile = "3"

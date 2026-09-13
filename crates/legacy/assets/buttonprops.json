@@ -1,0 +1,316 @@
+{
+ "basic": {
+  "board": {
+   "unicode": "",
+   "color": "#2e3131"
+  },
+  "multiaction": {
+   "unicode": "",
+   "color": "#000000"
+  },
+  "screenshot": {
+   "unicode": "",
+   "color": "#009688"
+  },
+  "key": {
+   "unicode": "",
+   "color": "#EF4836"
+  },
+  "advance-key": {
+   "unicode": "",
+   "color": "#f15a22",
+   "prefix": "fa"
+  },
+  "type": {
+   "unicode": "",
+   "color": "#16A085"
+  },
+  "mouse-ctrl": {
+   "unicode": "",
+   "color": "#EC4899"
+  },
+  "url": {
+   "unicode": "",
+   "color": "#22A7F0"
+  },
+  "dir": {
+   "unicode": "",
+   "color": "#1BA39C"
+  },
+  "play": {
+   "unicode": "",
+   "color": "#F6AC4A"
+  },
+  "vol_up": {
+   "unicode": "",
+   "color": "#F6AC4A"
+  },
+  "vol_down": {
+   "unicode": "",
+   "color": "#F6AC4A"
+  },
+  "vol_mute": {
+   "unicode": "",
+   "color": "#F6AC4A"
+  },
+  "speaker-device": {
+   "unicode": "",
+   "color": "#F6AC4A",
+   "jsonKey": "speaker",
+   "app": "third-party"
+  },
+  "speaker-volume": {
+   "unicode": "",
+   "color": "#F6AC4A"
+  },
+  "app": {
+   "unicode": "",
+   "color": "#3A539B"
+  },
+  "file": {
+   "unicode": "",
+   "color": "#76A5AF"
+  },
+  "spotify-tracks": {
+   "unicode": "",
+   "color": "#1db954",
+   "prefix": "fab"
+  },
+  "spotify-like": {
+   "unicode": "",
+   "color": "#1db954",
+   "prefix": "fas"
+  },
+  "spotify-add": {
+   "unicode": "",
+   "color": "#1db954",
+   "prefix": "fas"
+  },
+  "twitter-post": {
+   "unicode": "",
+   "color": "#1DA1F2",
+   "prefix": "fab"
+  },
+  "obs-scene": {
+   "unicode": "",
+   "color": "#2C3E50",
+   "app": "obs",
+   "toggle_key": "activeScene"
+  },
+  "obs-studio-mode": {
+   "unicode": "",
+   "color": "#2C3E50",
+   "app": "obs",
+   "toggle_key": "studioMode"
+  },
+  "obs-source": {
+   "unicode": "",
+   "color": "#2C3E50",
+   "app": "obs",
+   "toggle_key": "activeSources"
+  },
+  "obs-device-audio": {
+   "unicode": "",
+   "color": "#2C3E50",
+   "app": "obs",
+   "toggle_key": "activeDevices"
+  },
+  "obs-filter": {
+   "unicode": "",
+   "color": "#2C3E50",
+   "app": "obs",
+   "toggle_key": "activeFilters"
+  },
+  "obs-audio-slider": {
+   "unicode": "",
+   "color": "#2C3E50",
+   "app": "obs"
+  },
+  "obs-transition": {
+   "unicode": "",
+   "color": "#2C3E50"
+  },
+  "obs-trigger-transition": {
+   "unicode": "",
+   "color": "#2C3E50"
+  },
+  "slobs-scene": {
+   "unicode": "",
+   "color": "#128079",
+   "app": "slobs",
+   "toggle_key": "activeScene"
+  },
+  "slobs-source": {
+   "unicode": "",
+   "color": "#128079",
+   "app": "slobs",
+   "toggle_key": "activeSources"
+  },
+  "slobs-device-audio": {
+   "unicode": "",
+   "color": "#128079",
+   "app": "slobs",
+   "toggle_key": "activeDevices"
+  },
+  "slobs-audio-slider": {
+   "unicode": "",
+   "color": "#128079",
+   "app": "slobs"
+  },
+  "twitch-follower-count": {
+   "unicode": "",
+   "color": "#6441a5",
+   "app": "custom-value"
+  },
+  "twitch-viewer-count": {
+   "unicode": "",
+   "color": "#6441a5",
+   "app": "custom-value"
+  },
+  "twitch-message": {
+   "unicode": "",
+   "color": "#6441a5",
+   "app": "twitch"
+  },
+  "twitch-marker": {
+   "unicode": "",
+   "color": "#6441a5",
+   "app": "twitch"
+  },
+  "twitch-clip": {
+   "unicode": "",
+   "color": "#6441a5",
+   "app": "twitch"
+  },
+  "twitch-clear": {
+   "unicode": "",
+   "color": "#6441a5",
+   "app": "twitch"
+  },
+  "twitch-ads": {
+   "unicode": "",
+   "color": "#6441a5",
+   "app": "twitch"
+  },
+  "twitch-slow": {
+   "unicode": "",
+   "toggle_key": "slow",
+   "color": "#6441a5",
+   "app": "twitch"
+  },
+  "twitch-follow-only": {
+   "unicode": "",
+   "toggle_key": "followerOnly",
+   "color": "#6441a5",
+   "app": "twitch"
+  },
+  "twitch-subs-only": {
+   "unicode": "",
+   "toggle_key": "subscriberOnly",
+   "color": "#6441a5",
+   "app": "twitch"
+  },
+  "twitch-emote-only": {
+   "unicode": "",
+   "toggle_key": "emoteOnly",
+   "color": "#6441a5",
+   "app": "twitch"
+  },
+  "twitch-chat-box": {
+   "unicode": "",
+   "color": "#6441a5"
+  },
+  "discord-voice-channel": {
+   "unicode": "",
+   "toggle_key": "discord-voice-channel",
+   "jsonKey": "channel",
+   "color": "#7289da",
+   "app": "third-party"
+  },
+  "discord-toggle-mute": {
+   "unicode": "",
+   "toggle_key": "discord-toggle-mute",
+   "color": "#7289da",
+   "app": "third-party"
+  },
+  "discord-toggle-deaf": {
+   "unicode": "",
+   "toggle_key": "discord-toggle-deaf",
+   "color": "#7289da",
+   "app": "third-party"
+  },
+  "vmod-voice": {
+   "unicode": "",
+   "jsonKey": "voice",
+   "app": "third-party",
+   "color": "#171819"
+  },
+  "vmod-sound": {
+   "unicode": "",
+   "color": "#171819"
+  },
+  "vmod-hearmyself": {
+   "unicode": "",
+   "toggle_key": "vmod-hearmyself",
+   "app": "third-party",
+   "color": "#171819"
+  },
+  "vmod-voicechanger": {
+   "unicode": "",
+   "toggle_key": "vmod-voicechanger",
+   "app": "third-party",
+   "color": "#171819"
+  },
+  "vmod-background": {
+   "unicode": "",
+   "toggle_key": "vmod-background",
+   "app": "third-party",
+   "color": "#171819"
+  }
+ },
+ "playback": {
+  "vol_up": {
+   "unicode": "",
+   "color": "#C"
+  },
+  "vol_down": {
+   "unicode": "",
+   "color": "#C"
+  },
+  "vol_mute": {
+   "unicode": "",
+   "color": "#C"
+  },
+  "play": {
+   "unicode": "",
+   "color": "#C"
+  },
+  "next": {
+   "unicode": "",
+   "color": "#C"
+  },
+  "prev": {
+   "unicode": "",
+   "color": "#C"
+  }
+ },
+ "streamControl": {
+  "stream": {
+   "unicode": "",
+   "color": "#C",
+   "prefix": "fab"
+  },
+  "record": {
+   "unicode": "",
+   "color": "#C"
+  },
+  "pause": {
+   "unicode": "",
+   "color": "#C"
+  },
+  "mute": {
+   "unicode": "",
+   "color": "#C"
+  }
+ }
+}

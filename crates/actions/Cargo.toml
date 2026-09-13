@@ -1,0 +1,11 @@
+[package]
+name = "deckboard-actions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+tracing = { workspace = true }
+enigo = { workspace = true }
+open = { workspace = true }
