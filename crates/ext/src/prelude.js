@@ -266,11 +266,15 @@ var __os = {
     loadavg: function () { return [0, 0, 0]; },
     uptime: function () { return 0; },
     cpus: function () {
-        // one synthetic core: si computes load percentages from cpu times
+        // one synthetic core with slowly increasing busy times: si derives
+        // load percentages from the delta between calls, and a constant
+        // counter would produce NaN (0/0)
+        __cpu_tick += 41;
+        __cpu_idle += 400;
         return [{
             model: "CPU",
-            speed: 0,
-            times: { user: 0, nice: 0, sys: 0, idle: 100000, irq: 0 },
+            speed: 2200,
+            times: { user: __cpu_tick, nice: 0, sys: __cpu_tick >> 1, idle: __cpu_idle, irq: 0 },
         }];
     },
     totalmem: function () { return 0; },
@@ -949,6 +953,8 @@ var __builtin_modules = {
     },
 };
 
+var __cpu_tick = 1000;
+var __cpu_idle = 100000;
 var __module_cache = {};
 var __module_stack = [];
 var __ext_exports = null;

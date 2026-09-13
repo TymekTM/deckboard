@@ -45,15 +45,16 @@ val FaSolid = FontFamily(Font(R.font.fa_solid_900))
 
 fun faFamily(prefix: String): FontFamily = if (prefix == "fab") FaBrands else FaSolid
 
-private fun hex(color: String, fallback: Color): Color =
+fun hex(color: String, fallback: Color): Color =
     runCatching { Color(android.graphics.Color.parseColor(color.trim())) }
         .getOrDefault(fallback)
 
-/** shape: 0 = square, 1 = rounded, 2 = circle (matches original renderer). */
+/** shape: 0 = square, 1 = rounded, 2 = circle. Square tiles still get a
+ *  small corner radius so the grid reads softly on a tablet. */
 private fun shapeOf(shape: Int, radius: Float): Shape = when (shape) {
     1 -> RoundedCornerShape(radius)
     2 -> CircleShape
-    else -> RoundedCornerShape(0f)
+    else -> RoundedCornerShape(radius / 2f)
 }
 
 @Composable
@@ -61,6 +62,8 @@ fun Tile(
     shortcut: Shortcut,
     tileSize: androidx.compose.ui.unit.Dp,
     customValue: String?,
+    history: List<Float>,
+    listItems: List<String>,
     position: Int,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
@@ -94,9 +97,12 @@ fun Tile(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        when (shortcut.mode) {
+        when (templateFor(shortcut)) {
             "slider" -> SliderTile(shortcut, color, iconColor, onSlider)
-            "custom-value", "graph" -> CustomValueTile(shortcut, customValue, titleColor)
+            "knob" -> KnobTile(shortcut, color, iconColor, titleColor, onSlider)
+            "graph" -> GraphTile(shortcut, history, titleColor)
+            "list" -> ListTile(shortcut, listItems, titleColor, onPress = onPressEnd)
+            "custom-value" -> CustomValueTile(shortcut, customValue, titleColor)
             else -> ButtonTile(
                 shortcut = shortcut,
                 unicode = unicode,

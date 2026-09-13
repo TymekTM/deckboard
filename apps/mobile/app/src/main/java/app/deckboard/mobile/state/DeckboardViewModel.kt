@@ -57,6 +57,12 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     private val _customValues = MutableStateFlow<Map<String, JsonElement>>(emptyMap())
     val customValues: StateFlow<Map<String, JsonElement>> = _customValues
 
+    /** Value series per key, mirroring the original `setCustomValues`:
+     *  object payloads with a `value` field append to a history capped at
+     *  10 entries; scalars replace in place. */
+    private val _valueHistory = MutableStateFlow<Map<String, List<Float>>>(emptyMap())
+    val valueHistory: StateFlow<Map<String, List<Float>>> = _valueHistory
+
     private val _serverVersion = MutableStateFlow("")
     val serverVersion: StateFlow<String> = _serverVersion
 
@@ -128,6 +134,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
                         is DeckEvent.AppStatus -> {
                             if (ev.app == "APP_CUSTOM_VALUE") {
                                 _customValues.value = _customValues.value + ev.data
+                                _valueHistory.value = updateHistory(_valueHistory.value, ev.data)
                             }
                         }
                         is DeckEvent.Version -> _serverVersion.value = ev.version
@@ -149,6 +156,32 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
                 connect()
             }
         }
+    }
+
+    /** Fold one `app_status_update` batch into the per-key histories. */
+    private fun updateHistory(
+        current: Map<String, List<Float>>,
+        data: Map<String, JsonElement>,
+    ): Map<String, List<Float>> {
+        val out = current.toMutableMap()
+        for ((key, el) in data) {
+            val value = numericOf(el) ?: continue
+            val series = (out[key] ?: emptyList()) + value
+            out[key] = if (series.size > HISTORY_CAP) series.takeLast(HISTORY_CAP) else series
+        }
+        return out
+    }
+
+    private fun numericOf(el: JsonElement): Float? {
+        // graph payloads are objects like {value, title, suffix}; scalars
+        // are the value themselves
+        val raw = when (el) {
+            is kotlinx.serialization.json.JsonObject ->
+                runCatching { el["value"]?.jsonPrimitive?.content }.getOrNull()
+            else ->
+                runCatching { el.jsonPrimitive.content }.getOrNull()
+        } ?: return null
+        return raw.toFloatOrNull()?.takeIf { it.isFinite() }
     }
 
     // -- user interactions ------------------------------------------------
@@ -193,5 +226,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         private const val MAX_RECONNECT = 10
         /** The original app's PRO handshake key: full grid instead of 4x3. */
         const val PRO_ACCESS_KEY = "DCKBRD_PRO_1_3_0"
+        /** The original client keeps the last 10 graph values. */
+        const val HISTORY_CAP = 10
     }
 }

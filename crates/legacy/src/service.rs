@@ -268,6 +268,12 @@ async fn handle_event(
             let backend = state.backend.clone();
             let _ = tokio::task::spawn_blocking(move || backend.slider(button, value)).await;
         }
+        // M5 widget kit: clients declare the templates they render; the
+        // payload today is mode-driven, the manifest tailoring lands with
+        // protocol v2
+        "client_capabilities" => {
+            tracing::info!(session = %session.sid, caps = %args.first().map(|v| v.to_string()).unwrap_or_default(), "client capabilities");
+        }
         other => tracing::debug!(event = other, "unhandled client event"),
     }
 }

@@ -112,6 +112,7 @@ class DeckboardClient(
                 _state.value = ConnState.Connected(host, port)
                 startPingLoop()
                 send("get_version")
+                announceCapabilities()
             }
             '2' -> webSocket?.send("3") // engine ping -> pong
             '3' -> lastPong = System.currentTimeMillis()
@@ -197,6 +198,19 @@ class DeckboardClient(
 
     fun requestBoards() {
         send("get_shortcuts")
+    }
+
+    /** M5 widget kit: declare which templates this client renders so the
+     *  server can tailor payloads (unknown servers just log it). */
+    fun announceCapabilities() {
+        send(
+            "client_capabilities",
+            listOf(
+                json.parseToJsonElement(
+                    """{"client":"deckboard-mobile","version":"0.1.0","capabilities":["button","toggle","slider","knob","graph","list","custom-value"]}""",
+                ),
+            ),
+        )
     }
 
     companion object {
