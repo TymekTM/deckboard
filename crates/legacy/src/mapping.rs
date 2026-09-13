@@ -207,9 +207,12 @@ fn transform_command(kind: &str, command: Option<&str>, props: &Props) -> String
 /// The `extra` field: which state key the client watches for toggles/graphs.
 fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props) -> String {
     let raw = command.unwrap_or_default();
-    if let Some(lk) = &props.json_key {
-        let _ = lk; // jsonKey types use the type as listener key
+    if props.json_key.is_some() {
+        // jsonKey types use the type as the listener key
         return kind.to_string();
+    }
+    if mode == "graph" {
+        return if raw.is_empty() { kind.to_string() } else { raw.to_string() };
     }
     match kind {
         "obs-scene" | "slobs-scene" => raw.to_string(),
@@ -303,6 +306,19 @@ mod tests {
             h,
             options: None,
         }
+    }
+
+    #[test]
+    fn graph_mode_extra_falls_back_to_type() {
+        let m = Mapper::new();
+        let mut b = button("twitch-follower-count", None, 0, 0, 2, 1);
+        b.mode = "graph".into();
+        let s = m.shortcut_payload(&b);
+        assert_eq!(s["extra"], "twitch-follower-count");
+        let mut b = button("custom-metric", Some("my-key"), 0, 0, 2, 1);
+        b.mode = "graph".into();
+        let s = m.shortcut_payload(&b);
+        assert_eq!(s["extra"], "my-key");
     }
 
     #[test]

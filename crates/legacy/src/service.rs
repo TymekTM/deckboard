@@ -113,6 +113,7 @@ async fn socket_post(
     let Some(session) = state.hub.get(&sid).await else {
         return (StatusCode::BAD_REQUEST, "unknown sid").into_response();
     };
+    session.touch().await;
     let raw = decode_post_body(&body);
     for packet in raw.split('\u{1e}').filter(|p| !p.is_empty()) {
         handle_packet(&state, &session, packet).await;
@@ -191,6 +192,13 @@ async fn handle_packet(state: &Arc<AppState>, session: &Arc<Session>, packet: &s
     }
 }
 
+/// `exec_shortcut`/`exec_slider` accept the id as number or string.
+fn arg_id(arg: &serde_json::Value) -> Option<i64> {
+    arg.get("id").and_then(|v| {
+        v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    })
+}
+
 async fn handle_event(
     state: &Arc<AppState>,
     session: &Arc<Session>,
@@ -199,9 +207,10 @@ async fn handle_event(
 ) {
     match name {
         "get_version" => {
+            // the original answers with io.emit - a broadcast, not a reply
             state
                 .hub
-                .broadcast("get_version", Some(r#"{"version":"1.6.0"}"#))
+                .broadcast("get_version", Some(crate::LEGACY_VERSION_PACKET))
                 .await;
         }
         "get_shortcuts" => {
@@ -220,11 +229,8 @@ async fn handle_event(
         }
         "exec_shortcut" => {
             let arg = args.first().cloned().unwrap_or(json!({}));
-            let id = arg.get("id").and_then(|v| {
-                v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-            });
+            let Some(id) = arg_id(&arg) else { return };
             let is_tap_start = arg.get("isTapStart").and_then(|v| v.as_bool()).unwrap_or(false);
-            let Some(id) = id else { return };
             let Some(button) = state.backend.get_button(id) else {
                 tracing::debug!(id, "exec_shortcut: unknown id");
                 return;
@@ -237,7 +243,13 @@ async fn handle_event(
                 }
             }
             let mut sink = Sink(tx);
-            state.backend.exec(button, is_tap_start, &mut sink);
+            // actions may sleep (multiaction delays): keep them off the
+            // async workers
+            let backend = state.backend.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                backend.exec(button, is_tap_start, &mut sink)
+            })
+            .await;
             while let Ok(board_id) = rx.try_recv() {
                 state
                     .hub
@@ -247,16 +259,14 @@ async fn handle_event(
         }
         "exec_slider" => {
             let arg = args.first().cloned().unwrap_or(json!({}));
-            let id = arg.get("id").and_then(|v| {
-                v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-            });
+            let Some(id) = arg_id(&arg) else { return };
             let value = arg.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let Some(id) = id else { return };
             let Some(button) = state.backend.get_button(id) else {
                 tracing::debug!(id, "exec_slider: unknown id");
                 return;
             };
-            state.backend.slider(button, value);
+            let backend = state.backend.clone();
+            let _ = tokio::task::spawn_blocking(move || backend.slider(button, value)).await;
         }
         other => tracing::debug!(event = other, "unhandled client event"),
     }
@@ -311,6 +321,7 @@ async fn ws_loop(state: Arc<AppState>, socket: WebSocket, q: SioQuery) {
     while let Some(msg) = rx.next().await {
         match msg {
             Ok(Message::Text(text)) => {
+                session.touch().await;
                 // EIO=3 upgrade probe, then plain packets
                 match text.as_str() {
                     "2probe" => {

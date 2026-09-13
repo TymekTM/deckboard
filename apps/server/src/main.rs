@@ -42,13 +42,13 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("deckboard legacy server listening on {addr}");
 
+    // Engine.IO: drop sessions silent for longer than pingInterval+pingTimeout
     let hub = state.hub.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let connected = hub.len().await;
-            tracing::debug!(connected, "session stats");
+            hub.reap(75).await;
         }
     });
 

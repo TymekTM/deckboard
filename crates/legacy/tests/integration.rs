@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-use deckboard_actions::{Command, EventSink};
+use deckboard_actions::EventSink;
 use deckboard_db::{BoardRow, ButtonRow};
 use deckboard_legacy::{router, AppState, Backend, Hub};
 use futures_util::{SinkExt, StreamExt};
@@ -88,7 +88,7 @@ fn url_button(id: i64, x: i64, y: i64) -> ButtonRow {
     }
 }
 
-async fn spawn_server(pro: bool) -> (std::net::SocketAddr, Arc<MockBackend>) {
+async fn spawn_server() -> (std::net::SocketAddr, Arc<MockBackend>) {
     let backend = Arc::new(MockBackend::default());
     let state = Arc::new(AppState {
         hub: Arc::new(Hub::new()),
@@ -99,7 +99,6 @@ async fn spawn_server(pro: bool) -> (std::net::SocketAddr, Arc<MockBackend>) {
     tokio::spawn(async move {
         axum::serve(listener, router(state)).await.unwrap();
     });
-    let _ = pro;
     (addr, backend)
 }
 
@@ -128,7 +127,7 @@ fn http(addr: std::net::SocketAddr, method: &str, path: &str, body: Option<&str>
 
 #[tokio::test(flavor = "multi_thread")]
 async fn polling_full_flow() {
-    let (addr, backend) = spawn_server(false).await;
+    let (addr, backend) = spawn_server().await;
 
     // 1. handshake: open packet carries sid, no upgrades info mismatch
     let (status, open) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
@@ -217,7 +216,7 @@ async fn polling_full_flow() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn websocket_direct_flow() {
-    let (addr, _backend) = spawn_server(true).await;
+    let (addr, _backend) = spawn_server().await;
     let url = format!(
         "ws://{addr}/socket.io/?EIO=3&transport=websocket&access_key=DCKBRD_PRO_1_3_0"
     );
@@ -264,7 +263,7 @@ async fn websocket_direct_flow() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn websocket_upgrade_from_polling_session() {
-    let (addr, _backend) = spawn_server(false).await;
+    let (addr, _backend) = spawn_server().await;
 
     // polling session first
     let (_, open) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
@@ -292,7 +291,7 @@ async fn websocket_upgrade_from_polling_session() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn health_page_served() {
-    let (addr, _) = spawn_server(false).await;
+    let (addr, _) = spawn_server().await;
     let (status, body) = http(addr, "GET", "/", None);
     assert_eq!(status, 200);
     assert!(body.contains("Deckboard Server is live"));
@@ -307,7 +306,3 @@ async fn recv_text(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite
     let text = msg.to_text().unwrap().to_string();
     text
 }
-
-// silence unused import in some feature combos
-#[allow(dead_code)]
-fn _touch(_: &Command) {}

@@ -12,4 +12,7 @@ pub use mapping::Mapper;
 pub use props::StyleResolver;
 pub use service::{router, AppState, Backend};
 
+/// The original answers `get_version` with a hardcoded version despite
+/// shipping 3.2.0 - replicated byte for byte (ADR-002).
 pub const LEGACY_VERSION_REPLY: &str = "1.6.0";
+pub const LEGACY_VERSION_PACKET: &str = r#"{"version":"1.6.0"}"#;

@@ -180,9 +180,9 @@ pub fn run_command(
         k if k.starts_with("spotify") || k.starts_with("slobs") || k.starts_with("obs")
             || k.starts_with("xsplit") || k.contains("twitch") || k.starts_with("vmod")
             || k == "speaker-device" || k == "speaker-volume" || k == "play"
-            || k == "screenshot" || k == "twitter-post" =>
+            || k == "screenshot" =>
         {
-            // M0 covers the system-level subset; integrations arrive in M6.
+            // M0 covers the system-level subset; integrations arrive in M7.
             tracing::warn!(kind = k, "command type not implemented yet");
             Ok(())
         }

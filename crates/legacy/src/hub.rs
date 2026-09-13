@@ -47,6 +47,8 @@ pub struct Session {
     pub sid: String,
     pub is_pro: bool,
     transport: Mutex<Transport>,
+    /// Last client activity (poll, packet); drives the ping-timeout reaper.
+    last_seen: Mutex<std::time::Instant>,
 }
 
 impl Session {
@@ -86,6 +88,7 @@ impl Session {
     /// Returns the packets joined by the Engine.IO v3 record separator.
     pub async fn poll(&self, timeout_ms: u64) -> String {
         const SEP: char = '\u{1e}';
+        self.touch().await;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         loop {
             // Grab the polling state (or bail out if a websocket took over).
@@ -109,6 +112,14 @@ impl Session {
             }
         }
     }
+
+    pub async fn touch(&self) {
+        *self.last_seen.lock().await = std::time::Instant::now();
+    }
+
+    pub async fn idle_secs(&self) -> u64 {
+        self.last_seen.lock().await.elapsed().as_secs()
+    }
 }
 
 /// All connected devices. Cheap clones behind the scenes: sessions are Arc'd.
@@ -127,6 +138,7 @@ impl Hub {
         let session = Arc::new(Session {
             sid: sid.clone(),
             is_pro,
+            last_seen: Mutex::new(std::time::Instant::now()),
             transport: Mutex::new(Transport::Polling(Arc::new(PollState {
                 queue: Mutex::new(VecDeque::new()),
                 notify: Notify::new(),
@@ -149,6 +161,29 @@ impl Hub {
 
     pub async fn len(&self) -> usize {
         self.sessions.lock().await.len()
+    }
+
+    /// Drop sessions silent for longer than Engine.IO allows
+    /// (pingInterval + pingTimeout). Returns the number removed.
+    pub async fn reap(&self, max_idle_secs: u64) -> usize {
+        let mut stale = Vec::new();
+        {
+            let sessions = self.sessions.lock().await;
+            for (sid, s) in sessions.iter() {
+                if s.idle_secs().await > max_idle_secs {
+                    stale.push(sid.clone());
+                }
+            }
+        }
+        let mut sessions = self.sessions.lock().await;
+        let mut removed = 0;
+        for sid in stale {
+            if sessions.remove(&sid).is_some() {
+                removed += 1;
+                tracing::info!(sid, "session reaped (ping timeout)");
+            }
+        }
+        removed
     }
 
     /// Emit a socket.io EVENT packet to every connected session.
