@@ -1,0 +1,197 @@
+//! App state: connection lifecycle, boards snapshot, current board, live
+//! custom values. Reconnects with backoff; every (re)connect pulls a full
+//! `get_shortcuts` snapshot (the reconnect rule from ADR-006).
+
+package app.deckboard.mobile.state
+
+import android.app.Application
+import android.content.Context
+import android.util.Log
+import androidx.lifecycle.AndroidViewModel
+import app.deckboard.mobile.net.ConnState
+import app.deckboard.mobile.net.DeckEvent
+import app.deckboard.mobile.net.DeckboardClient
+import app.deckboard.mobile.proto.Board
+import app.deckboard.mobile.proto.Shortcut
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
+data class ServerConfig(val host: String, val port: Int, val accessKey: String)
+
+class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val scope = CoroutineScope(Job())
+
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    private val prefs = app.getSharedPreferences("deckboard", Context.MODE_PRIVATE)
+
+    private val _config = MutableStateFlow(
+        ServerConfig(
+            host = prefs.getString("host", "") ?: "",
+            port = prefs.getInt("port", 8500),
+            accessKey = prefs.getString("accessKey", PRO_ACCESS_KEY) ?: PRO_ACCESS_KEY,
+        ),
+    )
+    val config: StateFlow<ServerConfig> = _config
+
+    private val _connState = MutableStateFlow<ConnState>(ConnState.Disconnected)
+    val connState: StateFlow<ConnState> = _connState
+
+    private val _boards = MutableStateFlow<List<Board>>(emptyList())
+    val boards: StateFlow<List<Board>> = _boards
+
+    private val _currentBoard = MutableStateFlow<Board?>(null)
+    val currentBoard: StateFlow<Board?> = _currentBoard
+
+    /** Merged custom-value state (`app_status_update` data per key). */
+    private val _customValues = MutableStateFlow<Map<String, JsonElement>>(emptyMap())
+    val customValues: StateFlow<Map<String, JsonElement>> = _customValues
+
+    private val _serverVersion = MutableStateFlow("")
+    val serverVersion: StateFlow<String> = _serverVersion
+
+    private var client: DeckboardClient? = null
+    private var eventJob: Job? = null
+    private var reconnectAttempts = 0
+
+    fun saveConfig(cfg: ServerConfig) {
+        prefs.edit()
+            .putString("host", cfg.host)
+            .putInt("port", cfg.port)
+            .putString("accessKey", cfg.accessKey)
+            .apply()
+        _config.value = cfg
+    }
+
+    fun connect() {
+        disconnect()
+        val cfg = _config.value
+        val c = DeckboardClient(cfg.host, cfg.port, cfg.accessKey)
+        client = c
+        observeEvents(c)
+        c.connect()
+    }
+
+    fun disconnect() {
+        eventJob?.cancel()
+        client?.disconnect()
+        client = null
+        _connState.value = ConnState.Disconnected
+        _boards.value = emptyList()
+        _currentBoard.value = null
+        _customValues.value = emptyMap()
+    }
+
+    private fun observeEvents(client: DeckboardClient) {
+        eventJob = scope.launch {
+            launch {
+                client.state.collect { st ->
+                    _connState.value = st
+                    if (st is ConnState.Connected) {
+                        reconnectAttempts = 0
+                        // full snapshot on every (re)connect - ADR-006
+                        client.requestBoards()
+                    }
+                    if (st is ConnState.Failed || st is ConnState.Disconnected) scheduleReconnect()
+                }
+            }
+            launch {
+                client.events.collect { ev ->
+                    when (ev) {
+                        is DeckEvent.Shortcuts -> {
+                            val boards = runCatching {
+                                json.decodeFromJsonElement<List<Board>>(ev.json)
+                            }.getOrElse {
+                                Log.w(TAG, "bad boards payload", it)
+                                emptyList()
+                            }
+                            _boards.value = boards.sortedBy { it.order?.let { o -> o } ?: Int.MAX_VALUE }
+                            // keep selection if still present, else first board
+                            val cur = _currentBoard.value
+                            _currentBoard.value = boards.firstOrNull { it.id == cur?.id } ?: boards.firstOrNull()
+                        }
+                        is DeckEvent.ChangeBoard -> {
+                            _currentBoard.value = _boards.value.firstOrNull { it.id == ev.boardId }
+                                ?: _currentBoard.value
+                        }
+                        DeckEvent.RefreshBoard -> client.requestBoards()
+                        is DeckEvent.AppStatus -> {
+                            if (ev.app == "APP_CUSTOM_VALUE") {
+                                _customValues.value = _customValues.value + ev.data
+                            }
+                        }
+                        is DeckEvent.Version -> _serverVersion.value = ev.version
+                        is DeckEvent.Other -> Log.d(TAG, "event ${ev.name}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun scheduleReconnect() {
+        if (reconnectAttempts >= MAX_RECONNECT) return
+        reconnectAttempts++
+        scope.launch {
+            delay(reconnectAttempts.coerceAtMost(6) * 2_000L)
+            val st = _connState.value
+            if (st is ConnState.Failed || st is ConnState.Disconnected) {
+                Log.i(TAG, "reconnect attempt $reconnectAttempts")
+                connect()
+            }
+        }
+    }
+
+    // -- user interactions ------------------------------------------------
+
+    // Original behavior: only `key` buttons act on touch-down (isTapStart
+    // = true); everything else executes on release. Board buttons switch
+    // boards locally like the stock client (command = `{"id":N}`).
+    fun holdStart(shortcut: Shortcut) {
+        if (shortcut.type == "key") {
+            shortcut.id?.let { client?.execShortcut(it, true) }
+        }
+    }
+
+    fun holdEnd(shortcut: Shortcut) {
+        if (shortcut.type == "board") {
+            val target = runCatching {
+                json.parseToJsonElement(shortcut.command).jsonObject["id"]
+                    ?.jsonPrimitive?.content?.toLong()
+            }.getOrNull()
+            if (target != null) {
+                _boards.value.firstOrNull { it.id == target }?.let { selectBoard(it) }
+                return
+            }
+        }
+        shortcut.id?.let { client?.execShortcut(it, false) }
+    }
+
+    fun slider(shortcut: Shortcut, value: Float) {
+        shortcut.id?.let { client?.execSlider(it, value) }
+    }
+
+    fun refresh() {
+        client?.requestBoards()
+    }
+
+    fun selectBoard(board: Board) {
+        _currentBoard.value = board
+    }
+
+    companion object {
+        private const val TAG = "DeckboardViewModel"
+        private const val MAX_RECONNECT = 10
+        /** The original app's PRO handshake key: full grid instead of 4x3. */
+        const val PRO_ACCESS_KEY = "DCKBRD_PRO_1_3_0"
+    }
+}
