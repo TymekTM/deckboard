@@ -129,6 +129,11 @@ pub struct Welcome {
     #[ts(type = "number")]
     pub generation: u64,
     pub device: Device,
+    /// The device token, carried ONLY in the welcome that completes a
+    /// pairing (the client stores it and authenticates with it later).
+    /// Token reconnects omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     #[serde(default, skip_serializing_if = "map_is_empty")]
     pub channels: std::collections::BTreeMap<String, ChannelInfo>,
 }
@@ -355,11 +360,19 @@ pub enum StateShape {
 pub struct Style {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// State-dependent colors: `color2` shows while the tile's channel is
+    /// in its active state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color2: Option<String>,
     /// FontAwesome glyph as a unicode character (already resolved).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Active-state glyph (e.g. mic -> mic-slash); paired with `color2`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon2: Option<String>,
+    /// Font family for the glyphs: `"fas"` (default) or `"fab"` (brands).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_family: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -31,6 +31,23 @@ struct Inner {
     dirty: BTreeSet<String>,
 }
 
+/// A series push must reduce to one number. Legacy producers push display
+/// objects (`{"value": "45.2", "suffix": "%"}`) or strings with units, so
+/// unwrap `value` and take the leading numeric part before giving up.
+fn series_point(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+'))
+            .collect::<String>()
+            .parse()
+            .ok(),
+        serde_json::Value::Object(map) => map.get("value").and_then(series_point),
+        _ => None,
+    }
+}
+
 pub struct StateEngine {
     inner: Mutex<Inner>,
     default_cap: u32,
@@ -84,7 +101,7 @@ impl StateEngine {
             .or_insert(ChannelMeta { shape: StateShape::Scalar, cap: self.default_cap });
         match meta.shape {
             StateShape::Series => {
-                let Some(point) = value.as_f64() else {
+                let Some(point) = series_point(&value) else {
                     tracing::warn!(channel, "non-numeric value for series channel dropped");
                     return;
                 };
@@ -203,6 +220,25 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].value, serde_json::json!(4.0)); // newest point only
         assert!(engine.drain_dirty().is_empty());
+    }
+
+    #[test]
+    fn series_accepts_legacy_display_shapes() {
+        // Producers from the legacy era push display objects and strings
+        // with units; both must still chart.
+        let engine = StateEngine::new(120);
+        engine.register("ext.si-load-cpu", StateShape::Series, None);
+        engine.set(
+            "ext.si-load-cpu",
+            serde_json::json!({"title": "CPU Load", "value": "45.2", "suffix": "%"}),
+        );
+        engine.set("ext.si-load-cpu", serde_json::json!("31%"));
+        engine.set("ext.si-load-cpu", serde_json::json!(7));
+        engine.set("ext.si-load-cpu", serde_json::json!({"value": 9.5}));
+        engine.set("ext.si-load-cpu", serde_json::json!("sensors unavailable"));
+        engine.set("ext.si-load-cpu", serde_json::json!(null));
+        let sync = engine.snapshot();
+        assert_eq!(sync.series["ext.si-load-cpu"], vec![45.2, 31.0, 7.0, 9.5]);
     }
 
     #[test]

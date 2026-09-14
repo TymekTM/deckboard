@@ -66,6 +66,12 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
         .as_deref()
         .filter(|img| !img.is_empty())
         .and_then(|img| assets.import_data_url(img));
+    let mut params: Value = row
+        .options
+        .as_deref()
+        .and_then(|o| serde_json::from_str(o).ok())
+        .unwrap_or(Value::Null);
+    apply_implicit_params(row, &mut params);
 
     Tile {
         id: row.id,
@@ -77,11 +83,7 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
         },
         manifest: WidgetManifest {
             kind,
-            params: row
-                .options
-                .as_deref()
-                .and_then(|o| serde_json::from_str(o).ok())
-                .unwrap_or(Value::Null),
+            params,
             state,
             interactions,
             style: Some(style(row, &legacy)),
@@ -100,6 +102,31 @@ pub fn allowed_interactions(row: &ButtonRow) -> Vec<Interaction> {
     widget_kind(row, &legacy).1
 }
 
+/// `params.hold.repeat: {delay_ms, interval_ms}` - the server-side
+/// hold-to-repeat configuration.
+pub fn hold_repeat_config(params: &Value) -> Option<(u64, u64)> {
+    let repeat = params.get("hold")?.get("repeat")?;
+    let delay_ms = repeat.get("delay_ms")?.as_u64()?;
+    let interval_ms = repeat.get("interval_ms")?.as_u64()?;
+    (delay_ms > 0 && interval_ms > 0).then_some((delay_ms, interval_ms))
+}
+
+/// Legacy semantics that live outside the widget manifest get an
+/// explicit params hint here, so clients never need to know legacy type
+/// strings: the clock display tile announces itself as a clock widget.
+fn apply_implicit_params(row: &ButtonRow, params: &mut Value) {
+    if row.kind != "clock-display-time" {
+        return;
+    }
+    if !params.is_object() {
+        *params = Value::Object(serde_json::Map::new());
+    }
+    let obj = params.as_object_mut().expect("just made an object");
+    obj.insert("widget".into(), Value::String("clock".into()));
+    let format = if row.command.as_deref() == Some("clock-12h") { "12h" } else { "24h" };
+    obj.insert("clock_format".into(), Value::String(format.into()));
+}
+
 /// Widget kind from the legacy `mode`/`app` columns: rendering modes map
 /// 1:1, custom-value buttons are toggles, everything else is a button.
 fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>) {
@@ -110,10 +137,25 @@ fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>
         "graph" => (WidgetKind::Graph, vec![]),
         "list" => (WidgetKind::List, vec![]),
         _ if app == Some("custom-value") => (WidgetKind::Toggle, vec![Interaction::Tap]),
-        _ => (
-            WidgetKind::Button,
-            vec![Interaction::Tap, Interaction::PressStart, Interaction::PressEnd],
-        ),
+        _ => {
+            // Press semantics are declared, not implied: key-style
+            // commands act on touch down/up and configured holds need the
+            // press pair for the server-side repeat; every other button
+            // fires once on release.
+            let params: Value = row
+                .options
+                .as_deref()
+                .and_then(|o| serde_json::from_str(o).ok())
+                .unwrap_or(Value::Null);
+            let press_pair = matches!(row.kind.as_str(), "key" | "advance-key")
+                || hold_repeat_config(&params).is_some();
+            let interactions = if press_pair {
+                vec![Interaction::Tap, Interaction::PressStart, Interaction::PressEnd]
+            } else {
+                vec![Interaction::Tap]
+            };
+            (WidgetKind::Button, interactions)
+        }
     }
 }
 
@@ -133,10 +175,14 @@ fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<St
 fn style(row: &ButtonRow, legacy: &Value) -> Style {
     let color = legacy.get("color").and_then(Value::as_str);
     let unicode = legacy.get("unicode").and_then(Value::as_str);
+    let unicode2 = legacy.get("unicode2").and_then(Value::as_str);
+    let prefix = legacy.get("prefix").and_then(Value::as_str);
     Style {
         color: non_empty(color),
         color2: non_empty(row.color2.as_deref()),
         icon: non_empty(unicode),
+        icon2: non_empty(unicode2),
+        icon_family: non_empty(prefix),
         title: non_empty(row.title.as_deref()),
         // Legacy shape column is an int (0 = default); pass non-defaults
         // through so the client can render them.
@@ -234,6 +280,48 @@ mod tests {
         assert_eq!(state.channel, "ext.cpu-key"); // raw command wins when set
         assert_eq!(state.shape, StateShape::Series);
         assert_eq!(engine.catalog()["ext.cpu-key"].cap, Some(120));
+    }
+
+    #[test]
+    fn key_and_hold_buttons_declare_press_pair() {
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let tile = build_tile(&row("key", "button", Some("A")), &assets, &engine);
+        assert_eq!(
+            tile.manifest.interactions,
+            vec![Interaction::Tap, Interaction::PressStart, Interaction::PressEnd]
+        );
+        let mut r = row("vol", "button", Some("vol_down"));
+        r.options = Some(r#"{"hold":{"repeat":{"delay_ms":400,"interval_ms":120}}}"#.into());
+        let tile = build_tile(&r, &assets, &engine);
+        assert!(tile.manifest.interactions.contains(&Interaction::PressStart));
+    }
+
+    #[test]
+    fn clock_tile_announces_itself_in_params() {
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let mut r = row("clock-display-time", "button", Some("clock-12h"));
+        r.title = None;
+        let tile = build_tile(&r, &assets, &engine);
+        let params = tile.manifest.params;
+        assert_eq!(params["widget"], "clock");
+        assert_eq!(params["clock_format"], "12h");
+    }
+
+    #[test]
+    fn style_carries_active_state_and_font_family() {
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let mut r = row("toggle-headphone", "button", None);
+        r.icon = Some("headphones".into());
+        r.icon2 = Some("deaf".into());
+        r.color2 = Some("#ED4245".into());
+        let tile = build_tile(&r, &assets, &engine);
+        let style = tile.manifest.style.unwrap();
+        assert_eq!(style.icon_family.as_deref(), Some("fas"));
+        assert!(style.icon2.is_some(), "icon2 resolved from the icon2 column");
+        assert_eq!(style.color2.as_deref(), Some("#ED4245"));
     }
 
     #[test]

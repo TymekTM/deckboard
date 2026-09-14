@@ -303,6 +303,13 @@ async fn pairing_flow_mints_welcome_and_device() {
     let (welcome, _sync, _state_sync) = handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
     assert_eq!(welcome.device.name, "Test tablet");
     assert_eq!(welcome.protocol, PROTOCOL_VERSION);
+    // Pairing issues the token: the client stores it and reconnects with it.
+    let token = welcome.token.as_deref().expect("pairing issues a token");
+    assert!(!token.is_empty());
+    let mut reconnected = ws_open(&format!("ws://{addr}/v2/ws?token={token}")).await;
+    let (again, _, _) = handshake(&mut reconnected, "deckboard-mobile", "0.2.0").await;
+    assert_eq!(again.device.id, welcome.device.id);
+    assert!(again.token.is_none(), "token reconnects omit the secret");
     // The code burned on use: a second pairing with it fails on the socket.
     let mut burned = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
     send_frame(&mut burned, &Frame::request(TYPE_HELLO, "h9", serde_json::json!({"client": "deckboard-mobile", "version": "0.2.0"}))).await;

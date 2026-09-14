@@ -81,8 +81,10 @@ last_seen}`; `id` and `token` are random hex, 16 and 32 bytes).
    device *tokens* get an HTTP 401 at the upgrade.
 3. The desktop shows "Trust this device?" using the `hello` name. M1:
    auto-accept with a warning log (no UI yet).
-4. On trust: a device entry is created, `welcome` flows, the tablet stores
-   the token (Android: `EncryptedSharedPreferences`).
+4. On trust: a device entry is created and `welcome` carries the new
+   `token` - the only time the secret travels on the wire, and only to the
+   connection that just presented a valid pairing code. The tablet stores
+   it (Android: `EncryptedSharedPreferences`).
 5. Every later connect uses `?token=...`; no prompt. A non-empty
    `hello.name` may rename the paired device - the change is persisted to
    `devices.json` so the welcome and the desktop device list agree.
@@ -108,6 +110,7 @@ QR payload: `deckboard://<host>:<port>?pair=<CODE>`.
   "payload": { "protocol": 2, "desktop_version": "0.1.0",
                "min_client": "0.0.0", "generation": 7,
                "device": { "id": "9ab...", "name": "Tablet salon" },
+               "token": "64-hex-chars...",
                "channels": { "ext.si-cpu-usage": { "shape": "series", "cap": 120 } } } }
 ```
 
@@ -145,9 +148,12 @@ Boards are data. One board:
   photo, video). Legacy `img`/`img2` data URLs are converted to store
   entries on the fly when the server builds a sync; tiles whose image
   cannot be converted simply omit it.
-- `style`: `color`/`color2`/`icon` (unicode char)/`title`/`shape` - all
-  optional, resolved server-side the same way the legacy mapper resolves
-  them (DB value → type default → fallback).
+- `style`: `color`/`color2`/`icon`/`icon2`/`icon_family` (`fas`|`fab`,
+  resolved glyph fonts)/`title`/`shape` - all optional, resolved
+  server-side the same way the legacy mapper resolves them (DB value →
+  type default → fallback). `color2`/`icon2` are the active-state pair:
+  the client swaps to them while the tile's channel reports its active
+  value (e.g. `"ON"`).
 - `interactions` lists the gestures the tile accepts (section 6).
 
 ### boards.sync (server → client, full snapshot)
@@ -236,6 +242,12 @@ Client → server, one frame per user gesture:
 - Kinds: `tap`, `press-start`, `press-end`, `slide` (`args.value`, 0..1),
   `wheel` (`args.delta`), `drag` (`args.dx`, `args.dy`). `press-start` /
   `press-end` replace the legacy `isTapStart` bool pair.
+- Clients send only gestures the tile declares in `interactions`.
+  Declarations: plain buttons declare `tap` (fire once on release);
+  key-style commands and tiles with `params.hold.repeat` declare
+  `tap` + `press-start` + `press-end` (down/up semantics, hold-to-repeat);
+  sliders/knobs declare `slide`; displays declare none. The server
+  rejects undeclared gestures with `unsupported-interaction`.
 - The server validates the tile exists and answers
   `ack {ok: true}` (payload `{}`) or `error` (`unknown-tile`,
   `unsupported-interaction` for gestures the tile/backend cannot serve,

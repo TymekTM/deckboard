@@ -143,6 +143,8 @@ async fn run_session(
     }
 
     // 2) Resolve the device: known token, or consume the pairing code.
+    // A fresh pairing issues the token to the device via `welcome.token`.
+    let mut issued_token: Option<String> = None;
     let device = match auth {
         Auth::Device(device) => {
             match hello.name.as_deref().filter(|n| !n.is_empty()) {
@@ -157,7 +159,9 @@ async fn run_session(
             Ok(()) => {
                 let name = hello.name.clone().unwrap_or_else(|| "Device".into());
                 tracing::warn!(session = session.id, name = %name, "pairing auto-accepted (no UI yet)");
-                state.devices.create(&name)
+                let device = state.devices.create(&name);
+                issued_token = Some(device.token.clone());
+                device
             }
             Err(PairError::Expired) => {
                 session.send_frame(&error_ack(&frame, error_code::PAIR_EXPIRED, "pairing code expired"));
@@ -181,6 +185,7 @@ async fn run_session(
         min_client: state.config.min_client.clone(),
         generation: state.generation.get(),
         device: Device { id: device.id, name: device.name },
+        token: issued_token,
         channels: state.engine.catalog(),
     };
     session.send_frame(&Frame {
@@ -319,7 +324,8 @@ fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Fra
         Interaction::PressStart => {
             ack_ok();
             exec_once(state, button.clone(), true);
-            if let Some((delay_ms, interval_ms)) = hold_repeat_config(&button) {
+            let params: Value = serde_json::from_str(button.options.as_deref().unwrap_or("")).unwrap_or(Value::Null);
+            if let Some((delay_ms, interval_ms)) = crate::boards::hold_repeat_config(&params) {
                 start_hold(state, session.clone(), button.clone(), delay_ms, interval_ms);
             }
         }
@@ -340,15 +346,6 @@ fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Fra
             session.send_frame(&error_ack(&frame, error_code::UNSUPPORTED_INTERACTION, "gesture not declared for this tile"));
         }
     }
-}
-
-/// `params.hold.repeat: {delay_ms, interval_ms}` on the tile.
-fn hold_repeat_config(button: &ButtonRow) -> Option<(u64, u64)> {
-    let options: Value = serde_json::from_str(button.options.as_deref().unwrap_or("")).ok()?;
-    let repeat = options.get("hold")?.get("repeat")?;
-    let delay_ms = repeat.get("delay_ms")?.as_u64()?;
-    let interval_ms = repeat.get("interval_ms")?.as_u64()?;
-    (delay_ms > 0 && interval_ms > 0).then_some((delay_ms, interval_ms))
 }
 
 fn start_hold(state: &Arc<V2State>, session: Arc<V2Session>, button: ButtonRow, delay_ms: u64, interval_ms: u64) {
@@ -443,11 +440,30 @@ mod tests {
 
     #[test]
     fn hold_config_parsing() {
-        let mut row = ButtonRow {
-            id: 10,
+        let parse = |options: &str| {
+            let params: Value = serde_json::from_str(options).unwrap();
+            crate::boards::hold_repeat_config(&params)
+        };
+        assert_eq!(
+            parse(r#"{"hold":{"repeat":{"delay_ms":400,"interval_ms":120}}}"#),
+            Some((400, 120))
+        );
+        assert_eq!(parse(r#"{"hold":{}}"#), None);
+        assert_eq!(parse(r#"{"hold":{"repeat":{"delay_ms":0,"interval_ms":5}}}"#), None);
+        assert_eq!(parse("{}"), None);
+    }
+
+    #[test]
+    fn interaction_declarations_follow_command_style() {
+        use deckboard_proto::Interaction;
+        fn allowed(row: &ButtonRow) -> Vec<Interaction> {
+            crate::boards::allowed_interactions(row)
+        }
+        let mk = |kind: &str, options: Option<String>| ButtonRow {
+            id: 1,
             board_id: 1,
-            kind: "key".into(),
-            command: Some("A".into()),
+            kind: kind.into(),
+            command: Some("x".into()),
             title: None,
             title_position: 0,
             title_color: None,
@@ -474,14 +490,16 @@ mod tests {
             y: Some(0),
             w: 1,
             h: 1,
-            options: Some(r#"{"hold":{"repeat":{"delay_ms":400,"interval_ms":120}}}"#.into()),
+            options,
         };
-        assert_eq!(hold_repeat_config(&row), Some((400, 120)));
-        row.options = Some(r#"{"hold":{}}"#.into());
-        assert_eq!(hold_repeat_config(&row), None);
-        row.options = None;
-        assert_eq!(hold_repeat_config(&row), None);
-        row.options = Some(r#"{"hold":{"repeat":{"delay_ms":0,"interval_ms":5}}}"#.into());
-        assert_eq!(hold_repeat_config(&row), None);
+        let plain = allowed(&mk("url", None));
+        assert_eq!(plain, vec![Interaction::Tap]);
+        let key = allowed(&mk("key", None));
+        assert!(key.contains(&Interaction::PressStart) && key.contains(&Interaction::PressEnd));
+        let hold = allowed(&mk(
+            "vol",
+            Some(r#"{"hold":{"repeat":{"delay_ms":400,"interval_ms":120}}}"#.into()),
+        ));
+        assert!(hold.contains(&Interaction::PressStart));
     }
 }
