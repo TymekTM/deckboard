@@ -90,6 +90,10 @@ fun Tile(
     )
     val titleColor = hex(if (active) shortcut.titleColor2 else shortcut.titleColor, Color.White)
 
+    // graph tiles are pure displays with no gesture: they sit flat on the
+    // board instead of raised like the physical keys everything else emulates
+    val raised = templateFor(shortcut) != "graph"
+
     // physical key feedback: tiles sit raised with a hard shadow cast to
     // the bottom-right; pressing sinks the face (scale + shift toward the
     // shadow) and softens the shadow, release pops back with a small
@@ -135,13 +139,15 @@ fun Tile(
     ) {
         // hard offset shadow behind the face, not clipped so it bleeds
         // into the grid gap like a real drop shadow
-        Box(
-            Modifier
-                .matchParentSize()
-                .offset(x = 4.dp, y = 4.dp)
-                .clip(shape)
-                .background(Color.Black.copy(alpha = shadowAlpha)),
-        )
+        if (raised) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .offset(x = 4.dp, y = 4.dp)
+                    .clip(shape)
+                    .background(Color.Black.copy(alpha = shadowAlpha)),
+            )
+        }
         Box(
             Modifier
                 .matchParentSize()
