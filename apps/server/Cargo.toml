@@ -19,6 +19,7 @@ tracing-subscriber = { workspace = true }
 deckboard-db = { path = "../../crates/db" }
 deckboard-proto = { path = "../../crates/proto" }
 deckboard-actions = { path = "../../crates/actions" }
+deckboard-os = { path = "../../crates/os" }
 deckboard-legacy = { path = "../../crates/legacy" }
 deckboard-v2 = { path = "../../crates/v2" }
 deckboard-ext = { path = "../../crates/ext" }

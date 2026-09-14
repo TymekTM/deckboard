@@ -23,10 +23,17 @@ through a legacy compatibility layer until the new client ships.
       and server-side hold-to-repeat, `board.open`, hashed assets on
       `/assets/<sha256>`, WS-level pings (60 s) + watchdog. Spec:
       `docs/protocol-v2.md`. The Kotlin client migrates to v2 in M4.
-- [ ] **M2 - Action engine complete**: remaining command types (audio
-      volume via windows-rs, speaker-device, screenshot, clipboard-based
-      unicode typing, media info), audio/device status watchers
-      (5 s / 60 s like the original) pushing v2 channels.
+- [x] **M2 - Action engine complete** (`crates/os`): master volume/mute
+      and default-device switching via WASAPI + IPolicyConfig (no
+      PowerShell dependency, unlike the original), `speaker-device` /
+      `speaker-volume` commands live, screenshot as
+      `Deckboard_<UTC stamp>.png`, `type` via clipboard paste with
+      restore (unicode-safe). Status watcher pushes volume + mute every
+      5 s and the device id every 30 s (the original's real cadence)
+      over legacy `app_status_update` and the v2 state engine. Media
+      info was dropped: the original app has no such command (zero
+      references in its bundle). Linux support: the `Speaker` trait is
+      the seam - swap in an ALSA/PipeWire implementation.
 - [ ] **M3 - Desktop editor (MVP gate)**: Tauri 2 + Vue 3 editor: boards,
       buttons, sliders CRUD, drag/resize, dual-state, `.boardjson`
       import/export (format-compatible), touch mode, tray, hotkeys,

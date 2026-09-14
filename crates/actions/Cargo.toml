@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+deckboard-os = { path = "../os" }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 enigo = { workspace = true }

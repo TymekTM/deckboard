@@ -24,6 +24,15 @@ pub trait Backend: Send + Sync + 'static {
     fn get_button(&self, id: i64) -> Option<deckboard_db::ButtonRow>;
     fn exec(&self, button: deckboard_db::ButtonRow, is_tap_start: bool, sink: &mut dyn deckboard_actions::EventSink);
     fn slider(&self, button: deckboard_db::ButtonRow, value: f64);
+    /// M2 speaker watcher snapshots: master volume percent, muted flag.
+    /// Defaults suit backends without speaker support.
+    fn speaker_status(&self) -> (Option<f32>, Option<bool>) {
+        (None, None)
+    }
+    /// Endpoint id of the current default playback device.
+    fn speaker_device_id(&self) -> Option<String> {
+        None
+    }
 }
 
 pub struct AppState {
@@ -238,8 +247,10 @@ async fn handle_event(
             tracing::info!(id, kind = %button.kind, "exec_shortcut");
             let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
             let (val_tx, mut val_rx) = mpsc::unbounded_channel::<(String, String)>();
+            let (third_tx, mut third_rx) = mpsc::unbounded_channel::<(String, String)>();
             struct Sink(
                 tokio::sync::mpsc::UnboundedSender<i64>,
+                tokio::sync::mpsc::UnboundedSender<(String, String)>,
                 tokio::sync::mpsc::UnboundedSender<(String, String)>,
             );
             impl deckboard_actions::EventSink for Sink {
@@ -249,8 +260,11 @@ async fn handle_event(
                 fn app_value(&mut self, key: &str, value: &str) {
                     let _ = self.1.send((key.to_string(), value.to_string()));
                 }
+                fn third_party_value(&mut self, key: &str, value: &str) {
+                    let _ = self.2.send((key.to_string(), value.to_string()));
+                }
             }
-            let mut sink = Sink(tx, val_tx);
+            let mut sink = Sink(tx, val_tx, third_tx);
             // actions may sleep (multiaction delays): keep them off the
             // async workers
             let backend = state.backend.clone();
@@ -267,6 +281,11 @@ async fn handle_event(
             while let Ok((key, value)) = val_rx.try_recv() {
                 let data = serde_json::json!({ key: value }).to_string();
                 let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+                state.hub.broadcast("app_status_update", Some(&payload)).await;
+            }
+            while let Ok((key, value)) = third_rx.try_recv() {
+                let data = serde_json::json!({ key: value }).to_string();
+                let payload = format!(r#"{{"app":"THIRD_PARTY_APP","data":{data}}}"#);
                 state.hub.broadcast("app_status_update", Some(&payload)).await;
             }
         }

@@ -26,6 +26,9 @@ pub struct SqlBackend {
     /// plus the settings path, so fresh tokens can be persisted.
     discord: Mutex<Option<DiscordConfig>>,
     discord_settings_path: Option<std::path::PathBuf>,
+    /// Default-playback control (volume, mute, device switch), built on
+    /// first use - the original's speaker service.
+    speaker: Mutex<Option<Box<dyn deckboard_os::Speaker>>>,
 }
 
 impl SqlBackend {
@@ -37,6 +40,7 @@ impl SqlBackend {
             voicemeeter: Mutex::new(VoicemeeterState::new()),
             discord: Mutex::new(None),
             discord_settings_path: None,
+            speaker: Mutex::new(None),
         }
     }
 
@@ -107,6 +111,76 @@ impl SqlBackend {
             None => tracing::warn!(kind = "url-to-call", "tile has no urlToCall configured"),
         }
         true
+    }
+
+    /// Run the default-playback control on the lazy speaker instance.
+    /// None means the platform has no speaker support.
+    fn with_speaker<R>(
+        &self,
+        f: impl FnOnce(&mut (dyn deckboard_os::Speaker + 'static)) -> R,
+    ) -> Option<R> {
+        let mut slot = self.speaker.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(Box::new(deckboard_os::platform_speaker()));
+        }
+        slot.as_deref_mut().map(f)
+    }
+
+    /// `speaker-device` command: `{"speaker": "<endpoint id>"}` switches
+    /// the default output, like the original `setActiveOutputDevice`.
+    /// Returns true when the kind belongs to the speaker service.
+    fn exec_speaker(&self, cmd: &Command, sink: &mut dyn EventSink) -> bool {
+        if cmd.kind != "speaker-device" {
+            return false;
+        }
+        let id = cmd
+            .command
+            .as_deref()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+            .and_then(|v| v.get("speaker").and_then(|s| s.as_str()).map(str::to_string));
+        let Some(id) = id else {
+            tracing::warn!(kind = "speaker-device", "tile has no speaker id configured");
+            return true;
+        };
+        self.with_speaker(|sp| {
+            if let Err(e) = sp.set_active_device(&id) {
+                tracing::warn!(error = %e, "speaker-device switch failed");
+                return;
+            }
+            // the original pushes the new id right after a successful switch
+            sink.third_party_value("speaker-device", &id);
+            sink.app_value("speaker-device", &id);
+        });
+        true
+    }
+
+    /// Master volume from a `speaker-volume` slider, percent 0..=100 like
+    /// the original `setVolume(100 * e)`.
+    fn exec_speaker_volume(&self, value: f64) -> bool {
+        if !self.speaker_claims("speaker-volume") {
+            return false;
+        }
+        self.with_speaker(|sp| {
+            if let Err(e) = sp.set_volume(value as f32 * 100.0) {
+                tracing::warn!(error = %e, "speaker-volume set failed");
+            }
+        });
+        true
+    }
+
+    fn speaker_claims(&self, kind: &str) -> bool {
+        matches!(kind, "speaker-device" | "speaker-volume")
+    }
+
+    /// Watcher snapshots: master volume in percent / muted flag / default
+    /// device endpoint id. None where the platform has no support.
+    pub fn speaker_status(&self) -> (Option<f32>, Option<bool>) {
+        self.with_speaker(|sp| (sp.volume().ok(), sp.muted().ok()))
+            .unwrap_or((None, None))
+    }
+
+    pub fn speaker_device_id(&self) -> Option<String> {
+        self.with_speaker(|sp| sp.active_device().ok()).flatten()
     }
 
     /// Run `vm-*` actions against the Voicemeeter remote DLL. Only tried
@@ -263,6 +337,7 @@ impl Backend for SqlBackend {
             || self.exec_callurl(&cmd)
             || self.exec_voicemeeter(&cmd)
             || self.exec_discord(&cmd, sink)
+            || self.exec_speaker(&cmd, sink)
         {
             return;
         }
@@ -282,6 +357,7 @@ impl Backend for SqlBackend {
             || self.exec_sysinfo(&cmd)
             || self.exec_callurl(&cmd)
             || self.exec_voicemeeter(&cmd)
+            || self.exec_speaker_volume(value)
         {
             return;
         }

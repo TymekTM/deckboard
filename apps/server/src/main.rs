@@ -196,6 +196,53 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // M2 speaker watcher: master volume + mute every 5s, default device
+    // id every 6th cycle (30s) - the original speaker service cadence.
+    {
+        let backend = state.backend.clone();
+        let feed = feed_v2.clone();
+        let hub = state.hub.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut cycle = 0u32;
+            loop {
+                tick.tick().await;
+                cycle = (cycle + 1) % 6;
+                let backend = backend.clone();
+                let with_device = cycle == 0;
+                let snapshot = tokio::task::spawn_blocking(move || {
+                    let (volume, muted) = backend.speaker_status();
+                    let device =
+                        if with_device { backend.speaker_device_id() } else { None };
+                    (volume, muted, device)
+                })
+                .await
+                .ok();
+                if let Some((volume, muted, device)) = snapshot {
+                    if let (Some(volume), Some(muted)) = (volume, muted) {
+                        // one decimal-free fraction like the original n/100
+                        let level = (volume / 100.0 * 1000.0).round() / 1000.0;
+                        feed(serde_json::json!({
+                            "speaker-volume": level,
+                            "speaker-muted": muted,
+                        }));
+                        let payload = format!(
+                            r#"{{"app":"APP_CUSTOM_VALUE","data":{{"speaker-volume":{level},"speaker-muted":{muted}}}}}"#
+                        );
+                        hub.broadcast("app_status_update", Some(&payload)).await;
+                    }
+                    if let Some(device) = device {
+                        feed(serde_json::json!({ "speaker-device": device }));
+                        let payload = format!(
+                            r#"{{"app":"THIRD_PARTY_APP","data":{{"speaker-device":"{device}"}}}}"#
+                        );
+                        hub.broadcast("app_status_update", Some(&payload)).await;
+                    }
+                }
+            }
+        });
+    }
+
     // v2 background task: coalesced state patches.
     tokio::spawn(deckboard_v2::run_flusher(
         v2.engine.clone(),
