@@ -340,15 +340,27 @@ native!(host_write_file, |args, _ctx| {
     Ok(JsValue::from(std::fs::write(&p, content).is_ok()))
 });
 
+// Extension commands must never flash a console window: without
+// CREATE_NO_WINDOW every `cmd /C` poll (steam-launcher runs tasklist on a
+// timer) pops up a visible terminal. Children inherit the hidden console.
+#[cfg(windows)]
+fn shell_command(cmd: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = std::process::Command::new("cmd");
+    c.args(["/C", cmd]).creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    c
+}
+
+#[cfg(not(windows))]
+fn shell_command(cmd: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("sh");
+    c.args(["-c", cmd]);
+    c
+}
+
 native!(host_shell_exec, |args, ctx| {
     let cmd = arg_str(args, 0);
-    let output = if cfg!(windows) {
-        std::process::Command::new("cmd")
-            .args(["/C", &cmd])
-            .output()
-    } else {
-        std::process::Command::new("sh").args(["-c", &cmd]).output()
-    };
+    let output = shell_command(&cmd).output();
     let value = match output {
         Ok(out) => Value::Object(
             [
@@ -387,15 +399,7 @@ native!(host_shell_exec, |args, ctx| {
 
 native!(host_spawn, |args, _ctx| {
     let cmd = arg_str(args, 0);
-    let result = if cfg!(windows) {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .args(["/C", &cmd])
-            .creation_flags(0x00000008) // DETACHED_PROCESS
-            .spawn()
-    } else {
-        std::process::Command::new("sh").args(["-c", &cmd]).spawn()
-    };
+    let result = shell_command(&cmd).spawn();
     if let Err(e) = &result {
         tracing::warn!(command = %cmd, err = %e, "extension spawn failed");
     }
@@ -621,13 +625,7 @@ native!(host_tmp_dir, |_args, _ctx| {
 
 native!(host_spawn_capture, |args, ctx| {
     let cmd = arg_str(args, 0);
-    let output = if cfg!(windows) {
-        std::process::Command::new("cmd")
-            .args(["/C", &cmd])
-            .output()
-    } else {
-        std::process::Command::new("sh").args(["-c", &cmd]).output()
-    };
+    let output = shell_command(&cmd).output();
     let value = match output {
         Ok(out) => Value::Object(
             [
