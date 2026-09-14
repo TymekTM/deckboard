@@ -130,7 +130,8 @@ pub trait Input {
     fn sleep(&mut self, ms: u64) -> Result<()>;
 }
 
-/// Events pushed back to connected clients (e.g. multiaction board switch).
+/// Events pushed back to connected clients (board tiles and multiaction
+/// board steps).
 pub trait EventSink {
     fn change_board(&mut self, board_id: i64);
     /// Push a custom-value label (e.g. `toggle-microphone` -> "OFF") to
@@ -178,7 +179,19 @@ pub fn run_command(
         return run_slider_command(input, cmd, 0.0);
     }
     match cmd.kind.as_str() {
-        "board" => Ok(()), // board switching is client/editor-local
+        // Clients are remote viewers: the switch goes out through the
+        // sink as a change-board event (v2 broadcasts board.open), the
+        // same path a multiaction board step takes.
+        "board" => match parse_board_id(cmd.command.as_deref()) {
+            Some(id) => {
+                sink.change_board(id);
+                Ok(())
+            }
+            None => {
+                tracing::warn!("board switch without a parsable target id - ignored");
+                Ok(())
+            }
+        },
         "key" => run_key(input, cmd, is_tap_start),
         k if k.starts_with("spotify") || k.starts_with("slobs") || k.starts_with("obs")
             || k.starts_with("xsplit") || k.contains("twitch") || k.starts_with("vmod")
@@ -240,6 +253,16 @@ fn run_key(input: &mut dyn Input, cmd: &Command, is_tap_start: bool) -> Result<(
     }
 }
 
+/// Board switch targets arrive as the editor JSON `{"id":7}` or a bare
+/// `7`.
+fn parse_board_id(command: Option<&str>) -> Option<i64> {
+    command
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| v.get("id").cloned())
+        .and_then(|v| v.as_i64())
+        .or_else(|| command.and_then(|s| s.trim().parse().ok()))
+}
+
 fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Command) -> Result<()> {
     let raw = cmd.command.as_deref().unwrap_or("[]");
     let steps: Vec<Value> = serde_json::from_str(raw)
@@ -265,14 +288,7 @@ fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Comman
                 input.sleep(ms)?;
             }
             "board" => {
-                let id = step_cmd
-                    .command
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                    .and_then(|v| v.get("id").cloned())
-                    .and_then(|v| v.as_i64())
-                    .or_else(|| step_cmd.command.as_deref().and_then(|s| s.parse().ok()));
-                if let Some(id) = id {
+                if let Some(id) = parse_board_id(step_cmd.command.as_deref()) {
                     sink.change_board(id);
                 }
             }
@@ -712,11 +728,17 @@ mod tests {
     }
 
     #[test]
-    fn board_type_is_noop_and_sliders_routed() {
+    fn board_type_switches_via_sink_and_sliders_routed() {
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
-        run_command(&mut input, &mut sink, &cmd("board", Some("3")), false).unwrap();
+        // editor JSON form and the bare-id form both resolve
+        run_command(&mut input, &mut sink, &cmd("board", Some(r#"{"id":3}"#)), false).unwrap();
+        run_command(&mut input, &mut sink, &cmd("board", Some("7")), false).unwrap();
+        assert_eq!(sink.boards, vec![3, 7]);
         assert!(input.effects.is_empty());
+        // unparsable target: no switch, still no crash
+        run_command(&mut input, &mut sink, &cmd("board", Some("nope")), false).unwrap();
+        assert_eq!(sink.boards, vec![3, 7]);
         let slider = Command::from_row("speaker-volume", None, None, "slider");
         run_slider_command(&mut input, &slider, 0.5).unwrap();
     }
