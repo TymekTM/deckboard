@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 export const api = {
   serverStatus: () => invoke("server_status"),
   listBoards: () => invoke("list_boards"),
-  createBoard: (name) => invoke("create_board", { name }),
+  createBoard: (name, background, width, height) =>
+    invoke("create_board", { name, background, width, height }),
   updateBoard: (board) => invoke("update_board", { board }),
   deleteBoard: (boardId) => invoke("delete_board", { boardId }),
   createButton: (boardId, kind, mode, x, y) =>
@@ -14,6 +15,6 @@ export const api = {
   deleteButton: (id, boardId) => invoke("delete_button", { id, boardId }),
   clearBoard: (boardId) => invoke("clear_board", { boardId }),
   execButton: (id) => invoke("exec_button", { id }),
-  exportBoards: (ids) => invoke("export_boards", { ids }),
-  importBoards: (boards) => invoke("import_boards", { boards }),
+  exportBoards: (ids, path) => invoke("export_boards", { ids, path }),
+  importBoards: (path) => invoke("import_boards", { path }),
 };

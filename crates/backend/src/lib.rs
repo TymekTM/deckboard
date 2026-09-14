@@ -61,9 +61,19 @@ impl SqlBackend {
 
     // ---- editor write path -------------------------------------------------
 
-    /// Create an empty board with the original's defaults.
-    pub fn create_board(&self, name: &str) -> deckboard_db::Result<i64> {
-        self.db.lock().unwrap().insert_board(name)
+    /// Create an empty board; `background`/`width`/`height` come from the
+    /// editor dialog.
+    pub fn create_board(
+        &self,
+        name: &str,
+        background: &str,
+        width: i64,
+        height: i64,
+    ) -> deckboard_db::Result<i64> {
+        self.db
+            .lock()
+            .unwrap()
+            .insert_board(name, background, width, height)
     }
 
     pub fn update_board(&self, board: &BoardRow) -> deckboard_db::Result<()> {
@@ -102,14 +112,7 @@ impl SqlBackend {
     }
 
     /// Drag/resize from the editor grid.
-    pub fn move_button(
-        &self,
-        id: i64,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-    ) -> deckboard_db::Result<()> {
+    pub fn move_button(&self, id: i64, x: i64, y: i64, w: i64, h: i64) -> deckboard_db::Result<()> {
         self.db
             .lock()
             .unwrap()
@@ -136,11 +139,7 @@ impl SqlBackend {
         let db = self.db.lock().unwrap();
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            let Some(board) = db
-                .get_boards()?
-                .into_iter()
-                .find(|b| b.id == *id)
-            else {
+            let Some(board) = db.get_board(*id)? else {
                 continue;
             };
             let macros: Vec<serde_json::Value> = db
@@ -164,18 +163,13 @@ impl SqlBackend {
     /// re-parented to the freshly inserted boards, mirroring the original
     /// import. The whole file lands atomically; new board ids are returned
     /// in input order.
-    pub fn import_boards(
-        &self,
-        boards: &[serde_json::Value],
-    ) -> deckboard_db::Result<Vec<i64>> {
+    pub fn import_boards(&self, boards: &[serde_json::Value]) -> deckboard_db::Result<Vec<i64>> {
         let db = self.db.lock().unwrap();
         db.with_transaction(|conn_tx| {
             let mut ids = Vec::with_capacity(boards.len());
             for board_json in boards {
-                let mut board: BoardRow =
-                    serde_json::from_value(board_json.clone()).map_err(|e| {
-                        deckboard_db::DbError::Corrupt(format!("bad board entry: {e}"))
-                    })?;
+                let mut board: BoardRow = serde_json::from_value(board_json.clone())
+                    .map_err(|e| deckboard_db::DbError::Corrupt(format!("bad board entry: {e}")))?;
                 board.id = 0;
                 board.converted = 1;
                 let board_id = conn_tx.insert_board_full(&board)?;
@@ -255,7 +249,10 @@ impl Backend for SqlBackend {
             button.options.as_deref(),
             &button.mode,
         );
-        if self.exec_extension(&cmd, None) || self.exec_voicemeeter(&cmd) || self.exec_discord(&cmd, sink) {
+        if self.exec_extension(&cmd, None)
+            || self.exec_voicemeeter(&cmd)
+            || self.exec_discord(&cmd, sink)
+        {
             return;
         }
         self.with_input(|input| {
@@ -285,7 +282,9 @@ impl SqlBackend {
     /// mirroring the original `runCommand` default case). Slider taps pass
     /// `{"value": v}` - that is what original slider extensions receive.
     fn exec_extension(&self, cmd: &deckboard_actions::Command, slider_value: Option<f64>) -> bool {
-        let Some(ext) = &self.extensions else { return false };
+        let Some(ext) = &self.extensions else {
+            return false;
+        };
         if !ext.has_action(&cmd.kind) {
             return false;
         }
@@ -301,6 +300,14 @@ impl SqlBackend {
         true
     }
 
+    /// Parse a command's JSON arguments; unparseable or empty -> null.
+    fn command_args(cmd: &deckboard_actions::Command) -> serde_json::Value {
+        cmd.command
+            .as_deref()
+            .and_then(|c| serde_json::from_str(c).ok())
+            .unwrap_or(serde_json::Value::Null)
+    }
+
     /// Run `vm-*` actions against the Voicemeeter remote DLL. Only tried
     /// when no loaded JS extension claimed the action (the original
     /// voicemeeter-control extension cannot load in our host).
@@ -308,16 +315,8 @@ impl SqlBackend {
         if !deckboard_vm::is_vm_action(&cmd.kind) {
             return false;
         }
-        let args = cmd
-            .command
-            .as_deref()
-            .and_then(|c| serde_json::from_str(c).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let result = self
-            .voicemeeter
-            .lock()
-            .unwrap()
-            .execute(&cmd.kind, &args);
+        let args = Self::command_args(cmd);
+        let result = self.voicemeeter.lock().unwrap().execute(&cmd.kind, &args);
         if let Err(e) = &result {
             tracing::warn!(kind = %cmd.kind, error = %e, "voicemeeter action failed");
         }
@@ -336,11 +335,7 @@ impl SqlBackend {
             tracing::warn!(kind = %cmd.kind, "discord not configured (no client id in settings)");
             return true;
         };
-        let args = cmd
-            .command
-            .as_deref()
-            .and_then(|c| serde_json::from_str(c).ok())
-            .unwrap_or(serde_json::Value::Null);
+        let args = Self::command_args(cmd);
         let result = deckboard_discord::execute(&config, &cmd.kind, &args, |key, value| {
             sink.app_value(&key, &value);
         });
@@ -380,10 +375,13 @@ impl SqlBackend {
             ..config.clone()
         };
         if let Some(path) = &self.discord_settings_path {
-            if let Err(e) = deckboard_discord::save_tokens(path, &deckboard_discord::AuthTokens {
-                access_token: fresh.access_token.clone(),
-                refresh_token: fresh.refresh_token.clone(),
-            }) {
+            if let Err(e) = deckboard_discord::save_tokens(
+                path,
+                &deckboard_discord::AuthTokens {
+                    access_token: fresh.access_token.clone(),
+                    refresh_token: fresh.refresh_token.clone(),
+                },
+            ) {
                 tracing::warn!(error = %e, "could not save discord tokens to settings.json");
             }
         }
@@ -414,9 +412,7 @@ mod tests {
     use deckboard_db::ButtonRow;
 
     fn test_backend() -> SqlBackend {
-        SqlBackend::new(
-            Db::open_or_create(std::path::Path::new(":memory:")).unwrap(),
-        )
+        SqlBackend::new(Db::open_or_create(std::path::Path::new(":memory:")).unwrap())
     }
 
     /// A boardjson entry shaped like the original app writes it: `type`
@@ -475,7 +471,7 @@ mod tests {
     fn editor_writes_land_in_the_database() {
         let backend = test_backend();
 
-        let board = backend.create_board("New Board").unwrap();
+        let board = backend.create_board("New Board", "#2c3e50", 4, 3).unwrap();
         let button = backend.create_button(board, "url", "button", 2, 1).unwrap();
 
         let mut row = backend.get_button(button).unwrap();
@@ -488,12 +484,15 @@ mod tests {
 
         backend.move_button(button, 0, 2, 2, 2).unwrap();
         let moved = backend.get_button(button).unwrap();
-        assert_eq!((moved.x.unwrap(), moved.y.unwrap(), moved.w, moved.h), (0, 2, 2, 2));
+        assert_eq!(
+            (moved.x.unwrap(), moved.y.unwrap(), moved.w, moved.h),
+            (0, 2, 2, 2)
+        );
 
         backend.clear_board(board).unwrap();
         assert!(backend.get_buttons_by_board(board).is_empty());
 
-        let other = backend.create_board("Keeper").unwrap();
+        let other = backend.create_board("Keeper", "#2c3e50", 4, 3).unwrap();
         backend.create_button(other, "key", "button", 0, 0).unwrap();
         backend.delete_board(board).unwrap();
         assert_eq!(backend.get_boards().len(), 1);
@@ -503,9 +502,7 @@ mod tests {
     fn boardjson_import_export_roundtrip() {
         let backend = test_backend();
 
-        let ids = backend
-            .import_boards(&[original_style_board()])
-            .unwrap();
+        let ids = backend.import_boards(&[original_style_board()]).unwrap();
         assert_eq!(ids.len(), 1);
 
         // macros were re-parented to the new board and ids assigned
@@ -538,7 +535,9 @@ mod tests {
     fn import_is_atomic_on_bad_entry() {
         let backend = test_backend();
         let bad = serde_json::json!({ "name": 42, "macros": "nope" });
-        let err = backend.import_boards(&[original_style_board(), bad]).unwrap_err();
+        let err = backend
+            .import_boards(&[original_style_board(), bad])
+            .unwrap_err();
         assert!(matches!(err, deckboard_db::DbError::Corrupt(_)));
         // the good board before the bad one was rolled back
         assert!(backend.get_boards().is_empty());

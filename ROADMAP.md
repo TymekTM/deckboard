@@ -23,6 +23,12 @@ through a legacy compatibility layer until the new client ships.
       import/export (format-compatible), touch mode, tray, hotkeys,
       autolaunch. **Definition of MVP: full behavioral parity with the
       original desktop app using the stock Android client.**
+      Status (2026-09-14): editor MVP lives in `apps/desktop` - board/tile
+      CRUD, drag/resize, dual-state styling, format-compatible `.boardjson`
+      import/export, touch mode with local execution, tray, autostart
+      toggle, fixed Ctrl+Alt+D touch-mode hotkey. Still open for the
+      checkbox: configurable hotkeys, slider/wheel interaction in editor
+      touch mode, live second-state preview.
 - [ ] **M4 - Kotlin/Compose client MVP**: boards/buttons/sliders/toggles,
       live state, offline cache, QR/USB pairing. Includes Android plumbing:
       foreground service + battery-optimization exemption prompt (WS dies

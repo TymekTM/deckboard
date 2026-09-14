@@ -137,10 +137,7 @@ impl Db {
         if !path.exists() {
             return Err(DbError::NotFound(path));
         }
-        let conn = Connection::open_with_flags(
-            &path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         tracing::info!(path = %path.display(), "opened deckboard database (read-only)");
         Ok(Db { conn })
     }
@@ -217,18 +214,20 @@ impl Db {
         if !path.exists() {
             return Err(DbError::NotFound(path));
         }
-        let conn = Connection::open_with_flags(
-            &path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
+        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         tracing::info!(path = %path.display(), "opened deckboard database (read-write)");
         Ok(Db { conn })
     }
 
-    /// Insert a board with the original's defaults. `background` follows the
-    /// schema default `#2c3e50`; empty boards start 4x3 like a fresh install.
-    /// Returns the new id.
-    pub fn insert_board(&self, name: &str) -> Result<i64> {
+    /// Insert a board; the editor supplies name and grid shape, remaining
+    /// columns take the original's defaults. Returns the new id.
+    pub fn insert_board(
+        &self,
+        name: &str,
+        background: &str,
+        width: i64,
+        height: i64,
+    ) -> Result<i64> {
         let next_order: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(COALESCE(\"order\", 0)), -1) + 1 FROM Boards",
             [],
@@ -236,8 +235,8 @@ impl Db {
         )?;
         self.conn.execute(
             "INSERT INTO Boards (name, background, width, height, converted, \"order\")
-             VALUES (?1, '#2c3e50', 4, 3, 1, ?2)",
-            rusqlite::params![name, next_order],
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+            rusqlite::params![name, background, width, height, next_order],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -264,9 +263,18 @@ impl Db {
              sort = ?5, type = ?6, args = ?7, \"order\" = ?8, width = ?9, height = ?10, \
              converted = ?11 WHERE id = ?12",
             rusqlite::params![
-                board.name, board.background, board.layout, board.image, board.sort,
-                board.kind, board.args, board.order, board.width, board.height,
-                board.converted, board.id,
+                board.name,
+                board.background,
+                board.layout,
+                board.image,
+                board.sort,
+                board.kind,
+                board.args,
+                board.order,
+                board.width,
+                board.height,
+                board.converted,
+                board.id,
             ],
         )?;
         Ok(())
@@ -275,11 +283,10 @@ impl Db {
     /// Delete the board together with its shortcuts (the original leaves
     /// orphans behind; we prefer the clean invariant).
     pub fn delete_board(&self, id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM Shortcuts WHERE board_id = ?1",
-            [id],
-        )?;
-        self.conn.execute("DELETE FROM Boards WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM Shortcuts WHERE board_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM Boards WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -299,13 +306,37 @@ impl Db {
              title_color2 = ?22, position = ?23, position2 = ?24, mode = ?25, x = ?26, \
              y = ?27, w = ?28, h = ?29, options = ?30 WHERE id = ?31",
             rusqlite::params![
-                row.board_id, row.kind, row.command, row.title, row.title_position,
-                row.title_color, row.title_box_color, row.color, row.icon_color,
-                row.icon_color2, row.border_color, row.shape, row.icon, row.img,
-                row.img2, row.icon2, row.color2, row.shape2, row.border_color2,
-                row.title_position2, row.title_box_color2, row.title_color2,
-                row.position, row.position2, row.mode, row.x, row.y, row.w, row.h,
-                row.options, row.id,
+                row.board_id,
+                row.kind,
+                row.command,
+                row.title,
+                row.title_position,
+                row.title_color,
+                row.title_box_color,
+                row.color,
+                row.icon_color,
+                row.icon_color2,
+                row.border_color,
+                row.shape,
+                row.icon,
+                row.img,
+                row.img2,
+                row.icon2,
+                row.color2,
+                row.shape2,
+                row.border_color2,
+                row.title_position2,
+                row.title_box_color2,
+                row.title_color2,
+                row.position,
+                row.position2,
+                row.mode,
+                row.x,
+                row.y,
+                row.w,
+                row.h,
+                row.options,
+                row.id,
             ],
         )?;
         Ok(())
@@ -321,16 +352,15 @@ impl Db {
     }
 
     pub fn delete_button(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM Shortcuts WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM Shortcuts WHERE id = ?1", [id])?;
         Ok(())
     }
 
     /// Remove every shortcut of the board ("Clear board" in the editor).
     pub fn clear_board(&self, board_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM Shortcuts WHERE board_id = ?1",
-            [board_id],
-        )?;
+        self.conn
+            .execute("DELETE FROM Shortcuts WHERE board_id = ?1", [board_id])?;
         Ok(())
     }
 }
@@ -348,9 +378,7 @@ where
     })
 }
 
-fn map_board_row(
-    row: &rusqlite::Row<'_>,
-) -> std::result::Result<BoardRow, rusqlite::Error> {
+fn map_board_row(row: &rusqlite::Row<'_>) -> std::result::Result<BoardRow, rusqlite::Error> {
     Ok(BoardRow {
         id: row.get(0)?,
         name: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -359,7 +387,9 @@ fn map_board_row(
         image: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         // legacy `sort` column has a '' default; coerce non-numeric to 0
         sort: row.get::<_, Option<i64>>(5).unwrap_or(None).unwrap_or(0),
-        kind: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "buttons".into()),
+        kind: row
+            .get::<_, Option<String>>(6)?
+            .unwrap_or_else(|| "buttons".into()),
         args: row.get(7)?,
         order: row.get(8)?,
         width: row.get::<_, Option<i64>>(9)?.unwrap_or(4),
@@ -392,8 +422,17 @@ fn insert_board_full_on(conn: &Connection, row: &BoardRow) -> Result<i64> {
          \"order\", width, height, converted) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
-            row.name, row.background, row.layout, row.image, row.sort, row.kind,
-            row.args, row.order, row.width, row.height, row.converted,
+            row.name,
+            row.background,
+            row.layout,
+            row.image,
+            row.sort,
+            row.kind,
+            row.args,
+            row.order,
+            row.width,
+            row.height,
+            row.converted,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -409,21 +448,43 @@ fn insert_button_on(conn: &Connection, row: &ButtonRow) -> Result<i64> {
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
          ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
         rusqlite::params![
-            row.board_id, row.kind, row.command, row.title, row.title_position,
-            row.title_color, row.title_box_color, row.color, row.icon_color,
-            row.icon_color2, row.border_color, row.shape, row.icon, row.img,
-            row.img2, row.icon2, row.color2, row.shape2, row.border_color2,
-            row.title_position2, row.title_box_color2, row.title_color2,
-            row.position, row.position2, row.mode, row.x, row.y, row.w, row.h,
+            row.board_id,
+            row.kind,
+            row.command,
+            row.title,
+            row.title_position,
+            row.title_color,
+            row.title_box_color,
+            row.color,
+            row.icon_color,
+            row.icon_color2,
+            row.border_color,
+            row.shape,
+            row.icon,
+            row.img,
+            row.img2,
+            row.icon2,
+            row.color2,
+            row.shape2,
+            row.border_color2,
+            row.title_position2,
+            row.title_box_color2,
+            row.title_color2,
+            row.position,
+            row.position2,
+            row.mode,
+            row.x,
+            row.y,
+            row.w,
+            row.h,
             row.options,
         ],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
-fn map_button_row(
-    row: &rusqlite::Row<'_>,
-) -> std::result::Result<ButtonRow, rusqlite::Error> {    Ok(ButtonRow {
+fn map_button_row(row: &rusqlite::Row<'_>) -> std::result::Result<ButtonRow, rusqlite::Error> {
+    Ok(ButtonRow {
         id: row.get(0)?,
         board_id: row.get(1)?,
         kind: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
@@ -449,7 +510,9 @@ fn map_button_row(
         title_color2: row.get(22)?,
         position: row.get(23)?,
         position2: row.get::<_, Option<i64>>(24)?.unwrap_or(0),
-        mode: row.get::<_, Option<String>>(25)?.unwrap_or_else(|| "button".into()),
+        mode: row
+            .get::<_, Option<String>>(25)?
+            .unwrap_or_else(|| "button".into()),
         x: row.get(26)?,
         y: row.get(27)?,
         w: row.get::<_, Option<i64>>(28)?.unwrap_or(1),
@@ -596,8 +659,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
 
-        let a = db.insert_board("First").unwrap();
-        let b = db.insert_board("Second").unwrap();
+        let a = db.insert_board("First", "#2c3e50", 4, 3).unwrap();
+        let b = db.insert_board("Second", "#2c3e50", 4, 3).unwrap();
         assert_ne!(a, b);
 
         // new boards get the original's defaults and ascending order
@@ -632,7 +695,7 @@ mod tests {
     fn button_crud_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
-        let board = db.insert_board("Board").unwrap();
+        let board = db.insert_board("Board", "#2c3e50", 4, 3).unwrap();
 
         let id = db.insert_button(&sample_button(board, 1, 2)).unwrap();
         let stored = db.get_button(id).unwrap().unwrap();
@@ -642,7 +705,10 @@ mod tests {
         assert_eq!((stored.shape, stored.title_position), (1, 1));
         assert_eq!(stored.icon.as_deref(), Some("fas link"));
         assert_eq!(stored.options.as_deref(), Some("--flag"));
-        assert_eq!((stored.x.unwrap(), stored.y.unwrap(), stored.w, stored.h), (1, 2, 2, 1));
+        assert_eq!(
+            (stored.x.unwrap(), stored.y.unwrap(), stored.w, stored.h),
+            (1, 2, 2, 1)
+        );
 
         // full update keeps unedited columns intact
         let mut edited = stored.clone();
@@ -658,7 +724,10 @@ mod tests {
         // geometry-only update (drag/resize)
         db.update_button_geometry(id, 3, 1, 2, 2).unwrap();
         let moved = db.get_button(id).unwrap().unwrap();
-        assert_eq!((moved.x.unwrap(), moved.y.unwrap(), moved.w, moved.h), (3, 1, 2, 2));
+        assert_eq!(
+            (moved.x.unwrap(), moved.y.unwrap(), moved.w, moved.h),
+            (3, 1, 2, 2)
+        );
 
         db.delete_button(id).unwrap();
         assert!(db.get_button(id).unwrap().is_none());
@@ -668,8 +737,8 @@ mod tests {
     fn clear_board_removes_only_that_boards_buttons() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
-        let board_a = db.insert_board("A").unwrap();
-        let board_b = db.insert_board("B").unwrap();
+        let board_a = db.insert_board("A", "#2c3e50", 4, 3).unwrap();
+        let board_b = db.insert_board("B", "#2c3e50", 4, 3).unwrap();
         db.insert_button(&sample_button(board_a, 0, 0)).unwrap();
         db.insert_button(&sample_button(board_a, 1, 0)).unwrap();
         db.insert_button(&sample_button(board_b, 0, 0)).unwrap();

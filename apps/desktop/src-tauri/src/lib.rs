@@ -21,9 +21,9 @@ struct DesktopState {
 
 impl DesktopState {
     fn backend(&self) -> Result<Arc<SqlBackend>, String> {
-        self.backend
-            .clone()
-            .ok_or_else(|| "database unavailable - is the original Deckboard app still running?".into())
+        self.backend.clone().ok_or_else(|| {
+            "database unavailable - is the original Deckboard app still running?".into()
+        })
     }
 
     fn broadcaster(&self) -> Result<&EditorBroadcaster, String> {
@@ -44,14 +44,12 @@ struct BoardWithButtons {
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -64,9 +62,6 @@ pub fn run() {
 
             build_tray(app.handle())?;
             register_touch_mode_hotkey(app.handle().clone());
-
-            // keep the window handle for tray toggle
-            let _ = port;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -88,6 +83,26 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+/// Register one button-style source (extension input, Voicemeeter or
+/// Discord declaration) so the legacy mapper can style its tiles.
+fn register_ext_input(
+    value: &str,
+    icon: Option<&str>,
+    color: Option<&str>,
+    font_icon: &str,
+    mode: Option<&str>,
+    command: Option<&str>,
+) {
+    deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+        value: value.to_string(),
+        icon: icon.map(str::to_string),
+        color: color.map(str::to_string),
+        font_icon: Some(font_icon.to_string()),
+        mode: mode.map(str::to_string),
+        command: command.map(str::to_string),
+    });
+}
+
 /// Open the database (read-write: the editor is now the single writer,
 /// ADR-001), load extensions and start the embedded legacy server. A failure
 /// keeps the UI alive with `backend: None` so the window can explain why.
@@ -102,7 +117,12 @@ fn setup_core() -> DesktopState {
     let db = deckboard_db::Db::open_read_write(db_path.as_deref());
     if let Err(e) = &db {
         tracing::error!("cannot open database read-write: {e}");
-        return DesktopState { backend: None, broadcaster: None, hub: None, port };
+        return DesktopState {
+            backend: None,
+            broadcaster: None,
+            hub: None,
+            port,
+        };
     }
     let db = db.unwrap();
 
@@ -122,34 +142,20 @@ fn setup_core() -> DesktopState {
         }
     }
     for input in ext_manager.inputs() {
-        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
-            value: input.value.clone(),
-            icon: input.icon.clone(),
-            color: input.color.clone(),
-            font_icon: input.font_icon.clone(),
-            mode: input.mode.clone(),
-            command: input.command.clone(),
-        });
+        register_ext_input(
+            &input.value,
+            input.icon.as_deref(),
+            input.color.as_deref(),
+            input.font_icon.as_deref().unwrap_or("fas"),
+            input.mode.as_deref(),
+            input.command.as_deref(),
+        );
     }
     for (value, icon, font_icon, color) in deckboard_vm::input_declarations() {
-        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
-            value: value.to_string(),
-            icon: icon.map(str::to_string),
-            color: Some(color.to_string()),
-            font_icon: Some(font_icon.to_string()),
-            mode: None,
-            command: None,
-        });
+        register_ext_input(&value, icon, Some(&color), &font_icon, None, None);
     }
     for (value, icon, color, mode) in deckboard_discord::input_declarations() {
-        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
-            value: value.to_string(),
-            icon: Some(icon.to_string()),
-            color: Some(color.to_string()),
-            font_icon: Some("fas".to_string()),
-            mode: mode.map(str::to_string),
-            command: None,
-        });
+        register_ext_input(&value, Some(&icon), Some(&color), "fas", mode, None);
     }
 
     let backend = Arc::new(
@@ -215,12 +221,21 @@ fn setup_core() -> DesktopState {
 // ---- tray + hotkey ---------------------------------------------------------
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem};
+    use tauri::menu::{CheckMenuItem, Menu, MenuItem};
+    use tauri_plugin_autostart::ManagerExt;
 
     let show_hide = MenuItem::with_id(app, "show-hide", "Show / Hide", true, None::<&str>)?;
     let touch = MenuItem::with_id(app, "touch-mode", "Toggle Touch Mode", true, None::<&str>)?;
+    let launch = CheckMenuItem::with_id(
+        app,
+        "autostart",
+        "Launch at startup",
+        true,
+        app.autolaunch().is_enabled().unwrap_or(false),
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit Deckboard", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_hide, &touch, &quit])?;
+    let menu = Menu::with_items(app, &[&show_hide, &touch, &launch, &quit])?;
 
     tauri::tray::TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().expect("app icon").clone())
@@ -231,11 +246,25 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "touch-mode" => {
                 let _ = app.emit("toggle-touch-mode", ());
             }
+            "autostart" => {
+                use tauri_plugin_autostart::ManagerExt;
+                let launch = app.autolaunch();
+                let enabled = launch.is_enabled().unwrap_or(false);
+                let _ = if enabled {
+                    launch.disable()
+                } else {
+                    launch.enable()
+                };
+            }
             "quit" => app.exit(0),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                ..
+            } = event
+            {
                 toggle_main_window(tray.app_handle());
             }
         })
@@ -260,9 +289,7 @@ fn register_touch_mode_hotkey(app: AppHandle) {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
     app.global_shortcut()
         .on_shortcut(
-            "Ctrl+Alt+D"
-                .parse::<Shortcut>()
-                .expect("valid shortcut"),
+            "Ctrl+Alt+D".parse::<Shortcut>().expect("valid shortcut"),
             move |app, _shortcut, event| {
                 if event.state() == ShortcutState::Pressed {
                     let _ = app.emit("toggle-touch-mode", ());
@@ -305,9 +332,17 @@ async fn list_boards(state: State<'_, DesktopState>) -> Result<Vec<BoardWithButt
 }
 
 #[tauri::command]
-async fn create_board(state: State<'_, DesktopState>, name: String) -> Result<i64, String> {
+async fn create_board(
+    state: State<'_, DesktopState>,
+    name: String,
+    background: String,
+    width: i64,
+    height: i64,
+) -> Result<i64, String> {
     let backend = state.backend()?;
-    let id = backend.create_board(&name).map_err(|e| e.to_string())?;
+    let id = backend
+        .create_board(&name, &background, width, height)
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
     Ok(id)
 }
@@ -365,7 +400,9 @@ async fn move_button(
     h: i64,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    backend.move_button(id, x, y, w, h).map_err(|e| e.to_string())?;
+    backend
+        .move_button(id, x, y, w, h)
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     Ok(())
 }
@@ -393,7 +430,11 @@ async fn clear_board(state: State<'_, DesktopState>, board_id: i64) -> Result<()
 /// Touch mode: run the tile locally like the original editor does. A
 /// multiaction `board` step switches the editor's own view via a DOM event.
 #[tauri::command]
-async fn exec_button(app: AppHandle, state: State<'_, DesktopState>, id: i64) -> Result<(), String> {
+async fn exec_button(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    id: i64,
+) -> Result<(), String> {
     use deckboard_actions::EventSink;
 
     let backend = state.backend()?;
@@ -415,24 +456,31 @@ async fn exec_button(app: AppHandle, state: State<'_, DesktopState>, id: i64) ->
     Ok(())
 }
 
+/// Write the selected boards to `path` in the original's `.boardjson`
+/// format. The file IO lives here so the webview needs no fs permissions.
 #[tauri::command]
 async fn export_boards(
     state: State<'_, DesktopState>,
     ids: Vec<i64>,
-) -> Result<Vec<serde_json::Value>, String> {
+    path: String,
+) -> Result<(), String> {
     let backend = state.backend()?;
-    tauri::async_runtime::spawn_blocking(move || backend.export_boards(&ids))
+    let data = tauri::async_runtime::spawn_blocking(move || backend.export_boards(&ids))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+/// Read and import a `.boardjson` file written by this editor or the
+/// original app.
 #[tauri::command]
-async fn import_boards(
-    state: State<'_, DesktopState>,
-    boards: Vec<serde_json::Value>,
-) -> Result<Vec<i64>, String> {
+async fn import_boards(state: State<'_, DesktopState>, path: String) -> Result<Vec<i64>, String> {
     let backend = state.backend()?;
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let boards: Vec<serde_json::Value> =
+        serde_json::from_str(&content).map_err(|e| e.to_string())?;
     let ids = tauri::async_runtime::spawn_blocking(move || backend.import_boards(&boards))
         .await
         .map_err(|e| e.to_string())?

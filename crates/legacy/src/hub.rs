@@ -214,7 +214,9 @@ pub fn event_packet(event: &str, payload: Option<&str>) -> String {
 fn new_sid() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    (0..20).map(|_| format!("{:x}", rng.gen::<u8>() & 0x0f)).collect()
+    (0..20)
+        .map(|_| format!("{:x}", rng.gen::<u8>() & 0x0f))
+        .collect()
 }
 
 #[cfg(test)]

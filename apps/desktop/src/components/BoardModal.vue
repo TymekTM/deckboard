@@ -14,11 +14,15 @@ const form = reactive({
   height: props.board?.height ?? 3,
   background: props.board?.background ?? "#2c3e50",
 });
-const error = ref("");
 
 async function save() {
   if (props.mode === "create") {
-    await api.createBoard(form.name || "New board");
+    await api.createBoard(
+      form.name || "New board",
+      form.background,
+      Number(form.width),
+      Number(form.height)
+    );
     emit("saved");
     return;
   }
@@ -51,7 +55,7 @@ async function deleteBoard() {
         Name
         <input v-model="form.name" placeholder="Board name" @keyup.enter="save" />
       </label>
-      <div class="row" v-if="mode === 'edit'">
+      <div class="row">
         <label class="field">
           Columns (width)
           <input v-model.number="form.width" type="number" min="1" max="15" />
@@ -73,7 +77,6 @@ async function deleteBoard() {
         <button @click="emit('close')">Cancel</button>
         <button class="primary" @click="save">Save</button>
       </div>
-      <p v-if="error" class="error">{{ error }}</p>
     </div>
   </div>
 </template>

@@ -92,26 +92,12 @@ async function tileDeleted(tile) {
 }
 
 async function doExport() {
-  exporting.value = true;
-  try {
-    const path = await save({
-      filters: [{ name: "Board JSON", extensions: ["boardjson"] }],
-    });
-    if (path) {
-      const ids = boards.value.map((b) => b.id);
-      const data = await api.exportBoards(ids);
-      // write through the filesystem plugin is overkill for MVP: the backend
-      // returns the file content and we save it via the dialog-write API
-      await invokeWriteFile(path, JSON.stringify(data));
-    }
-  } finally {
-    exporting.value = false;
-  }
-}
-
-async function invokeWriteFile(path, content) {
-  const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-  await writeTextFile(path, content);
+  const path = await save({
+    filters: [{ name: "Board JSON", extensions: ["boardjson"] }],
+  });
+  if (!path) return;
+  const ids = boards.value.map((b) => b.id);
+  await api.exportBoards(ids, path);
 }
 
 async function doImport() {
@@ -120,9 +106,7 @@ async function doImport() {
     filters: [{ name: "Board JSON", extensions: ["boardjson"] }],
   });
   if (!path) return;
-  const { readTextFile } = await import("@tauri-apps/plugin-fs");
-  const data = JSON.parse(await readTextFile(path));
-  await api.importBoards(data);
+  await api.importBoards(path);
   await load();
 }
 

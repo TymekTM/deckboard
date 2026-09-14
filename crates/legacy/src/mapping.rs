@@ -9,7 +9,13 @@ use serde_json::{json, Map, Value};
 use crate::props::{Props, StyleResolver, FALLBACK_COLOR};
 
 /// Types whose raw command string is sent to the client untouched.
-const RAW_COMMAND_TYPES: &[&str] = &["board", "obs-control", "slobs-control", "xsplit-control", "vol"];
+const RAW_COMMAND_TYPES: &[&str] = &[
+    "board",
+    "obs-control",
+    "slobs-control",
+    "xsplit-control",
+    "vol",
+];
 
 pub struct Mapper {
     resolver: &'static StyleResolver,
@@ -17,7 +23,9 @@ pub struct Mapper {
 
 impl Mapper {
     pub fn new() -> Mapper {
-        Mapper { resolver: StyleResolver::global() }
+        Mapper {
+            resolver: StyleResolver::global(),
+        }
     }
 
     /// Full board payload for one grid variant.
@@ -56,9 +64,9 @@ impl Mapper {
         }
         for y in 0..board.height {
             for x in 0..board.width {
-                let covered = board_buttons.iter().any(|(bx, by, bw, bh)| {
-                    x >= *bx && x < bx + bw && y >= *by && y < by + bh
-                });
+                let covered = board_buttons
+                    .iter()
+                    .any(|(bx, by, bw, bh)| x >= *bx && x < bx + bw && y >= *by && y < by + bh);
                 if !covered {
                     mapped.push(json!({ "id": null, "x": x, "y": y, "w": 1, "h": 1 }));
                 }
@@ -134,7 +142,13 @@ impl Mapper {
         o.insert("board_id".into(), json!(b.board_id));
         o.insert("type".into(), json!(b.kind));
         o.insert("command".into(), json!(command));
-        insert_opt(&mut o, "color", b.color.clone(), props.color.clone(), FALLBACK_COLOR);
+        insert_opt(
+            &mut o,
+            "color",
+            b.color.clone(),
+            props.color.clone(),
+            FALLBACK_COLOR,
+        );
         insert_opt(&mut o, "color2", b.color2.clone(), props.color.clone(), "");
         insert_opt(&mut o, "img", b.img.clone(), None, "");
         insert_opt(&mut o, "img2", b.img2.clone(), None, "");
@@ -144,10 +158,34 @@ impl Mapper {
         o.insert("title".into(), json!(b.title));
         o.insert("title_position".into(), json!(b.title_position));
         o.insert("title_position2".into(), json!(b.title_position2));
-        insert_opt(&mut o, "title_color", b.title_color.clone(), Some("#ffffff".into()), "#ffffff");
-        insert_opt(&mut o, "title_color2", b.title_color2.clone(), Some("#ffffff".into()), "#ffffff");
-        insert_opt(&mut o, "title_box_color", b.title_box_color.clone(), None, "");
-        insert_opt(&mut o, "title_box_color2", b.title_box_color2.clone(), None, "");
+        insert_opt(
+            &mut o,
+            "title_color",
+            b.title_color.clone(),
+            Some("#ffffff".into()),
+            "#ffffff",
+        );
+        insert_opt(
+            &mut o,
+            "title_color2",
+            b.title_color2.clone(),
+            Some("#ffffff".into()),
+            "#ffffff",
+        );
+        insert_opt(
+            &mut o,
+            "title_box_color",
+            b.title_box_color.clone(),
+            None,
+            "",
+        );
+        insert_opt(
+            &mut o,
+            "title_box_color2",
+            b.title_box_color2.clone(),
+            None,
+            "",
+        );
         insert_opt(&mut o, "border_color", b.border_color.clone(), None, "");
         insert_opt(&mut o, "border_color2", b.border_color2.clone(), None, "");
         o.insert("options".into(), json!(b.options));
@@ -182,7 +220,13 @@ impl Default for Mapper {
     }
 }
 
-fn insert_opt(o: &mut Map<String, Value>, key: &str, row: Option<String>, fallback: Option<String>, default: &str) {
+fn insert_opt(
+    o: &mut Map<String, Value>,
+    key: &str,
+    row: Option<String>,
+    fallback: Option<String>,
+    default: &str,
+) {
     let v = row.or(fallback).unwrap_or_else(|| default.to_string());
     o.insert(key.into(), json!(v));
 }
@@ -212,7 +256,11 @@ fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props) 
         return kind.to_string();
     }
     if mode == "graph" {
-        return if raw.is_empty() { kind.to_string() } else { raw.to_string() };
+        return if raw.is_empty() {
+            kind.to_string()
+        } else {
+            raw.to_string()
+        };
     }
     match kind {
         "obs-scene" | "slobs-scene" => raw.to_string(),
@@ -327,15 +375,15 @@ mod tests {
         let b = board();
         let payload = m.board_payload(&b, &[button("url", Some("https://x.co"), 0, 0, 1, 1)], true);
         let sc = payload["shortcuts"].as_array().unwrap();
-        let fillers = sc
-            .iter()
-            .filter(|s| s["id"].is_null())
-            .count();
+        let fillers = sc.iter().filter(|s| s["id"].is_null()).count();
         assert_eq!(fillers, (6 * 5 - 1) as usize);
         assert!(payload["staggered"].as_bool().unwrap());
         // sorted by y then x
         let first = sc.first().unwrap();
-        assert_eq!((first["x"].as_i64(), first["y"].as_i64()), (Some(0), Some(0)));
+        assert_eq!(
+            (first["x"].as_i64(), first["y"].as_i64()),
+            (Some(0), Some(0))
+        );
     }
 
     #[test]
@@ -354,7 +402,10 @@ mod tests {
             .iter()
             .find(|s| s["id"].as_i64() == Some(10) && s["x"].as_i64() == Some(3))
             .unwrap();
-        assert_eq!((cropped["w"].as_i64(), cropped["h"].as_i64()), (Some(1), Some(1)));
+        assert_eq!(
+            (cropped["w"].as_i64(), cropped["h"].as_i64()),
+            (Some(1), Some(1))
+        );
         assert_eq!(
             basic["shortcuts"].as_array().unwrap().len(),
             4 * 3 // full 4x3 grid incl. fillers
@@ -373,7 +424,10 @@ mod tests {
         let s = m.shortcut_payload(&button(
             "speaker-device",
             Some(r#"{"speaker":"dev-1"}"#),
-            0, 0, 1, 1,
+            0,
+            0,
+            1,
+            1,
         ));
         assert_eq!(s["command"], "dev-1");
         assert_eq!(s["extra"], "speaker-device");
@@ -384,7 +438,10 @@ mod tests {
         let s = m.shortcut_payload(&button(
             "obs-source",
             Some(r#"{"scene":"S","source":"C","group":null}"#),
-            0, 0, 1, 1,
+            0,
+            0,
+            1,
+            1,
         ));
         assert_eq!(s["extra"], "S::C");
     }

@@ -5,8 +5,8 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 
 use deckboard_db::{BoardRow, ButtonRow};
-use deckboard_legacy::{router, AppState, Backend, EditorBroadcaster, Hub};
 use deckboard_legacy::hub::WsOut;
+use deckboard_legacy::{router, AppState, Backend, EditorBroadcaster, Hub};
 
 struct MockBackend;
 
@@ -120,7 +120,10 @@ async fn sync_boards_broadcasts_full_list_per_room() {
         Some(WsOut::Packet(p)) => p,
         other => panic!("unexpected {other:?}"),
     };
-    assert!(packet.starts_with(r#"42["get_shortcuts","#), "packet: {packet}");
+    assert!(
+        packet.starts_with(r#"42["get_shortcuts","#),
+        "packet: {packet}"
+    );
     let payload: serde_json::Value = serde_json::from_str(
         packet
             .strip_prefix(r#"42["get_shortcuts","#)
@@ -150,12 +153,7 @@ async fn broadcast_reaches_polling_session() {
     });
 
     // handshake like the Dart client
-    let (mut stream, body) = http(
-        addr,
-        "GET",
-        "/socket.io/?EIO=3&transport=polling&t=1",
-        None,
-    );
+    let (mut stream, body) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
     let sid: String = {
         let open_json: serde_json::Value = serde_json::from_str(&body[1..]).unwrap();
         open_json["sid"].as_str().unwrap().into()

@@ -33,10 +33,8 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
-    let (ext_manager, mut ext_events) = deckboard_ext::ExtManager::load(
-        &home.join("deckboard/extensions"),
-        &settings,
-    );
+    let (ext_manager, mut ext_events) =
+        deckboard_ext::ExtManager::load(&home.join("deckboard/extensions"), &settings);
     for (package, name, error) in ext_manager.summary() {
         match error {
             Some(e) => tracing::warn!(package, name, error = e, "extension disabled"),
