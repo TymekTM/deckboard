@@ -21,8 +21,10 @@ through a legacy compatibility layer until the new client ships.
       landed - `speaker-volume` slider sets the endpoint volume, and a
       5 s watcher broadcasts `speaker-volume`/`speaker-muted` as
       `app_status_update` (tablets flip live; the editor mirrors it via
-      the customValues store). Still open: speaker-device switching,
-      screenshot, unicode typing, media info, device watcher.
+      the customValues store). `screenshot` saves a PNG of the primary
+      screen and `type` pastes through the clipboard (unicode-safe),
+      both ported from the original. Still open: speaker-device
+      switching, media info, device watcher.
 - [ ] **M3 - Desktop editor (MVP gate)**: Tauri 2 + Vue 3 editor: boards,
       buttons, sliders CRUD, drag/resize, dual-state, `.boardjson`
       import/export (format-compatible), touch mode, tray, hotkeys,
