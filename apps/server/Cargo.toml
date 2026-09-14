@@ -22,3 +22,5 @@ deckboard-legacy = { path = "../../crates/legacy" }
 deckboard-ext = { path = "../../crates/ext" }
 deckboard-vm = { path = "../../crates/vm" }
 deckboard-discord = { path = "../../crates/discord" }
+deckboard-sysinfo = { path = "../../crates/sysinfo" }
+ureq = "3"

@@ -72,6 +72,43 @@ impl SqlBackend {
         true
     }
 
+    /// Native system-info actions (si-cpu, si-ram). The replaced JS
+    /// extension's execute() was an empty body - a claimed no-op keeps
+    /// tile presses succeeding the same way.
+    fn exec_sysinfo(&self, cmd: &Command) -> bool {
+        if !deckboard_sysinfo::is_sysinfo_action(&cmd.kind) {
+            return false;
+        }
+        deckboard_sysinfo::execute(&cmd.kind);
+        true
+    }
+
+    /// Native url-to-call: a fire-and-forget GET, exactly what the JS
+    /// package's `fetch(args.urlToCall)` did (response ignored).
+    fn exec_callurl(&self, cmd: &Command) -> bool {
+        if cmd.kind != "url-to-call" {
+            return false;
+        }
+        let url = cmd
+            .command
+            .as_deref()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+            .and_then(|v| v.get("urlToCall").and_then(|u| u.as_str()).map(str::to_string));
+        match url {
+            Some(url) => {
+                let agent = ureq::Agent::config_builder()
+                    .timeout_global(Some(std::time::Duration::from_secs(10)))
+                    .build()
+                    .new_agent();
+                if let Err(e) = agent.get(&url).call() {
+                    tracing::warn!(url = %url, error = %e, "url-to-call failed");
+                }
+            }
+            None => tracing::warn!(kind = "url-to-call", "tile has no urlToCall configured"),
+        }
+        true
+    }
+
     /// Run `vm-*` actions against the Voicemeeter remote DLL. Only tried
     /// when no loaded JS extension claimed the action (the original
     /// voicemeeter-control extension cannot load in our host).
@@ -221,7 +258,12 @@ impl Backend for SqlBackend {
             button.options.as_deref(),
             &button.mode,
         );
-        if self.exec_extension(&cmd, None) || self.exec_voicemeeter(&cmd) || self.exec_discord(&cmd, sink) {
+        if self.exec_extension(&cmd, None)
+            || self.exec_sysinfo(&cmd)
+            || self.exec_callurl(&cmd)
+            || self.exec_voicemeeter(&cmd)
+            || self.exec_discord(&cmd, sink)
+        {
             return;
         }
         self.with_input(|input| {
@@ -236,7 +278,11 @@ impl Backend for SqlBackend {
             button.options.as_deref(),
             &button.mode,
         );
-        if self.exec_extension(&cmd, Some(value)) || self.exec_voicemeeter(&cmd) {
+        if self.exec_extension(&cmd, Some(value))
+            || self.exec_sysinfo(&cmd)
+            || self.exec_callurl(&cmd)
+            || self.exec_voicemeeter(&cmd)
+        {
             return;
         }
         self.with_input(|input| {

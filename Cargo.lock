@@ -628,12 +628,23 @@ dependencies = [
  "deckboard-discord",
  "deckboard-ext",
  "deckboard-legacy",
+ "deckboard-sysinfo",
  "deckboard-vm",
  "dirs",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
+name = "deckboard-sysinfo"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

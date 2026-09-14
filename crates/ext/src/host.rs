@@ -208,6 +208,12 @@ impl ExtRuntime {
         Duration::from_millis(min.clamp(100, 60_000))
     }
 
+    /// Did the package register timers while loading? Timer-driven
+    /// extensions must stay resident or their pushed values stop.
+    pub fn has_timers(&self) -> bool {
+        !self.intervals.is_empty()
+    }
+
     #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root

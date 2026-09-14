@@ -43,8 +43,15 @@ async fn main() -> anyhow::Result<()> {
     let ext_dir = std::env::var_os("DECKBOARD_EXT_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.join("deckboard/extensions"));
+    // Native system-info and callurl replace their JS packages (the JS
+    // runtimes were the heaviest part of the extension fleet); the manager
+    // must not load them.
+    let native_replaced = ["deckboard-system-info", "deckboard-callurl"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
     let (ext_manager, mut ext_events) =
-        deckboard_ext::ExtManager::load(&ext_dir, &settings);
+        deckboard_ext::ExtManager::load(&ext_dir, &settings, &native_replaced);
     for (package, name, error) in ext_manager.summary() {
         match error {
             Some(e) => tracing::warn!(package, name, error = e, "extension disabled"),
@@ -89,6 +96,28 @@ async fn main() -> anyhow::Result<()> {
             command: None,
         });
     }
+    // Native system-info declarations (values copied from the JS package's
+    // inputs, including its odd `headphones` icon); the graph mode is what
+    // makes the CPU/RAM tiles render as graphs.
+    for (value, icon, font_icon, color, mode) in deckboard_sysinfo::input_declarations() {
+        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+            value: value.to_string(),
+            icon: Some(icon.to_string()),
+            color: Some(color.to_string()),
+            font_icon: Some(font_icon.to_string()),
+            mode: Some(mode.to_string()),
+            command: None,
+        });
+    }
+    // Native callurl declaration (from the JS package's single input).
+    deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+        value: "url-to-call".into(),
+        icon: Some("link".into()),
+        color: Some("#ff29df".into()),
+        font_icon: Some("fas".into()),
+        mode: None,
+        command: None,
+    });
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -108,6 +137,18 @@ async fn main() -> anyhow::Result<()> {
     let hub = state.hub.clone();
     tokio::spawn(async move {
         while let Some(deckboard_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
+            let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
+            let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+            hub.broadcast("app_status_update", Some(&payload)).await;
+        }
+    });
+
+    // Native system-info pushes its four si-* values on the same channel
+    // and cadence the JS extension used.
+    let mut sysinfo_values = deckboard_sysinfo::spawn_push();
+    let hub = state.hub.clone();
+    tokio::spawn(async move {
+        while let Some(data) = sysinfo_values.recv().await {
             let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
             let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
             hub.broadcast("app_status_update", Some(&payload)).await;

@@ -9,3 +9,7 @@ apps/mobile/app/build/
 apps/mobile/local.properties
 apps/mobile/.idea/
 *.apk.idsig
+
+# local run logs (untracked scratch)
+server.log
+server.err.log
