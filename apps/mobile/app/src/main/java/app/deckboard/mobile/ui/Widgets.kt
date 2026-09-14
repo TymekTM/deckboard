@@ -210,7 +210,7 @@ fun GraphTile(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = liveText.orEmpty(),
+            text = liveText ?: liveFromSeries(history) ?: "",
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
             color = titleColor,
@@ -260,6 +260,17 @@ fun GraphTile(
             drawPath(area, lineColor.copy(alpha = 0.22f))
             drawPath(line, lineColor, style = Stroke(width = 3f, cap = StrokeCap.Round))
         }
+    }
+}
+
+/** Newest series point as text - covers the gap between a (re)connect
+ *  (only `state.sync` arrived, no patch yet) and the next producer push. */
+private fun liveFromSeries(history: List<Double>): String? {
+    val last = history.lastOrNull() ?: return null
+    return if (last == kotlin.math.floor(last) && !last.isInfinite()) {
+        last.toLong().toString()
+    } else {
+        last.toString()
     }
 }
 
