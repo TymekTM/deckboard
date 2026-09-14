@@ -617,11 +617,20 @@ dependencies = [
  "deckboard-db",
  "deckboard-ext",
  "deckboard-legacy",
+ "deckboard-vm",
  "dirs",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "deckboard-vm"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

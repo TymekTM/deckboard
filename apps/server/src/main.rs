@@ -58,6 +58,18 @@ async fn main() -> anyhow::Result<()> {
             command: input.command.clone(),
         });
     }
+    // The native Voicemeeter bridge replaces the ffi-napi extension, so its
+    // input declarations register here too (vm tiles otherwise stay gray).
+    for (value, icon, font_icon, color) in deckboard_vm::input_declarations() {
+        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+            value: value.to_string(),
+            icon: icon.map(str::to_string),
+            color: Some(color.to_string()),
+            font_icon: Some(font_icon.to_string()),
+            mode: None,
+            command: None,
+        });
+    }
     let backend = Arc::new(SqlBackend::new(db).with_extensions(ext_manager.clone()));
 
     let state = Arc::new(AppState {

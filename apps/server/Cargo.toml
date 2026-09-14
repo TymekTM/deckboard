@@ -20,3 +20,4 @@ deckboard-db = { path = "../../crates/db" }
 deckboard-actions = { path = "../../crates/actions" }
 deckboard-legacy = { path = "../../crates/legacy" }
 deckboard-ext = { path = "../../crates/ext" }
+deckboard-vm = { path = "../../crates/vm" }

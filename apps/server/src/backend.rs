@@ -6,6 +6,7 @@ use deckboard_actions::{Command, EnigoInput, EventSink};
 use deckboard_db::{ButtonRow, Db};
 use deckboard_ext::ExtManager;
 use deckboard_legacy::service::Backend;
+use deckboard_vm::VoicemeeterState;
 
 /// SQLite-backed backend. Executions are synchronous (the original robotjs
 /// dispatch was too) and run inside `spawn_blocking` on the caller's side;
@@ -17,6 +18,9 @@ pub struct SqlBackend {
     /// Original Deckboard extensions; action types the builtin dispatcher
     /// does not know are handed to whichever extension declared them.
     extensions: Option<Arc<ExtManager>>,
+    /// Native Voicemeeter remote (replaces the ffi-napi based extension,
+    /// which cannot load in our JS host).
+    voicemeeter: Mutex<VoicemeeterState>,
 }
 
 impl SqlBackend {
@@ -25,6 +29,7 @@ impl SqlBackend {
             db: Mutex::new(db),
             input: Mutex::new(None),
             extensions: None,
+            voicemeeter: Mutex::new(VoicemeeterState::new()),
         }
     }
 
@@ -50,6 +55,29 @@ impl SqlBackend {
             Ok(()) => {}
             // the original shows a dialog and stops; we log and stop too
             Err(e) => tracing::warn!(kind = %cmd.kind, error = %e, "extension execute failed"),
+        }
+        true
+    }
+
+    /// Run `vm-*` actions against the Voicemeeter remote DLL. Only tried
+    /// when no loaded JS extension claimed the action (the original
+    /// voicemeeter-control extension cannot load in our host).
+    fn exec_voicemeeter(&self, cmd: &Command) -> bool {
+        if !deckboard_vm::is_vm_action(&cmd.kind) {
+            return false;
+        }
+        let args = cmd
+            .command
+            .as_deref()
+            .and_then(|c| serde_json::from_str(c).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let result = self
+            .voicemeeter
+            .lock()
+            .unwrap()
+            .execute(&cmd.kind, &args);
+        if let Err(e) = &result {
+            tracing::warn!(kind = %cmd.kind, error = %e, "voicemeeter action failed");
         }
         true
     }
@@ -109,7 +137,7 @@ impl Backend for SqlBackend {
             button.options.as_deref(),
             &button.mode,
         );
-        if self.exec_extension(&cmd, None) {
+        if self.exec_extension(&cmd, None) || self.exec_voicemeeter(&cmd) {
             return;
         }
         self.with_input(|input| {
@@ -124,7 +152,7 @@ impl Backend for SqlBackend {
             button.options.as_deref(),
             &button.mode,
         );
-        if self.exec_extension(&cmd, Some(value)) {
+        if self.exec_extension(&cmd, Some(value)) || self.exec_voicemeeter(&cmd) {
             return;
         }
         self.with_input(|input| {
