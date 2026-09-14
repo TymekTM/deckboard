@@ -362,10 +362,13 @@ mod tests {
         let mut b = button("twitch-follower-count", None, 0, 0, 2, 1);
         b.mode = "graph".into();
         let s = m.shortcut_payload(&b);
+        // the tablet categorizes by mode and watches customValues[extra]
+        assert_eq!(s["mode"], "graph");
         assert_eq!(s["extra"], "twitch-follower-count");
         let mut b = button("custom-metric", Some("my-key"), 0, 0, 2, 1);
         b.mode = "graph".into();
         let s = m.shortcut_payload(&b);
+        assert_eq!(s["mode"], "graph");
         assert_eq!(s["extra"], "my-key");
     }
 
