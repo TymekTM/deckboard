@@ -125,13 +125,7 @@ function tileContextMenu(tile, event) {
       label: "Delete",
       icon: "trash",
       danger: true,
-      run: async () => {
-        const ok = await ask(`Delete tile "${tile.title || tile.type}"?`, {
-          title: "Delete tile",
-          kind: "warning",
-        });
-        if (ok) await tileDeleted(tile);
-      },
+      run: () => tileDeleted(tile),
     },
   ]);
 }
