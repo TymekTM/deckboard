@@ -7,6 +7,7 @@ package app.deckboard.mobile.ui
 
 import android.os.Build
 
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -41,6 +42,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -48,6 +50,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
@@ -77,9 +81,7 @@ fun BoardScreen(vm: DeckboardViewModel) {
             .background(DeckColors.background)
             .then(if (status != null) Modifier.blur(16.dp) else Modifier),
     ) {
-        board?.let { b ->
-            BoardGrid(vm, b, Modifier.fillMaxSize())
-        }
+        BoardSwitcher(board, boards, vm, Modifier.fillMaxSize())
         Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp)) {
             BoardChip(vm)
         }
@@ -124,6 +126,111 @@ private fun RingSpinner(modifier: Modifier = Modifier) {
             useCenter = false,
             style = Stroke(width = 6f, cap = StrokeCap.Round),
         )
+    }
+}
+
+/** Slide duration and the dim/parallax the settled board gets while the
+ *  incoming one travels over it. */
+private const val SWITCH_MS = 300f
+private const val BASE_PARALLAX = 0.25f
+private const val BASE_DIM = 0.35f
+
+/** Animated board switch: the incoming board slides in from the side of
+ *  its position in the boards list while the settled board drifts aside
+ *  and dims. The progress loop reads raw frame time through
+ *  `withFrameNanos`, because deck tablets routinely run with the system
+ *  animator scales at 0 - that collapses every standard Compose animation
+ *  into an instant jump (the frozen spinner on the SM-T561). Layer
+ *  properties change per frame, so the boards themselves never
+ *  recompose during the transition. */
+@Composable
+private fun BoardSwitcher(
+    board: Board?,
+    boards: List<Board>,
+    vm: DeckboardViewModel,
+    modifier: Modifier = Modifier,
+) {
+    var settled by remember { mutableStateOf<Board?>(null) }
+    var incoming by remember { mutableStateOf<Board?>(null) }
+    var progress by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    var fromRight by remember { mutableStateOf(true) }
+    var widthPx by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+
+    LaunchedEffect(board?.id) {
+        val target = board
+        if (target == null) {
+            settled = null
+            incoming = null
+            progress = 0f
+            return@LaunchedEffect
+        }
+        val current = settled
+        if (current == null || current.id == target.id) {
+            // first board after (re)connect or a same-board refresh - no
+            // transition. incoming is still cleared: this run may be
+            // replacing a cancelled mid-flight switch (rapid board.open),
+            // and a stale overlay would freeze on screen
+            settled = target
+            incoming = null
+            progress = 0f
+            return@LaunchedEffect
+        }
+        val order = { b: Board -> boards.indexOfFirst { it.id == b.id } }
+        fromRight = order(target) >= order(current)
+        incoming = target
+        progress = 0f
+        val start = withFrameNanos { it }
+        while (true) {
+            val now = withFrameNanos { it }
+            val t = (now - start) / 1_000_000f / SWITCH_MS
+                progress = FastOutSlowInEasing.transform(t.coerceIn(0f, 1f))
+            if (t >= 1f) break
+        }
+        // Let the completed-slide frame present before swapping the
+        // boards: the swap recomposes the whole settled board (36 tiles
+        // on All In One) and stalls composition for hundreds of
+        // milliseconds on the tablet. Deferred by one frame, that stall
+        // lands on a static final image instead of freezing mid-slide.
+        withFrameNanos { }
+        settled = target
+        incoming = null
+        progress = 0f
+    }
+
+    // The live `board` object wins whenever its id matches the rendered
+    // slot, so boards.delta edits keep flowing into the board on screen
+    // (and into the one sliding in) instead of showing a stale snapshot.
+    fun rendered(b: Board): Board = if (board?.id == b.id) board else b
+
+    Box(modifier.onSizeChanged { widthPx = it.width }) {
+        settled?.let { base ->
+            val dim = if (incoming == null) 0f else progress
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        val drift = BASE_PARALLAX * widthPx * dim
+                        translationX = if (fromRight) -drift else drift
+                    },
+            ) {
+                BoardGrid(vm, rendered(base), Modifier.fillMaxSize())
+            }
+            if (dim > 0f) {
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = BASE_DIM * dim)))
+            }
+        }
+        incoming?.let { next ->
+            BoardGrid(
+                vm,
+                rendered(next),
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        val side = if (fromRight) 1f else -1f
+                        translationX = side * (1f - progress) * widthPx
+                    },
+            )
+        }
     }
 }
 
