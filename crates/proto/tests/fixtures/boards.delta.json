@@ -1,0 +1,1 @@
+{"v":2,"type":"boards.delta","payload":{"generation":8,"ops":[{"op":"tile-set","board":3,"tile":{"id":17,"x":0,"y":0,"w":2,"h":1,"kind":"button","params":null,"interactions":["tap","press-start","press-end"]}},{"op":"board-remove","board":9}]}}

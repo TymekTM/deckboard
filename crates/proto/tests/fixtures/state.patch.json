@@ -1,0 +1,1 @@
+{"v":2,"type":"state.patch","payload":{"changes":[{"channel":"discord.microphone-muted","value":false},{"channel":"ext.si-cpu-usage","value":0.44},{"channel":"ext.queue","value":["a","b"]}]}}

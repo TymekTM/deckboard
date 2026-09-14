@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
-use deckboard_legacy::{router, AppState, Hub};
+use deckboard_legacy::{AppState, Hub};
 use tracing_subscriber::EnvFilter;
 
 use crate::backend::SqlBackend;
@@ -132,41 +132,85 @@ async fn main() -> anyhow::Result<()> {
         backend: backend as Arc<dyn deckboard_legacy::Backend>,
     });
 
-    // Extensions push custom values (graph/button state); the original
-    // forwards them to every client as app_status_update APP_CUSTOM_VALUE.
-    let hub = state.hub.clone();
+    let port: u16 = std::env::var("DECKBOARD_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8501);
+
+    // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
+    // /v2/pair. Devices/assets live next to the DB; DECKBOARD_DEVICES and
+    // DECKBOARD_ASSETS override them (hermetic runs).
+    let v2 = Arc::new(deckboard_v2::V2State {
+        hub: Arc::new(deckboard_v2::V2Hub::new()),
+        backend: state.backend.clone(),
+        devices: Arc::new(deckboard_v2::DeviceStore::load(
+            std::env::var_os("DECKBOARD_DEVICES")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| home.join("deckboard/devices.json")),
+        )?),
+        pairing: Arc::new(deckboard_v2::Pairing::new()),
+        assets: Arc::new(deckboard_v2::AssetStore::open(
+            std::env::var_os("DECKBOARD_ASSETS")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| home.join("deckboard/assets")),
+        )?),
+        engine: Arc::new(deckboard_v2::StateEngine::new(deckboard_proto::SERIES_CAP)),
+        generation: deckboard_v2::Generation::starting_at(1),
+        config: deckboard_v2::V2Config { public_port: port, ..Default::default() },
+    });
+
+    // Extension pushes feed both protocols: the legacy app_status_update
+    // broadcast (stock client) and one v2 channel per data key.
+    let feed_v2 = {
+        let engine = v2.engine.clone();
+        move |data: serde_json::Value| {
+            if let Some(map) = data.as_object() {
+                for (key, value) in map {
+                    engine.set(&format!("ext.{key}"), value.clone());
+                }
+            }
+        }
+    };
+    let hub_legacy = state.hub.clone();
+    let feed = feed_v2.clone();
     tokio::spawn(async move {
         while let Some(deckboard_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
+            feed(data.clone());
             let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
             let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
-            hub.broadcast("app_status_update", Some(&payload)).await;
+            hub_legacy.broadcast("app_status_update", Some(&payload)).await;
         }
     });
 
     // Native system-info pushes its four si-* values on the same channel
     // and cadence the JS extension used.
     let mut sysinfo_values = deckboard_sysinfo::spawn_push();
-    let hub = state.hub.clone();
+    let feed = feed_v2.clone();
+    let hub_legacy = state.hub.clone();
     tokio::spawn(async move {
         while let Some(data) = sysinfo_values.recv().await {
+            feed(data.clone());
             let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
             let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
-            hub.broadcast("app_status_update", Some(&payload)).await;
+            hub_legacy.broadcast("app_status_update", Some(&payload)).await;
         }
     });
+
+    // v2 background task: coalesced state patches.
+    tokio::spawn(deckboard_v2::run_flusher(
+        v2.engine.clone(),
+        v2.hub.clone(),
+        v2.config.patch_interval,
+    ));
 
     // TEMPORARY default 8501: the original desktop app still owns 8500 and
     // the DB. Note the stock Android client hardcodes port 8500 - testing
     // with the real tablet requires closing the old app so we can bind 8500
     // (set DECKBOARD_PORT=8500), or waiting for protocol v2 (our client).
     // Flip the default back to 8500 when the original app is retired.
-    let port: u16 = std::env::var("DECKBOARD_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8501);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("deckboard legacy server listening on {addr}");
+    tracing::info!("deckboard server listening on {addr} (legacy /socket.io/ + v2 /v2/ws)");
 
     // Engine.IO: drop sessions silent for longer than pingInterval+pingTimeout
     let hub = state.hub.clone();
@@ -178,6 +222,8 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    axum::serve(listener, router(state)).await?;
+    // ConnectInfo is needed by the loopback guard on POST /v2/pair.
+    let app = deckboard_legacy::router(state).merge(deckboard_v2::router(v2));
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
