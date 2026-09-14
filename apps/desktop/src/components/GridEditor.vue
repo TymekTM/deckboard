@@ -68,6 +68,26 @@ function clamp(v, min, max) {
   return Math.min(max, Math.max(min, v));
 }
 
+// every unoccupied grid position renders as a visible empty slot, like the
+// original editor and tablet client
+const emptyCells = computed(() => {
+  const occupied = new Set();
+  for (const t of props.board.buttons) {
+    for (let dy = 0; dy < Math.max(1, t.h); dy++) {
+      for (let dx = 0; dx < Math.max(1, t.w); dx++) {
+        occupied.add(`${t.x + dx},${t.y + dy}`);
+      }
+    }
+  }
+  const cells = [];
+  for (let y = 0; y < props.board.height; y++) {
+    for (let x = 0; x < props.board.width; x++) {
+      if (!occupied.has(`${x},${y}`)) cells.push({ x, y });
+    }
+  }
+  return cells;
+});
+
 function startDrag(tile, mode, event) {
   if (props.touch) return;
   if (event.button !== 0) return; // right/middle click must not drag
@@ -174,7 +194,21 @@ function onGridClick(event) {
       :class="{ touch }"
       :style="gridStyle"
       @click="onGridClick"
-    >
+      >
+      <div
+        v-for="c in emptyCells"
+        :key="`empty-${c.x}-${c.y}`"
+        class="tile-slot"
+        :style="{
+          left: `${c.x * cell}px`,
+          top: `${c.y * row}px`,
+          width: `${cell}px`,
+          height: `${row}px`,
+        }"
+        @click.stop="!touch && $emit('tile-add', { x: c.x, y: c.y })"
+      >
+        <div class="empty-cell"></div>
+      </div>
       <div
         v-for="tile in board.buttons"
         :key="tile.id ?? `fill-${tile.x}-${tile.y}`"
@@ -258,6 +292,17 @@ function onGridClick(event) {
   background-size: cover;
 }
 .tile-slot { position: absolute; padding: 5px; }
+.tile-slot:has(> .empty-cell) { cursor: pointer; }
+.touch .tile-slot { cursor: default; }
+.empty-cell {
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.09);
+  transition: background 120ms ease-out;
+}
+.tile-slot:hover > .empty-cell { background: rgba(0, 0, 0, 0.16); }
+.touch .tile-slot:hover > .empty-cell { background: rgba(0, 0, 0, 0.09); }
 .tile {
   position: relative;
   width: 100%;
