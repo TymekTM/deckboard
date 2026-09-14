@@ -24,8 +24,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -44,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.deckboard.mobile.proto.Shortcut
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.delay
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -71,13 +75,68 @@ data class WidgetManifest(val widget: String) {
     }
 }
 
+/** True for the deckboard-clock extension's display tile (`type` is its
+ *  input value); we render the time locally instead of consuming the
+ *  extension's minute pushes. */
+fun isClockTile(shortcut: Shortcut): Boolean = shortcut.type == "clock-display-time"
+
 /** Implicit template for a shortcut when no manifest overrides it. */
 fun templateFor(shortcut: Shortcut): String {
+    if (isClockTile(shortcut)) return "clock"
     val manifest = WidgetManifest.of(shortcut)
     if (manifest != null) return manifest.widget
     return when (shortcut.mode) {
         "graph" -> "graph"
         else -> shortcut.mode
+    }
+}
+
+/** Native clock. The extension only picks the format (`command` holds
+ *  `clock-12h` or `clock-24h`); the time itself comes from the device and
+ *  re-renders right after each minute boundary, no JS round-trip. */
+@Composable
+fun ClockTile(
+    shortcut: Shortcut,
+    titleColor: Color,
+    modifier: Modifier = Modifier,
+) {
+    var text by remember(shortcut.id) { mutableStateOf("") }
+    LaunchedEffect(shortcut.id) {
+        while (true) {
+            val cal = java.util.Calendar.getInstance()
+            val minute = cal.get(java.util.Calendar.MINUTE).toString().padStart(2, '0')
+            text = if (shortcut.command == "clock-12h") {
+                val h = cal.get(java.util.Calendar.HOUR_OF_DAY)
+                val hour12 = if (h % 12 == 0) 12 else h % 12
+                val ampm = if (cal.get(java.util.Calendar.AM_PM) == java.util.Calendar.AM) "AM" else "PM"
+                "$hour12:$minute $ampm"
+            } else {
+                "${cal.get(java.util.Calendar.HOUR_OF_DAY).toString().padStart(2, '0')}:$minute"
+            }
+            delay(60_000L - (cal.get(java.util.Calendar.SECOND) * 1000L + cal.get(java.util.Calendar.MILLISECOND)))
+        }
+    }
+    Column(
+        modifier
+            .fillMaxSize()
+            .padding(4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        if (shortcut.unicode.isNotEmpty()) {
+            Text(
+                text = faChar(shortcut.unicode),
+                fontFamily = faFamily(shortcut.prefix),
+                fontSize = 20.sp,
+                color = titleColor,
+            )
+        }
+        Text(
+            text = text,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = titleColor,
+        )
     }
 }
 
@@ -117,26 +176,33 @@ fun GraphTile(
         }
         Canvas(Modifier.fillMaxWidth().fillMaxHeight().padding(top = 2.dp)) {
             if (history.size < 2) return@Canvas
-            // percent series sit on a fixed 0..100 scale like a meter;
-            // other units (GB, degrees) use the observed range with a
-            // little headroom so the curve does not pin to the edges
-            val (minV, maxV) = if (suffix == "%") {
-                0f to 100f
-            } else {
-                val lo = history.min()
-                val hi = history.max()
-                val pad = ((hi - lo).takeIf { it > 0f } ?: hi * 0.2f).coerceAtLeast(0.01f)
-                (lo - pad * 0.25f) to (hi + pad)
-            }
-            val span = maxV - minV
+            // normalize around the window's average so the ordinary level
+            // sits at mid-height: a strong machine idles near a few percent
+            // and a fixed 0..100 scale would pin the whole curve to the
+            // floor. The span has an absolute and relative floor so a quiet
+            // series stays calm instead of amplifying noise to full height.
+            val avg = history.sum() / history.size
+            val dev = maxOf(history.max() - avg, avg - history.min())
+            val half = maxOf(dev, 0.2f * abs(avg), 5f)
+            val minV = avg - half
+            val span = 2f * half
             val stepX = size.width / (history.size - 1)
-            val path = Path()
+            val line = Path()
             history.forEachIndexed { i, v ->
                 val x = i * stepX
                 val y = size.height - ((v - minV) / span).coerceIn(0f, 1f) * size.height
-                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                if (i == 0) line.moveTo(x, y) else line.lineTo(x, y)
             }
-            drawPath(path, lineColor, style = Stroke(width = 3f, cap = StrokeCap.Round))
+            // wash the area under the curve with a lighter tone of the
+            // line color so the filled side reads as background, not data
+            val area = Path().apply {
+                addPath(line)
+                lineTo(size.width, size.height)
+                lineTo(0f, size.height)
+                close()
+            }
+            drawPath(area, lineColor.copy(alpha = 0.22f))
+            drawPath(line, lineColor, style = Stroke(width = 3f, cap = StrokeCap.Round))
         }
     }
 }

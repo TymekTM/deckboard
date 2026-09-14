@@ -90,9 +90,11 @@ fun Tile(
     )
     val titleColor = hex(if (active) shortcut.titleColor2 else shortcut.titleColor, Color.White)
 
-    // graph tiles are pure displays with no gesture: they sit flat on the
-    // board instead of raised like the physical keys everything else emulates
-    val raised = templateFor(shortcut) != "graph"
+    // passive templates have no gesture: graph widgets are pure displays
+    // and the clock shows local time. They sit flat on the board instead
+    // of raised like the physical keys everything else emulates
+    val template = templateFor(shortcut)
+    val raised = template != "graph" && template != "clock"
 
     // physical key feedback: tiles sit raised with a hard shadow cast to
     // the bottom-right; pressing sinks the face (scale + shift toward the
@@ -166,10 +168,11 @@ fun Tile(
             if (scrim > 0f) {
                 Box(Modifier.matchParentSize().background(Color.White.copy(alpha = scrim)))
             }
-            when (templateFor(shortcut)) {
+            when (template) {
                 "slider" -> SliderTile(shortcut, color, iconColor, onSlider)
                 "knob" -> KnobTile(shortcut, color, iconColor, titleColor, onSlider)
                 "graph" -> GraphTile(shortcut, history, suffix, titleColor)
+                "clock" -> ClockTile(shortcut, titleColor)
                 "list" -> ListTile(shortcut, listItems, titleColor, onPress = onPressEnd)
                 "custom-value" -> CustomValueTile(
                     shortcut,
