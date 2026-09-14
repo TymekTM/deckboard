@@ -90,9 +90,18 @@ fun Tile(
     } else {
         hex(if (active) shortcut.color2.ifEmpty { shortcut.color } else shortcut.color, DeckColors.tileFallback)
     }
+    // the glyph switches with state like the official controls:
+    // microphone / microphone-slash, headphones / deaf (FA has no
+    // slashed headphones and the ear icon reads as deafened)
+    val discordIcon = when {
+        shortcut.type == "toggle-microphone" -> if (muted) "\uF131" else "\uF130"
+        shortcut.type == "toggle-headphone" -> if (muted) "\uF2A4" else "\uF025"
+        else -> null
+    }
+    val unicode = discordIcon
+        ?: if (active) shortcut.unicode2.ifEmpty { shortcut.unicode } else shortcut.unicode
     val borderColor = hex(if (active) shortcut.borderColor2.orEmpty() else shortcut.borderColor.orEmpty(), Color.Transparent)
     val shape = shapeOf(if (active) shortcut.shape2 else shortcut.shape, tileSize.value * 0.18f)
-    val unicode = if (active) shortcut.unicode2.ifEmpty { shortcut.unicode } else shortcut.unicode
     val iconColor = hex(
         (if (active) shortcut.iconColor2.orEmpty() else shortcut.iconColor.orEmpty()).ifEmpty { "#ffffff" },
         Color.White,
@@ -183,22 +192,38 @@ fun Tile(
                 "graph" -> GraphTile(shortcut, history, suffix, titleColor)
                 "clock" -> ClockTile(shortcut, titleColor)
                 "list" -> ListTile(shortcut, listItems, titleColor, onPress = onPressEnd)
-                "custom-value" -> CustomValueTile(
-                    shortcut,
-                    // the red face already carries the state, so the
-                    // pushed ON/OFF text would only repeat it
-                    customValue = if (discordToggle) null else customValue,
-                    suffix = if (discordToggle) null else suffix,
-                    titleColor = titleColor,
-                    onPressStart = {
-                        pressed = true
-                        onPressStart()
-                    },
-                    onPressEnd = {
-                        pressed = false
-                        onPressEnd()
-                    },
-                )
+                "custom-value" -> if (discordToggle) {
+                    // icon-only button: the state glyph on the red or
+                    // tile-colored face, no label like official Discord
+                    DiscordToggleTile(
+                        shortcut,
+                        unicode,
+                        iconColor,
+                        onPressStart = {
+                            pressed = true
+                            onPressStart()
+                        },
+                        onPressEnd = {
+                            pressed = false
+                            onPressEnd()
+                        },
+                    )
+                } else {
+                    CustomValueTile(
+                        shortcut,
+                        customValue,
+                        suffix,
+                        titleColor,
+                        onPressStart = {
+                            pressed = true
+                            onPressStart()
+                        },
+                        onPressEnd = {
+                            pressed = false
+                            onPressEnd()
+                        },
+                    )
+                }
                 else -> ButtonTile(
                     shortcut = shortcut,
                     unicode = unicode,
@@ -215,6 +240,43 @@ fun Tile(
                     onToggle = onToggle,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun DiscordToggleTile(
+    shortcut: Shortcut,
+    unicode: String,
+    iconColor: Color,
+    onPressStart: () -> Unit,
+    onPressEnd: () -> Unit,
+) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .pointerInput(shortcut.id) {
+                detectTapGestures(
+                    onPress = {
+                        onPressStart()
+                        try {
+                            awaitRelease()
+                        } finally {
+                            onPressEnd()
+                        }
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (unicode.isNotEmpty()) {
+            // state glyphs are hardcoded FA solid codepoints
+            Text(
+                text = faChar(unicode),
+                fontFamily = FaSolid,
+                fontSize = 26.sp,
+                color = iconColor,
+            )
         }
     }
 }
