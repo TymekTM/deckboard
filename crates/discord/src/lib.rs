@@ -86,9 +86,11 @@ pub struct AuthTokens {
 
 /// Discord's local HTTP endpoint (the port that answers 404 on /).
 fn find_endpoint() -> Result<String> {
+    let agent = http_agent();
     for port in 6463..6473 {
         let url = format!("http://127.0.0.1:{port}");
-        let agent = ureq::Agent::new_with_defaults();
+        // ureq reports 404 as an error unless configured otherwise, and
+        // Discord's endpoint is exactly the port answering 404 on /
         if let Ok(resp) = agent.get(&url).call() {
             if resp.status().as_u16() == 404 {
                 return Ok(url);
@@ -96,6 +98,15 @@ fn find_endpoint() -> Result<String> {
         }
     }
     Err(DiscordError::NotRunning)
+}
+
+/// HTTP client that returns every status as a Response (Discord's local
+/// API answers 404/400 on purpose).
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent()
 }
 
 /// x-www-form-urlencoded body from key/value pairs.
@@ -121,8 +132,7 @@ fn urlencode(s: &str) -> String {
 }
 
 fn post_form(url: &str, body: &str) -> Result<Value> {
-    let agent = ureq::Agent::new_with_defaults();
-    let resp = agent
+    let resp = http_agent()
         .post(url)
         .content_type("application/x-www-form-urlencoded")
         .header("Authorization", "Bearer null") // discord-rpc sends this too
@@ -132,7 +142,12 @@ fn post_form(url: &str, body: &str) -> Result<Value> {
         .into_body()
         .read_to_string()
         .map_err(|_| DiscordError::Call("oauth body"))?;
-    serde_json::from_str(&text).map_err(|_| DiscordError::Call("oauth json"))
+    let parsed: Value = serde_json::from_str(&text).map_err(|_| DiscordError::Call("oauth json"))?;
+    if parsed.get("access_token").is_none() {
+        // {"error": "invalid_client", ...}
+        return Err(DiscordError::Call("oauth error response"));
+    }
+    Ok(parsed)
 }
 
 /// Full interactive authorization: shows Discord's consent popup on the
@@ -144,29 +159,25 @@ pub fn authorize(config: &DiscordConfig, deadline: Instant) -> Result<AuthTokens
             "client id / secret missing in settings".into(),
         ));
     }
-    let endpoint = find_endpoint()?;
-    let agent = ureq::Agent::new_with_defaults();
-    // step 1: short-lived rpc token bound to this app
-    let body = form(&[
-        ("client_id", &config.client_id),
-        ("client_secret", &config.client_secret),
-    ]);
-    let resp = agent
-        .post(&format!("{endpoint}/oauth2/token/rpc"))
-        .content_type("application/x-www-form-urlencoded")
-        .send(body.as_bytes())
-        .map_err(|_| DiscordError::Call("token/rpc"))?;
-    let text = resp
-        .into_body()
-        .read_to_string()
-        .map_err(|_| DiscordError::Call("token/rpc body"))?;
-    let rpc_token: Value =
-        serde_json::from_str(&text).map_err(|_| DiscordError::Call("token/rpc json"))?;
-    let rpc_token = rpc_token
-        .get("rpc_token")
-        .and_then(Value::as_str)
-        .ok_or(DiscordError::Call("missing rpc_token"))?
-        .to_string();
+    // step 1 (optional): short-lived rpc token. Newer Discord builds
+    // dropped the local /oauth2/token routes - a failure here is fine,
+    // AUTHORIZE accepts the flow without an rpc token.
+    let rpc_token = match find_endpoint() {
+        Ok(endpoint) => {
+            let body = form(&[
+                ("client_id", &config.client_id),
+                ("client_secret", &config.client_secret),
+            ]);
+            post_form(&format!("{endpoint}/oauth2/token/rpc"), &body)
+                .ok()
+                .and_then(|v| {
+                    v.get("rpc_token")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+        }
+        Err(_) => None,
+    };
 
     // step 2: AUTHORIZE over the pipe - Discord shows the consent popup
     let mut pipe = Pipe::open()?;
@@ -178,17 +189,21 @@ pub fn authorize(config: &DiscordConfig, deadline: Instant) -> Result<AuthTokens
     )?;
     let mut session = Session { pipe, nonce: 0 };
     session.wait_for_ready(deadline)?;
-    let reply = session.request_until(
-        deadline,
-        "AUTHORIZE",
-        json!({
-            "scopes": SCOPES,
-            "client_id": config.client_id,
-            "rpc_token": rpc_token,
-            "prompt": "consent",
-        }),
-    )?;
+    let mut args = json!({
+        "scopes": SCOPES,
+        "client_id": config.client_id,
+        "prompt": "consent",
+    });
+    if let Some(token) = &rpc_token {
+        args["rpc_token"] = json!(token);
+    }
+    let reply = session.request_until(deadline, "AUTHORIZE", args)?;
     if reply.get("evt").and_then(Value::as_str) == Some("ERROR") {
+        let msg = reply
+            .pointer("/data/message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        tracing::warn!(message = msg, "discord AUTHORIZE rejected");
         return Err(DiscordError::AuthCancelled);
     }
     let code = reply
@@ -197,7 +212,8 @@ pub fn authorize(config: &DiscordConfig, deadline: Instant) -> Result<AuthTokens
         .ok_or(DiscordError::AuthCancelled)?
         .to_string();
 
-    // step 3: exchange the code for the real tokens
+    // step 3: exchange the code on the real API (local routes are gone in
+    // newer Discord builds)
     let body = form(&[
         ("client_id", &config.client_id),
         ("client_secret", &config.client_secret),
@@ -205,7 +221,7 @@ pub fn authorize(config: &DiscordConfig, deadline: Instant) -> Result<AuthTokens
         ("grant_type", "authorization_code"),
         ("redirect_uri", REDIRECT_URI),
     ]);
-    let token_json = post_form(&format!("{endpoint}/oauth2/token"), &body)?;
+    let token_json = post_form("https://discord.com/api/oauth2/token", &body)?;
     Ok(AuthTokens {
         access_token: token_json
             .get("access_token")
@@ -226,7 +242,6 @@ pub fn refresh(config: &DiscordConfig) -> Result<AuthTokens> {
         .refresh_token
         .as_deref()
         .ok_or(DiscordError::AuthRejected)?;
-    let endpoint = find_endpoint()?;
     let body = form(&[
         ("client_id", &config.client_id),
         ("client_secret", &config.client_secret),
@@ -234,7 +249,7 @@ pub fn refresh(config: &DiscordConfig) -> Result<AuthTokens> {
         ("refresh_token", refresh_token),
         ("redirect_uri", REDIRECT_URI),
     ]);
-    let token_json = post_form(&format!("{endpoint}/oauth2/token"), &body)?;
+    let token_json = post_form("https://discord.com/api/oauth2/token", &body)?;
     Ok(AuthTokens {
         access_token: token_json
             .get("access_token")
