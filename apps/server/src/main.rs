@@ -209,7 +209,9 @@ async fn main() -> anyhow::Result<()> {
                 tick.tick().await;
                 cycle = (cycle + 1) % 6;
                 let backend = backend.clone();
-                let with_device = cycle == 0;
+                // the original fetched the device id on the first fetch
+                // and every 6th cycle after that
+                let with_device = cycle == 1;
                 let snapshot = tokio::task::spawn_blocking(move || {
                     let (volume, muted) = backend.speaker_status();
                     let device =

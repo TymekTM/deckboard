@@ -295,6 +295,14 @@ impl SqlBackend {
 }
 
 impl Backend for SqlBackend {
+    fn speaker_status(&self) -> (Option<f32>, Option<bool>) {
+        SqlBackend::speaker_status(self)
+    }
+
+    fn speaker_device_id(&self) -> Option<String> {
+        SqlBackend::speaker_device_id(self)
+    }
+
     fn get_boards(&self) -> Vec<deckboard_db::BoardRow> {
         match self.db.lock().unwrap().get_boards() {
             Ok(boards) => boards,
