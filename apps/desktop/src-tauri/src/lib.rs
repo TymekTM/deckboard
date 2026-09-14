@@ -210,7 +210,13 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
-                let Some((volume, muted)) = deckboard_actions::audio::master_status() else {
+                // COM calls block; keep them off the runtime workers
+                let status =
+                    tauri::async_runtime::spawn_blocking(deckboard_actions::audio::master_status)
+                        .await
+                        .ok()
+                        .flatten();
+                let Some((volume, muted)) = status else {
                     continue;
                 };
                 let payload = serde_json::json!({
