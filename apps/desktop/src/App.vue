@@ -204,6 +204,9 @@ const currentBoard = computed(
   () => boards.value.find((b) => b.id === currentId.value) || null
 );
 const boardBg = computed(() => currentBoard.value?.background || "#437072");
+const boardNames = computed(() =>
+  Object.fromEntries(boards.value.map((b) => [b.id, b.name || "Untitled"]))
+);
 
 async function load() {
   status.value = await api.serverStatus();
@@ -559,6 +562,7 @@ function onKeydown(event) {
             :type-meta="typeMeta"
             :custom-values="customValues"
             :app-states="appStates"
+            :board-names="boardNames"
             @tile-open="editingTile = $event"
             @tile-moved="tileMoved"
             @tile-add="createFlow = { ...$event, boardId: currentId }"
@@ -572,6 +576,7 @@ function onKeydown(event) {
             :type-meta="typeMeta"
             :custom-values="customValues"
             :app-states="appStates"
+            :board-names="boardNames"
             @tile-exec="api.execButton($event.id)"
             @tile-slider="tileSlider"
             @tile-open="editingTile = $event"

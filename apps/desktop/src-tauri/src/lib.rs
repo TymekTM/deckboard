@@ -192,6 +192,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(deckboard_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
+                tracing::debug!(keys = ?data.as_object().map(|o| o.keys().collect::<Vec<_>>()), "extension value push");
                 let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
                 hub.broadcast("app_status_update", Some(&payload.to_string()))
                     .await;

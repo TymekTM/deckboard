@@ -13,6 +13,8 @@ const props = defineProps({
   // live state pushes (APP_CUSTOM_VALUE / APP_*), see applyStatusUpdate
   customValues: { type: Object, default: () => ({}) },
   appStates: { type: Object, default: () => ({}) },
+  // board id -> name, for board-switch tiles without a title
+  boardNames: { type: Object, default: () => ({}) },
 });
 const emit = defineEmits(["tile-open", "tile-moved", "tile-add", "tile-exec", "tile-slider", "ctx-tile", "ctx-empty"]);
 
@@ -45,7 +47,19 @@ function pick(tile, first, second) {
 function tileBg(tile) {
   return pick(tile, "color", "color2") || metaOf(tile).color || "#2c3e50";
 }
+
+// the original styles each vol variant with its own icon
+const VOL_ICONS = {
+  play: "play",
+  prev: "fast-backward",
+  next: "fast-forward",
+  vol_up: "volume-up",
+  vol_down: "volume-down",
+  vol_mute: "volume-off",
+};
+
 function tileIcon(tile) {
+  if (tile.type === "vol" && VOL_ICONS[tile.command]) return VOL_ICONS[tile.command];
   return pick(tile, "icon", "icon2") || metaOf(tile).icon || "";
 }
 function tileIconColor(tile) {
@@ -69,6 +83,59 @@ function tileTitleBox(tile) {
   return tile.title_box_color2 && tileActive(tile)
     ? tile.title_box_color2
     : tile.title_box_color;
+}
+
+// ---- live-value tiles (custom-value / graph / board), like the stock client
+
+// CustomValueButton: label = customValues[command || type], last sample of
+// graph-style objects. Shown when the tile has no title of its own.
+function customValueLabel(tile) {
+  const v = props.customValues[tile.command || tile.type];
+  if (v == null || typeof v === "object") return "";
+  return String(v);
+}
+
+// GraphButton: the extension pushes {values, title?, suffix?, description?}
+// under the tile's command (or type), like custom-value labels
+function graphData(tile) {
+  if (tile.mode !== "graph") return null;
+  const v = props.customValues[tile.command || tile.type];
+  if (!v || typeof v !== "object" || !Array.isArray(v.values) || !v.values.length) {
+    return null;
+  }
+  return v;
+}
+
+function graphLast(tile) {
+  const g = graphData(tile);
+  const last = g.values[g.values.length - 1];
+  return `${last ?? ""}${g.suffix || ""}`;
+}
+
+// polyline points over the tile, y normalized to the sample range
+function sparkPoints(values, close) {
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const pts = values.map((v, i) => {
+    const x = values.length === 1 ? 50 : (i / (values.length - 1)) * 100;
+    const y = 95 - ((v - min) / span) * 90;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return close ? `0,100 ${pts.join(" ")} 100,100` : pts.join(" ");
+}
+
+// board tiles without a title show the target board's name
+function boardTileTitle(tile) {
+  if (tile.title) return tile.title;
+  if (tile.type === "board") {
+    try {
+      return props.boardNames?.[JSON.parse(tile.command || "{}").id] || "";
+    } catch {
+      return "";
+    }
+  }
+  return "";
 }
 
 const drag = ref(null); // {tile, mode:'move'|'resize', dx, dy, pointerId}
@@ -306,20 +373,53 @@ function onGridClick(event) {
           />
           <img v-else-if="tile.img" class="tile-img" :src="tile.img" alt="" />
           <i
-            v-if="tileIcon(tile)"
+            v-if="
+              tileIcon(tile) &&
+              !(tile.mode === 'graph' && graphData(tile)) &&
+              !(tile.mode === 'custom-value' && !tile.title && customValueLabel(tile))
+            "
             class="tile-icon"
             :class="'fas fa-' + tileIcon(tile)"
             :style="{ color: tileIconColor(tile) }"
           ></i>
           <span
-            v-if="tile.title"
+            v-if="tile.mode === 'custom-value' && !tile.title && customValueLabel(tile)"
+            class="tile-value"
+            >{{ customValueLabel(tile) }}</span
+          >
+          <template v-if="tile.mode === 'graph' && graphData(tile)">
+            <div class="tile-graph-head">
+              <b v-if="tile.title || graphData(tile).title">{{
+                tile.title || graphData(tile).title
+              }}</b>
+              <span class="tile-graph-val">{{ graphLast(tile) }}</span>
+            </div>
+            <svg
+              class="tile-spark"
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+            >
+              <polygon
+                :points="sparkPoints(graphData(tile).values, true)"
+                fill="rgba(255, 255, 255, 0.35)"
+              />
+              <polyline
+                :points="sparkPoints(graphData(tile).values)"
+                fill="none"
+                stroke="rgba(255, 255, 255, 0.9)"
+                stroke-width="2.5"
+              />
+            </svg>
+          </template>
+          <span
+            v-if="boardTileTitle(tile)"
             class="tile-title"
             :class="`pos-${tileTitlePos(tile)}`"
             :style="{
               color: tileTitleColor(tile) || '#ffffff',
               background: tileTitleBox(tile) || 'transparent',
             }"
-            >{{ tile.title }}</span
+            >{{ boardTileTitle(tile) }}</span
           >
           <span v-if="tile.mode === 'slider' && !touch" class="tile-badge">
             <i class="fas fa-sliders-h"></i>
@@ -414,8 +514,7 @@ function onGridClick(event) {
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: none;
+  text-overflow: ellipsis;  pointer-events: none;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
   line-height: 1.3;
 }
@@ -434,6 +533,36 @@ function onGridClick(event) {
   right: 6px;
   font-size: 12px;
   opacity: 0.85;
+}
+/* live value pushed by extensions, shown instead of an icon */
+.tile-value {
+  font-size: 21px;
+  font-weight: 700;
+  color: #ffffff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+/* graph tiles: title + value block over a sparkline in the lower half */
+.tile-graph-head {
+  position: absolute;
+  inset: 4px 6px auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  color: #ffffff;
+  pointer-events: none;
+}
+.tile-graph-head b { font-size: 11px; font-weight: 600; opacity: 0.9; }
+.tile-graph-val { font-size: 18px; font-weight: 700; }
+.tile-spark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 50%;
+  pointer-events: none;
 }
 .slider-fill {
   position: absolute;
