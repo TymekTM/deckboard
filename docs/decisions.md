@@ -53,13 +53,16 @@ hole but does not make widgets mutually isolated. If widgets are ever
 shared with third parties, upgrade to origin isolation (one iframe/origin
 per widget) before publishing that. Revisit at M6.
 
-## ADR-006: Reconnect falls back to full snapshots
+## ADR-006: Deltas push live; snapshots recover (supersedes "full snapshots only")
 
-The client tracks a generation counter from `welcome`/`presence`. If it
-reconnects with a generation gap greater than N (start with: any gap, i.e.
-any disconnect) or a delta request times out after 5 s, it requests a full
-`boards.sync` snapshot instead of deltas. Deltas are an optimization, never
-a correctness requirement.
+Board changes flow as `boards.delta` op batches (`board-set`, `board-remove`,
+`tile-set`, `tile-remove`, `tile-clear`), each bumping a monotonic
+generation; full `boards.sync` snapshots flow once after `welcome` and
+whenever the editor replaces board data wholesale (import). Deltas are an
+optimization, never a correctness requirement: TCP ordering means a
+connected client cannot miss a delta, so any reconnect simply recovers via
+snapshot - no delta requests, no gap bookkeeping, no 5 s timeout (the
+earlier draft of this ADR had those; the simpler model replaced them).
 
 ## ADR-007: Tablet connectivity requires a foreground service
 
@@ -68,12 +71,19 @@ connection loop in a foreground service and prompts the user to exempt the
 app from battery optimization on first run. Without this the "live
 controller" silently dies with the screen off.
 
-## ADR-008: LAN trust with a pairing token on v2
+## ADR-008: LAN trust with one-time pairing codes and per-device tokens
 
 The legacy layer stays unauthenticated (LAN trust, like the original) - do
-not tunnel it through the internet. Protocol v2 adds a pairing token
-carried in the QR (`deckboard://host:port?token=...`) and checked at the
-WebSocket upgrade; the desktop shows a "trust this device?" prompt.
+not tunnel it through the internet. Protocol v2 authenticates at the
+WebSocket upgrade: pairing mints a one-time code (8 chars, 5 min, loopback
+`POST /v2/pair`, QR `deckboard://host:port?pair=<code>`); the tablet
+connects with it, sends `hello`, and the desktop shows a "trust this
+device?" prompt (M1 headless: auto-accept with a warning log; the prompt
+ships with the desktop UI). Trusting creates a per-device entry in
+`~/deckboard/devices.json` (`{id, name, token, created, last_seen}`);
+every later connect uses `?token=...`. Revoking a device = deleting its
+entry, so a leaked token never widens beyond one tablet. The tablet keeps
+its token in EncryptedSharedPreferences.
 
 ## ADR-009: Structured logging from day one
 

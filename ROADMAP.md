@@ -11,13 +11,22 @@ through a legacy compatibility layer until the new client ships.
       dispatching `exec_shortcut`/`exec_slider` for the system-level command
       subset. Acceptance: stock Deckboard Pro client connects over QR and
       renders boards.
-- [ ] **M1 - proto v2**: typed schema (crate `deckboard-proto`) + codegen to
-      TypeScript and Kotlin, raw WebSocket on the same port (`/v2/ws`),
-      pairing token, `hello/welcome`, `boards.sync` snapshot.
+- [x] **M1 - proto v2**: typed schema in `deckboard-proto` (envelope, widget
+      manifests, all messages) with ts-rs TypeScript bindings
+      (`crates/proto/bindings/`) and golden JSON fixtures parsed by both the
+      Rust tests and a Kotlin unit test. Transport in `deckboard-v2`:
+      raw WebSocket `/v2/ws` on the shared port, one-time pairing codes
+      (`POST /v2/pair`) + per-device tokens (`~/deckboard/devices.json`),
+      `hello`/`welcome` with the live channel catalog, `boards.sync` +
+      `boards.delta`, `state.sync`/`state.patch` (server-side series ring
+      buffers, 100 ms coalescing), `interaction` with press-start/press-end
+      and server-side hold-to-repeat, `board.open`, hashed assets on
+      `/assets/<sha256>`, WS-level pings (60 s) + watchdog. Spec:
+      `docs/protocol-v2.md`. The Kotlin client migrates to v2 in M4.
 - [ ] **M2 - Action engine complete**: remaining command types (audio
       volume via windows-rs, speaker-device, screenshot, clipboard-based
       unicode typing, media info), audio/device status watchers
-      (5 s / 60 s like the original).
+      (5 s / 60 s like the original) pushing v2 channels.
 - [ ] **M3 - Desktop editor (MVP gate)**: Tauri 2 + Vue 3 editor: boards,
       buttons, sliders CRUD, drag/resize, dual-state, `.boardjson`
       import/export (format-compatible), touch mode, tray, hotkeys,

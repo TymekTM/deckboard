@@ -33,6 +33,12 @@ android {
     buildFeatures {
         compose = true
     }
+    // Golden fixtures shared with the Rust contract tests
+    // (crates/proto/tests/fixtures) so both stacks parse the same wire
+    // examples.
+    sourceSets.getByName("test") {
+        resources.srcDir("../../crates/proto/tests/fixtures")
+    }
 }
 
 dependencies {
