@@ -96,6 +96,100 @@ const hotkeyError = ref("");
 const editingHotkey = ref(false);
 const autostart = ref(false);
 
+// custom right-click context menu, replacing the WebView2 default menu
+// everywhere: {x, y, items: [{label, icon, danger, run}]}
+const contextMenu = ref(null);
+
+function openContextMenu(event, items) {
+  contextMenu.value = {
+    x: Math.min(event.clientX, window.innerWidth - 216),
+    y: Math.min(event.clientY, window.innerHeight - 44 - items.length * 38),
+    items,
+  };
+}
+
+function closeContextMenu() {
+  contextMenu.value = null;
+}
+
+function runContextItem(item) {
+  closeContextMenu();
+  item.run();
+}
+
+function tileContextMenu(tile, event) {
+  openContextMenu(event, [
+    { label: "Edit tile", icon: "pen", run: () => (editingTile.value = tile) },
+    { label: "Run now", icon: "play", run: () => api.execButton(tile.id) },
+    {
+      label: "Delete",
+      icon: "trash",
+      danger: true,
+      run: async () => {
+        const ok = await ask(`Delete tile "${tile.title || tile.type}"?`, {
+          title: "Delete tile",
+          kind: "warning",
+        });
+        if (ok) await tileDeleted(tile);
+      },
+    },
+  ]);
+}
+
+function emptyContextMenu(pos, event) {
+  openContextMenu(event, [
+    {
+      label: "New button here",
+      icon: "plus",
+      run: () => (createFlow.value = { ...pos, boardId: currentId.value }),
+    },
+  ]);
+}
+
+function boardContextMenu(board, event) {
+  openContextMenu(event, [
+    {
+      label: "Edit board",
+      icon: "pen",
+      run: () => (boardModal.value = { mode: "edit", board }),
+    },
+    {
+      label: "Set current",
+      icon: "check",
+      run: () => (currentId.value = board.id),
+    },
+    {
+      label: "Clear tiles",
+      icon: "eraser",
+      run: async () => {
+        const ok = await ask(`Clear every tile from "${board.name}"?`, {
+          title: "Clear board",
+          kind: "warning",
+        });
+        if (ok) {
+          await api.clearBoard(board.id);
+          await load();
+        }
+      },
+    },
+    {
+      label: "Delete board",
+      icon: "trash",
+      danger: true,
+      run: async () => {
+        const ok = await ask(`Delete board "${board.name}"?`, {
+          title: "Delete board",
+          kind: "warning",
+        });
+        if (ok) {
+          await api.deleteBoard(board.id);
+          await load();
+        }
+      },
+    },
+  ]);
+}
+
 // shell state: zoom, sidebar collapse, rail popovers, board kebab menu
 const zoom = ref(1);
 const sidebarVisible = ref(true);
@@ -274,12 +368,28 @@ onMounted(async () => {
     }),
     await listen("app-status-update", (e) => applyStatusUpdate(e.payload))
   );
+  // the context menu closes on any click outside of it, or on Escape
+  window.addEventListener("mousedown", onGlobalMousedown, true);
+  window.addEventListener("keydown", onKeydown, true);
 });
-onUnmounted(() => unlisteners.forEach((f) => f()));
+onUnmounted(() => {
+  window.removeEventListener("mousedown", onGlobalMousedown, true);
+  window.removeEventListener("keydown", onKeydown, true);
+  unlisteners.forEach((f) => f());
+});
+
+function onGlobalMousedown(event) {
+  if (event.target.closest?.(".ctx-menu")) return;
+  closeContextMenu();
+}
+
+function onKeydown(event) {
+  if (event.key === "Escape") closeContextMenu();
+}
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" @contextmenu.prevent>
     <!-- icon rail -->
     <nav v-if="!touchMode" class="rail">
       <button
@@ -388,6 +498,7 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
           class="board-entry"
           :class="{ active: b.id === currentId }"
           @click="currentId = b.id"
+          @contextmenu.prevent="boardContextMenu(b, $event)"
         >
           {{ b.name || "Untitled" }}
         </button>
@@ -408,7 +519,7 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
       </div>
 
       <template v-if="status.dbOk">
-        <header v-if="!touchMode" class="board-head">
+        <header v-if="!touchMode" class="board-head" @contextmenu.prevent="currentBoard && boardContextMenu(currentBoard, $event)">
           <span class="board-title">{{ currentBoard?.name || "" }}</span>
           <div class="kebab-anchor">
             <button class="kebab" title="Board menu" @click="kebabOpen = !kebabOpen">
@@ -451,6 +562,8 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
             @tile-open="editingTile = $event"
             @tile-moved="tileMoved"
             @tile-add="createFlow = { ...$event, boardId: currentId }"
+            @ctx-tile="tileContextMenu"
+            @ctx-empty="emptyContextMenu"
           />
           <GridEditor
             v-if="touchBoardId && touchMode"
@@ -535,6 +648,31 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
           load();
         "
       />
+    </Transition>
+
+    <!-- custom right-click menu, shown anywhere via the context handlers -->
+    <div
+      v-if="contextMenu"
+      class="ctx-overlay"
+      @click="closeContextMenu"
+      @contextmenu.prevent="closeContextMenu"
+    ></div>
+    <Transition name="pop">
+      <div
+        v-if="contextMenu"
+        class="ctx-menu"
+        :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
+      >
+        <button
+          v-for="item in contextMenu.items"
+          :key="item.label"
+          class="menu-item"
+          :class="{ danger: item.danger }"
+          @click="runContextItem(item)"
+        >
+          <i v-if="item.icon" class="fas" :class="'fa-' + item.icon"></i>{{ item.label }}
+        </button>
+      </div>
     </Transition>
   </div>
 </template>
@@ -869,6 +1007,24 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
   position: fixed;
   inset: 0;
   z-index: 35;
+}
+
+/* custom right-click menu */
+.ctx-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+.ctx-menu {
+  position: fixed;
+  min-width: 200px;
+  background: var(--modal);
+  border-radius: 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  padding: 6px;
+  z-index: 61;
+  display: flex;
+  flex-direction: column;
 }
 
 /* popover transitions */

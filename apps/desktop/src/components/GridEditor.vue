@@ -14,7 +14,7 @@ const props = defineProps({
   customValues: { type: Object, default: () => ({}) },
   appStates: { type: Object, default: () => ({}) },
 });
-const emit = defineEmits(["tile-open", "tile-moved", "tile-add", "tile-exec", "tile-slider"]);
+const emit = defineEmits(["tile-open", "tile-moved", "tile-add", "tile-exec", "tile-slider", "ctx-tile", "ctx-empty"]);
 
 function metaOf(tile) {
   return props.typeMeta?.[tile.type] || {};
@@ -182,9 +182,34 @@ function onTileTap(tile) {
   emit("tile-exec", tile);
 }
 
-// right-click (long-press on touch devices) opens the tile's settings
-function onTileContext(tile) {
-  emit("tile-open", tile);
+// right-click (long-press on touch devices) over a tile: touch mode keeps
+// the old "open settings" behavior, edit mode opens the custom menu
+function onTileContext(tile, event) {
+  if (props.touch) {
+    emit("tile-open", tile);
+    return;
+  }
+  emit("ctx-tile", tile, event);
+}
+
+// right-click on an empty cell (edit mode): context menu with "add here"
+function onEmptyContext(pos, event) {
+  if (props.touch) return;
+  emit("ctx-empty", pos, event);
+}
+
+// right-click on the grid padding / background resolves the cell under
+// the pointer, like onGridClick
+function onGridContext(event) {
+  if (props.touch) return;
+  if (event.target !== event.currentTarget) return;
+  const rect = event.currentTarget.getBoundingClientRect();
+  const x = clamp(Math.floor((event.clientX - rect.left) / cell.value), 0, props.board.width - 1);
+  const y = clamp(Math.floor((event.clientY - rect.top) / row.value), 0, props.board.height - 1);
+  const occupied = props.board.buttons.some(
+    (t) => x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h
+  );
+  if (!occupied) emit("ctx-empty", { x, y }, event);
 }
 
 // Touch-mode sliders: drag vertically on the tile, value 0..1 from the
@@ -236,6 +261,7 @@ function onGridClick(event) {
       :class="{ touch }"
       :style="gridStyle"
       @click="onGridClick"
+      @contextmenu.prevent="onGridContext"
       >
       <div
         v-for="c in emptyCells"
@@ -248,6 +274,7 @@ function onGridClick(event) {
           height: `${row}px`,
         }"
         @click.stop="!touch && $emit('tile-add', { x: c.x, y: c.y })"
+        @contextmenu.prevent.stop="onEmptyContext({ x: c.x, y: c.y }, $event)"
       >
         <div class="empty-cell"></div>
       </div>
@@ -267,7 +294,7 @@ function onGridClick(event) {
             borderRadius: tileShape(tile),
           }"
           @dblclick="!touch && $emit('tile-open', tile)"
-          @contextmenu.prevent="onTileContext(tile)"
+          @contextmenu.prevent="onTileContext(tile, $event)"
           @pointerdown="startDrag(tile, 'move', $event)"
           @click.stop="onTileTap(tile)"
         >
