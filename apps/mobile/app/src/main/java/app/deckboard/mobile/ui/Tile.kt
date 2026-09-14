@@ -71,13 +71,16 @@ private fun shapeOf(shape: Int, radius: Float): Shape = when (shape) {
 
 /** Template for a tile: the kind decides, with `params.widget` hints
  *  (clock) on top. Unknown kinds degrade to a button. */
-fun templateFor(tile: Tile): String = when (tile.kind) {
-    V2.KIND_SLIDER -> "slider"
-    V2.KIND_KNOB -> "knob"
-    V2.KIND_GRAPH -> "graph"
-    V2.KIND_LIST -> "list"
-    V2.KIND_TOGGLE -> "toggle"
-    else -> if (tile.widgetHint() == "clock") "clock" else "button"
+fun templateFor(tile: Tile): String = when {
+    // a clock can arrive as a toggle (the clock extension pushes the time
+    // onto a channel); the widget hint outranks the wire kind
+    tile.widgetHint() == "clock" -> "clock"
+    tile.kind == V2.KIND_SLIDER -> "slider"
+    tile.kind == V2.KIND_KNOB -> "knob"
+    tile.kind == V2.KIND_GRAPH -> "graph"
+    tile.kind == V2.KIND_LIST -> "list"
+    tile.kind == V2.KIND_TOGGLE -> "toggle"
+    else -> "button"
 }
 
 @Composable
@@ -95,20 +98,35 @@ fun Tile(
     modifier: Modifier = Modifier,
 ) {
     val style = tile.style
+    // discord voice toggles carry the state like the official controls:
+    // pushed OFF (muted / deafened) lights the face red and swaps in the
+    // slash glyph - FA has no slashed headphones, the deaf ear reads as
+    // deafened - while ON keeps the tile color and the open glyph
+    val discordKind = when (tile.state?.channel?.removePrefix("ext.")) {
+        "toggle-microphone" -> "mic"
+        "toggle-headphone" -> "headphone"
+        else -> null
+    }
+    val muted = discordKind != null && liveText == "OFF"
     val baseColor = hex(style?.color, DeckColors.tileFallback)
     val activeColor = hex(style?.color2, baseColor)
-    val color = if (active) activeColor else baseColor
+    val color = when {
+        muted -> Color(0xFFED4245)
+        active -> activeColor
+        else -> baseColor
+    }
     // active state swaps in the paired glyph (mic -> mic-slash, ...)
-    val icon = (if (active) style?.icon2 ?: style?.icon else style?.icon).orEmpty()
+    val icon = when (discordKind) {
+        "mic" -> if (muted) "" else ""
+        "headphone" -> if (muted) "" else ""
+        else -> (if (active) style?.icon2 ?: style?.icon else style?.icon).orEmpty()
+    }
     val iconFamily = faFamily(style?.iconFamily)
     val iconColor = Color.White
     val titleColor = Color.White
     val title = style?.title.orEmpty()
     val shape = shapeOf(style?.shape?.toIntOrNull() ?: 0, tileSize.value * 0.18f)
 
-    // graph widgets are pure displays and the clock's tap only changes
-    // its local style (no server action). Both sit flat on the board
-    // instead of raised like the physical keys everything else emulates
     val template = templateFor(tile)
     val raised = template != "graph" && template != "clock"
 
@@ -191,7 +209,8 @@ fun Tile(
                     iconColor = iconColor,
                     titleColor = titleColor,
                     image = image,
-                    liveText = if (template == "toggle") liveText else null,
+                    iconOnly = discordKind != null,
+                    liveText = if (template == "toggle" && discordKind == null) liveText else null,
                     onPressStart = {
                         pressed = true
                         onPressStart()
@@ -215,11 +234,14 @@ private fun ButtonTile(
     iconColor: Color,
     titleColor: Color,
     image: ImageBitmap?,
+    iconOnly: Boolean,
     liveText: String?,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
 ) {
-    val title = listOfNotNull(
+    // icon-only faces (discord voice toggles): the color and the glyph
+    // carry the state, a label would only repeat it
+    val title = if (iconOnly) "" else listOfNotNull(
         liveText,
         tile.style?.title,
     ).filter { it.isNotEmpty() }.joinToString("  ")

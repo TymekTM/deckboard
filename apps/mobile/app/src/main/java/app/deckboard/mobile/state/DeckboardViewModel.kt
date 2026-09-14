@@ -99,6 +99,11 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     /** Set while a pairing is in flight (no token yet). */
     private var pendingPairCode: String? = null
 
+    /** Channels the server declared as series in the welcome catalog.
+     *  Patches for these append to the chart window even when the
+     *  connect-time snapshot carried no history yet (fresh server). */
+    private var seriesChannels: Set<String> = emptySet()
+
     init {
         // A paired device reconnects on its own; pairing needs the user
         // to enter a fresh code.
@@ -239,6 +244,9 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     private fun handleEvent(client: V2Client, ev: V2Event) {
         when (ev) {
             is V2Event.WelcomeReady -> {
+                seriesChannels = ev.welcome.channels
+                    .filterValues { it.shape == V2.SHAPE_SERIES }
+                    .keys
                 ev.issuedToken?.let { token ->
                     Log.i(TAG, "paired, storing device token")
                     saveConfig(_config.value.copy(token = token))
@@ -267,12 +275,13 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
                 for (change in ev.changes) {
                     val info = change.value
                     // series channels carry their newest point; scalars replace
-                    if (series.containsKey(change.channel)) {
+                    if (change.channel in seriesChannels) {
                         val point = (info as? kotlinx.serialization.json.JsonPrimitive)
                             ?.content?.toDoubleOrNull()
                         if (point != null) {
-                            // mirror the server's ring cap so a chatty
-                            // channel cannot grow the window unbounded
+                            // the window may not exist yet: a fresh server
+                            // sends an empty state.sync and only patches
+                            // from here on build the chart history
                             val window = ((series[change.channel] ?: emptyList()) + point)
                                 .takeLast(V2.SERIES_CAP)
                             series[change.channel] = window
