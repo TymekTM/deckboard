@@ -119,7 +119,22 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching {
                     val url = "http://${cfg.host}:${cfg.port}/assets/$hash?token=$token"
                     sharedHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
-                        if (resp.isSuccessful) BitmapFactory.decodeStream(resp.body?.byteStream()) else null
+                        if (!resp.isSuccessful) return@use null
+                        // one read: OkHttp streams cannot be consumed twice
+                        val bytes = resp.body?.byteStream()?.readBytes() ?: return@use null
+                        // a tile renders ~150px; decode with a power-of-two
+                        // sample so a future full-res photo cannot eat the
+                        // heap of a 1 GB tablet
+                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                        val sampled = BitmapFactory.Options().apply {
+                            inSampleSize = maxOf(
+                                bounds.outWidth / ASSET_MAX_DIM,
+                                bounds.outHeight / ASSET_MAX_DIM,
+                                1,
+                            )
+                        }
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, sampled)
                     }
                 }.getOrNull()
             }
@@ -339,6 +354,10 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         private const val TAG = "DeckboardViewModel"
 
         private const val ASSET_RETRIES = 3
+
+        /** Decode cap for tile images: tiles render around 150px, so a
+         *  512px sample is plenty even on a 2x2-tile widget. */
+        private const val ASSET_MAX_DIM = 512
 
         /** Shared by reconnects and asset fetches - see V2Client.http. */
         private val sharedHttp = OkHttpClient.Builder()

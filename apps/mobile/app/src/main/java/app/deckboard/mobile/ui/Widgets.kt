@@ -197,7 +197,7 @@ fun ClockTile(
 @Composable
 fun GraphTile(
     tile: Tile,
-    history: List<Double>,
+    history: SeriesWindow,
     liveText: String?,
     titleColor: Color,
     modifier: Modifier = Modifier,
@@ -230,7 +230,7 @@ fun GraphTile(
             // The server keeps a 120-point window; that is denser than a
             // tile can show, so bucket-average down to MAX_DRAWN_POINTS -
             // same shape, calmer line.
-            val points = downsample(history, MAX_DRAWN_POINTS)
+            val points = downsample(history.points, MAX_DRAWN_POINTS)
             if (points.size < 2) return@Canvas
             // normalize around the window's average so the ordinary level
             // sits at mid-height: a strong machine idles near a few percent
@@ -265,8 +265,8 @@ fun GraphTile(
 
 /** Newest series point as text - covers the gap between a (re)connect
  *  (only `state.sync` arrived, no patch yet) and the next producer push. */
-private fun liveFromSeries(history: List<Double>): String? {
-    val last = history.lastOrNull() ?: return null
+private fun liveFromSeries(history: SeriesWindow): String? {
+    val last = history.points.lastOrNull() ?: return null
     return if (last == kotlin.math.floor(last) && !last.isInfinite()) {
         last.toLong().toString()
     } else {
@@ -382,7 +382,7 @@ fun KnobTile(
 @Composable
 fun ListTile(
     tile: Tile,
-    items: List<String>,
+    items: TileItems,
     titleColor: Color,
     onPress: () -> Unit,
     modifier: Modifier = Modifier,
@@ -406,7 +406,7 @@ fun ListTile(
             )
         }
         LazyColumn(Modifier.fillMaxSize()) {
-            itemsIndexed(items) { i, item ->
+            itemsIndexed(items.values) { i, item ->
                 val highlight = i == selected
                 Row(
                     Modifier
