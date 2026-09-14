@@ -211,10 +211,6 @@ function bumpZoom(dir) {
   zoom.value = Math.min(1.5, Math.max(0.5, Math.round((zoom.value + dir * 0.1) * 10) / 10));
 }
 
-function resetView() {
-  zoom.value = 1;
-}
-
 let unlisteners = [];
 onMounted(async () => {
   await load();
@@ -274,10 +270,6 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
           </div>
         </Transition>
       </div>
-
-      <button class="rail-btn" title="Reset view (zoom 100%)" @click="resetView">
-        <i class="fas fa-arrows-alt"></i>
-      </button>
 
       <div class="rail-anchor">
         <button
