@@ -80,7 +80,16 @@ fun Tile(
     modifier: Modifier = Modifier,
 ) {
     val active = position == 1
-    val color = hex(if (active) shortcut.color2.ifEmpty { shortcut.color } else shortcut.color, DeckColors.tileFallback)
+    // discord voice toggles skip the ON/OFF text and switch color
+    // instead: a pushed OFF (muted or deafened) lights the tile red
+    // like the official voice-channel controls, ON keeps the tile color
+    val discordToggle = shortcut.type.startsWith("toggle-")
+    val muted = discordToggle && customValue == "OFF"
+    val color = if (muted) {
+        Color(0xFFED4245)
+    } else {
+        hex(if (active) shortcut.color2.ifEmpty { shortcut.color } else shortcut.color, DeckColors.tileFallback)
+    }
     val borderColor = hex(if (active) shortcut.borderColor2.orEmpty() else shortcut.borderColor.orEmpty(), Color.Transparent)
     val shape = shapeOf(if (active) shortcut.shape2 else shortcut.shape, tileSize.value * 0.18f)
     val unicode = if (active) shortcut.unicode2.ifEmpty { shortcut.unicode } else shortcut.unicode
@@ -176,9 +185,11 @@ fun Tile(
                 "list" -> ListTile(shortcut, listItems, titleColor, onPress = onPressEnd)
                 "custom-value" -> CustomValueTile(
                     shortcut,
-                    customValue,
-                    suffix,
-                    titleColor,
+                    // the red face already carries the state, so the
+                    // pushed ON/OFF text would only repeat it
+                    customValue = if (discordToggle) null else customValue,
+                    suffix = if (discordToggle) null else suffix,
+                    titleColor = titleColor,
                     onPressStart = {
                         pressed = true
                         onPressStart()
