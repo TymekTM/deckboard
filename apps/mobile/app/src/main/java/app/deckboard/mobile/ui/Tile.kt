@@ -62,6 +62,7 @@ fun Tile(
     shortcut: Shortcut,
     tileSize: androidx.compose.ui.unit.Dp,
     customValue: String?,
+    suffix: String?,
     history: List<Float>,
     listItems: List<String>,
     position: Int,
@@ -100,9 +101,9 @@ fun Tile(
         when (templateFor(shortcut)) {
             "slider" -> SliderTile(shortcut, color, iconColor, onSlider)
             "knob" -> KnobTile(shortcut, color, iconColor, titleColor, onSlider)
-            "graph" -> GraphTile(shortcut, history, titleColor)
+            "graph" -> GraphTile(shortcut, history, suffix, titleColor)
             "list" -> ListTile(shortcut, listItems, titleColor, onPress = onPressEnd)
-            "custom-value" -> CustomValueTile(shortcut, customValue, titleColor)
+            "custom-value" -> CustomValueTile(shortcut, customValue, suffix, titleColor)
             else -> ButtonTile(
                 shortcut = shortcut,
                 unicode = unicode,
@@ -223,9 +224,10 @@ private fun SliderTile(
 private fun CustomValueTile(
     shortcut: Shortcut,
     customValue: String?,
+    suffix: String?,
     titleColor: Color,
 ) {
-    val display = customValue ?: ""
+    val display = listOfNotNull(customValue, suffix).joinToString("") { it }
     Column(
         Modifier
             .fillMaxSize()

@@ -86,6 +86,7 @@ fun templateFor(shortcut: Shortcut): String {
 fun GraphTile(
     shortcut: Shortcut,
     history: List<Float>,
+    suffix: String?,
     titleColor: Color,
     modifier: Modifier = Modifier,
 ) {
@@ -98,7 +99,7 @@ fun GraphTile(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = parse(latest),
+            text = if (latest == null) "" else parse(latest) + (suffix ?: ""),
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
             color = titleColor,

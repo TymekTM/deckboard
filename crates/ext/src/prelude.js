@@ -266,19 +266,26 @@ var __os = {
     loadavg: function () { return [0, 0, 0]; },
     uptime: function () { return 0; },
     cpus: function () {
-        // one synthetic core with slowly increasing busy times: si derives
-        // load percentages from the delta between calls, and a constant
-        // counter would produce NaN (0/0)
-        __cpu_tick += 41;
-        __cpu_idle += 400;
-        return [{
-            model: "CPU",
-            speed: 2200,
-            times: { user: __cpu_tick, nice: 0, sys: __cpu_tick >> 1, idle: __cpu_idle, irq: 0 },
-        }];
+        // real aggregate CPU times from the OS, split evenly across logical
+        // cores: si derives load percentages from the delta between calls
+        var t = __host_cpu_times();
+        var n = Math.max(1, __host_cpu_count());
+        var idle = Math.floor(t.idle / n);
+        var user = Math.floor(t.user / n);
+        // kernel time includes idle on Windows; node reports the rest as sys
+        var sys = Math.max(0, Math.floor((t.kernel - t.idle - t.user) / n));
+        var arr = [];
+        for (var i = 0; i < n; i++) {
+            arr.push({
+                model: "CPU",
+                speed: 0,
+                times: { user: user, nice: 0, sys: sys, idle: idle, irq: 0 },
+            });
+        }
+        return arr;
     },
-    totalmem: function () { return 0; },
-    freemem: function () { return 0; },
+    totalmem: function () { return __host_mem_info().total; },
+    freemem: function () { return __host_mem_info().free; },
 };
 
 // ------------------------------------------------------------------ events
@@ -953,8 +960,6 @@ var __builtin_modules = {
     },
 };
 
-var __cpu_tick = 1000;
-var __cpu_idle = 100000;
 var __module_cache = {};
 var __module_stack = [];
 var __ext_exports = null;

@@ -4,12 +4,40 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 const BUTTONPROPS_JSON: &str = include_str!("../assets/buttonprops.json");
 const ICONS_JSON: &str = include_str!("../assets/icons.json");
 
 pub const FALLBACK_COLOR: &str = "#95a5a6";
+
+/// One extension input (`this.inputs.push({...})` in extension code) that
+/// can act as a button style source, registered by the extension host.
+#[derive(Debug, Clone)]
+pub struct ExtInput {
+    pub value: String,
+    pub icon: Option<String>,
+    pub color: Option<String>,
+    pub font_icon: Option<String>,
+    pub mode: Option<String>,
+    pub command: Option<String>,
+}
+
+fn ext_inputs() -> &'static RwLock<HashMap<String, ExtInput>> {
+    static INPUTS: OnceLock<RwLock<HashMap<String, ExtInput>>> = OnceLock::new();
+    INPUTS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Register one extension input so its style can back buttons of that type.
+pub fn register_extension_input(input: ExtInput) {
+    if input.value.is_empty() {
+        return;
+    }
+    ext_inputs()
+        .write()
+        .expect("ext input registry poisoned")
+        .insert(input.value.clone(), input);
+}
 
 /// Style defaults for one command type.
 #[derive(Debug, Clone, Default)]
@@ -87,7 +115,8 @@ impl StyleResolver {
         }
     }
 
-    /// Port of the original `buttonProps(row, type, command)` dispatch.
+    /// Port of the original `buttonProps(row, type, command)` dispatch:
+    /// built-in styles first, then extension inputs (`getExtensionButton`).
     pub fn props_for(&self, kind: &str, command: Option<&str>) -> Props {
         if kind == "vol" {
             return self.playback_lookup("#F5AB35", command);
@@ -104,7 +133,37 @@ impl StyleResolver {
         self.basic
             .get(kind)
             .cloned()
-            .unwrap_or_else(Props::default)
+            .unwrap_or_else(|| self.extension_props(kind))
+    }
+
+    /// Port of `getExtensionButton`: style from the extension input whose
+    /// `value` equals the button type; unknown icons fall back to
+    /// exclamation-circle, custom-value inputs add app + toggle_key.
+    fn extension_props(&self, kind: &str) -> Props {
+        let input = ext_inputs()
+            .read()
+            .expect("ext input registry poisoned")
+            .get(kind)
+            .cloned();
+        let Some(input) = input else {
+            return Props::default();
+        };
+        let prefix = input.font_icon.clone().unwrap_or_else(|| "fas".to_string());
+        let icon = input.icon.clone().unwrap_or_else(|| "exclamation-circle".to_string());
+        Props {
+            unicode: self.icon_unicode(&icon, &prefix),
+            color: input.color,
+            prefix: Some(prefix),
+            app: (input.mode.as_deref() == Some("custom-value"))
+                .then(|| "custom-value".to_string()),
+            toggle_key: (input.mode.as_deref() == Some("custom-value")).then(|| {
+                input
+                    .command
+                    .clone()
+                    .unwrap_or_else(|| kind.to_string())
+            }),
+            json_key: None,
+        }
     }
 
     fn playback_lookup(&self, color: &str, command: Option<&str>) -> Props {
@@ -184,6 +243,39 @@ mod tests {
         let p = r.props_for("totally-custom", None);
         assert!(p.unicode.is_none());
         assert!(p.color.is_none());
+    }
+
+    #[test]
+    fn extension_input_backs_button_style() {
+        register_extension_input(ExtInput {
+            value: "si-cpu".into(),
+            icon: Some("headphones".into()),
+            color: Some("#8E44AD".into()),
+            font_icon: Some("fas".into()),
+            mode: Some("graph".into()),
+            command: None,
+        });
+        let r = StyleResolver::global();
+        let p = r.props_for("si-cpu", None);
+        assert_eq!(p.color.as_deref(), Some("#8E44AD"));
+        assert_eq!(p.prefix.as_deref(), Some("fas"));
+        assert_eq!(
+            p.unicode.map(|u| u.chars().next().unwrap() as u32),
+            Some(0xf025)
+        );
+        // custom-value inputs carry app + toggle_key like the original
+        register_extension_input(ExtInput {
+            value: "my-value".into(),
+            icon: None,
+            color: Some("#123456".into()),
+            font_icon: None,
+            mode: Some("custom-value".into()),
+            command: None,
+        });
+        let p = r.props_for("my-value", None);
+        assert_eq!(p.app.as_deref(), Some("custom-value"));
+        assert_eq!(p.toggle_key.as_deref(), Some("my-value"));
+        assert_eq!(p.unicode.map(|u| u.chars().next().unwrap() as u32), Some(0xf06a));
     }
 
     #[test]

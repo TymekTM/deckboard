@@ -42,6 +42,8 @@ pub struct ExtRuntime {
     pub name: String,
     /// action `value` strings this extension handles
     pub actions: Vec<String>,
+    /// raw `inputs` declarations (button styles + actions for the mapper)
+    pub inputs: Vec<Value>,
     intervals: Vec<(u64, u64, Instant)>, // (id, ms, due)
 }
 
@@ -93,9 +95,14 @@ impl ExtRuntime {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default()
-            .into_iter()
+            .iter()
             .filter_map(|i| i.get("value").and_then(Value::as_str).map(str::to_string))
             .collect();
+        let inputs = info_obj
+            .get("inputs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
 
         // inject user configs from ~/deckboard/settings.json
         let cfg = serde_json::to_string(configs).unwrap_or_else(|_| "{}".into());
@@ -110,6 +117,7 @@ impl ExtRuntime {
             package: package.to_string(),
             name,
             actions,
+            inputs,
             intervals: Vec::new(),
         };
 
@@ -426,6 +434,102 @@ native!(host_hostname, |_args, _ctx| {
     Ok(JsValue::from(boa_engine::JsString::from(hostname())))
 });
 
+/// Aggregate CPU time counters in 100ns units: (idle, kernel, user).
+/// `kernel` includes idle, like Win32 GetSystemTimes.
+#[cfg(windows)]
+fn system_cpu_times() -> (u64, u64, u64) {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Filetime {
+        low: u32,
+        high: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetSystemTimes(idle: *mut Filetime, kernel: *mut Filetime, user: *mut Filetime) -> i32;
+    }
+    let (mut idle, mut kernel, mut user) = (Filetime::default(), Filetime::default(), Filetime::default());
+    // SAFETY: three distinct out-parameters of the documented struct size
+    let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
+    if ok == 0 {
+        return (0, 0, 0);
+    }
+    let raw = |f: &Filetime| ((f.high as u64) << 32) | f.low as u64;
+    (raw(&idle), raw(&kernel), raw(&user))
+}
+
+#[cfg(not(windows))]
+fn system_cpu_times() -> (u64, u64, u64) {
+    (0, 0, 0)
+}
+
+/// Physical memory in bytes: (total, available).
+#[cfg(windows)]
+fn system_mem_info() -> (u64, u64) {
+    // must mirror MEMORYSTATUSEX exactly: 64 bytes, dwLength = 64, or the
+    // API rejects the call
+    #[repr(C)]
+    struct MemoryStatus {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page: u64,
+        avail_page: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_virtual_extended: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(buf: *mut MemoryStatus) -> i32;
+    }
+    let mut buf = MemoryStatus {
+        length: std::mem::size_of::<MemoryStatus>() as u32,
+        memory_load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page: 0,
+        avail_page: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_virtual_extended: 0,
+    };
+    debug_assert_eq!(buf.length, 64);
+    // SAFETY: buf is initialized with the expected dwLength
+    let ok = unsafe { GlobalMemoryStatusEx(&mut buf) };
+    if ok == 0 {
+        return (0, 0);
+    }
+    (buf.total_phys, buf.avail_phys)
+}
+
+#[cfg(not(windows))]
+fn system_mem_info() -> (u64, u64) {
+    (0, 0)
+}
+
+native!(host_cpu_times, |_args, ctx| {
+    let (idle, kernel, user) = system_cpu_times();
+    JsValue::from_json(
+        &serde_json::json!({ "idle": idle, "kernel": kernel, "user": user }),
+        ctx,
+    )
+});
+
+native!(host_cpu_count, |_args, _ctx| {
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    Ok(JsValue::from(n as u32))
+});
+
+native!(host_mem_info, |_args, ctx| {
+    let (total, free) = system_mem_info();
+    JsValue::from_json(
+        &serde_json::json!({ "total": total, "free": free }),
+        ctx,
+    )
+});
+
 fn hostname() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into())
 }
@@ -489,6 +593,9 @@ fn register_natives(context: &mut Context) {
         ("__host_hostname", NativeFunction::from_fn_ptr(host_hostname)),
         ("__host_home_dir", NativeFunction::from_fn_ptr(host_home_dir)),
         ("__host_tmp_dir", NativeFunction::from_fn_ptr(host_tmp_dir)),
+        ("__host_cpu_times", NativeFunction::from_fn_ptr(host_cpu_times)),
+        ("__host_cpu_count", NativeFunction::from_fn_ptr(host_cpu_count)),
+        ("__host_mem_info", NativeFunction::from_fn_ptr(host_mem_info)),
     ];
     for (name, f) in fns {
         let _ = context.register_global_callable(boa_engine::JsString::from(name), 1, f);

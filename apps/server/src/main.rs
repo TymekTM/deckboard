@@ -45,6 +45,19 @@ async fn main() -> anyhow::Result<()> {
             None => tracing::info!(package, name, "extension ready"),
         }
     }
+    // Extension inputs back button styles the same way the original's
+    // getExtensionButton does (e.g. si-cpu tiles take #8E44AD from the
+    // system-info input), so the mapper can resolve them any time later.
+    for input in ext_manager.inputs() {
+        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+            value: input.value.clone(),
+            icon: input.icon.clone(),
+            color: input.color.clone(),
+            font_icon: input.font_icon.clone(),
+            mode: input.mode.clone(),
+            command: input.command.clone(),
+        });
+    }
     let backend = Arc::new(SqlBackend::new(db).with_extensions(ext_manager.clone()));
 
     let state = Arc::new(AppState {

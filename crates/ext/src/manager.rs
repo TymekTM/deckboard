@@ -42,6 +42,18 @@ struct ExtEntry {
     error: Option<String>,
 }
 
+/// A flattened extension input declaration (`{label, value, icon, color,
+/// fontIcon, mode, command}`) as used by the payload mapper for styles.
+#[derive(Debug, Clone)]
+pub struct ExtInputInfo {
+    pub value: String,
+    pub icon: Option<String>,
+    pub color: Option<String>,
+    pub font_icon: Option<String>,
+    pub mode: Option<String>,
+    pub command: Option<String>,
+}
+
 impl std::fmt::Debug for ExtEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExtEntry")
@@ -64,6 +76,7 @@ pub enum ManagerError {
 
 pub struct ExtManager {
     entries: Vec<ExtEntry>,
+    inputs: Vec<ExtInputInfo>,
     events_tx: tokio_mpsc::UnboundedSender<ExtEvent>,
 }
 
@@ -77,10 +90,14 @@ impl ExtManager {
     ) -> (Arc<ExtManager>, tokio_mpsc::UnboundedReceiver<ExtEvent>) {
         let (events_tx, events_rx) = tokio_mpsc::unbounded_channel();
         let mut entries = Vec::new();
+        let mut all_inputs = Vec::new();
 
         let Some(list) = std::fs::read_dir(dir).ok() else {
             tracing::info!(dir = %dir.display(), "no extensions directory");
-            return (Arc::new(ExtManager { entries, events_tx }), events_rx);
+            return (
+                Arc::new(ExtManager { entries, inputs: all_inputs, events_tx }),
+                events_rx,
+            );
         };
 
         let mut packages: Vec<(String, PathBuf)> = list
@@ -106,8 +123,9 @@ impl ExtManager {
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Default::default()));
             match load_extension(&path, &package, &configs, events_tx.clone()) {
-                Ok((name, actions, dispatch)) => {
+                Ok((name, actions, inputs, dispatch)) => {
                     tracing::info!(package = %package, name = %name, actions = ?actions, "extension loaded");
+                    all_inputs.extend(inputs);
                     entries.push(ExtEntry { package, name, actions, dispatch: Some(dispatch), error: None });
                 }
                 Err(e) => {
@@ -123,7 +141,7 @@ impl ExtManager {
             }
         }
 
-        (Arc::new(ExtManager { entries, events_tx }), events_rx)
+        (Arc::new(ExtManager { entries, inputs: all_inputs, events_tx }), events_rx)
     }
 
     /// Runtime threads are spawned at load time and self-manage their
@@ -195,6 +213,11 @@ impl ExtManager {
         ))))
     }
 
+    /// Extension input declarations, flattened across loaded packages.
+    pub fn inputs(&self) -> &[ExtInputInfo] {
+        &self.inputs
+    }
+
     pub fn summary(&self) -> Vec<(String, String, Option<String>)> {
         self.entries
             .iter()
@@ -203,12 +226,29 @@ impl ExtManager {
     }
 }
 
+/// Parse raw input JSON objects into mapper-ready style infos.
+fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
+    raw.iter()
+        .filter_map(|i| {
+            let value = i.get("value").and_then(Value::as_str)?.to_string();
+            Some(ExtInputInfo {
+                value,
+                icon: i.get("icon").and_then(Value::as_str).map(str::to_string),
+                color: i.get("color").and_then(Value::as_str).map(str::to_string),
+                font_icon: i.get("fontIcon").and_then(Value::as_str).map(str::to_string),
+                mode: i.get("mode").and_then(Value::as_str).map(str::to_string),
+                command: i.get("command").and_then(Value::as_str).map(str::to_string),
+            })
+        })
+        .collect()
+}
+
 fn load_extension(
     path: &std::path::Path,
     package: &str,
     configs: &Value,
     events_tx: tokio_mpsc::UnboundedSender<ExtEvent>,
-) -> Result<(String, Vec<String>, mpsc::Sender<ExtRequest>), crate::host::HostError> {
+) -> Result<(String, Vec<String>, Vec<ExtInputInfo>, mpsc::Sender<ExtRequest>), crate::host::HostError> {
     // extract to a temp dir before spawning (plain IO, thread-agnostic)
     let source = crate::source::PackageSource::open(path, package.to_string())
         .map_err(|e| crate::host::HostError::Other(e.to_string()))?;
@@ -228,7 +268,8 @@ fn load_extension(
             let result = ExtRuntime::load(&root, &package, &configs);
             match result {
                 Ok(rt) => {
-                    let ready = Ok((rt.name.clone(), rt.actions.clone()));
+                    let inputs = parse_inputs(&rt.inputs);
+                    let ready = Ok((rt.name.clone(), rt.actions.clone(), inputs));
                     if res_tx.send(ready).is_ok() {
                         runtime_loop(rt, req_rx, events_tx);
                     }
@@ -240,10 +281,10 @@ fn load_extension(
         })
         .map_err(|e| crate::host::HostError::Other(e.to_string()))?;
 
-    let (name, actions) = res_rx
+    let (name, actions, inputs) = res_rx
         .recv()
         .map_err(|_| crate::host::HostError::Other("extension thread died".into()))??;
-    Ok((name, actions, req_tx))
+    Ok((name, actions, inputs, req_tx))
 }
 
 fn runtime_loop(
