@@ -170,8 +170,14 @@ fun Tile(
                     customValue,
                     suffix,
                     titleColor,
-                    onPressStart = onPressStart,
-                    onPressEnd = onPressEnd,
+                    onPressStart = {
+                        pressed = true
+                        onPressStart()
+                    },
+                    onPressEnd = {
+                        pressed = false
+                        onPressEnd()
+                    },
                 )
                 else -> ButtonTile(
                     shortcut = shortcut,
