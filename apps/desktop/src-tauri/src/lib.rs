@@ -82,6 +82,9 @@ pub fn run() {
             exec_slider,
             get_settings,
             set_touch_mode_hotkey,
+            get_autostart,
+            set_autostart,
+            read_image_data,
             export_boards,
             import_boards,
         ])
@@ -327,7 +330,10 @@ fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) {
 // ---- tauri commands --------------------------------------------------------
 
 #[tauri::command]
-async fn server_status(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+async fn server_status(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<serde_json::Value, String> {
     let clients = match &state.hub {
         Some(h) => h.len().await,
         None => 0,
@@ -336,7 +342,47 @@ async fn server_status(state: State<'_, DesktopState>) -> Result<serde_json::Val
         "dbOk": state.backend.is_some(),
         "port": state.port,
         "clients": clients,
+        "version": app.package_info().version.to_string(),
     }))
+}
+
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enable: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let launch = app.autolaunch();
+    if enable {
+        launch.enable().map_err(|e| e.to_string())
+    } else {
+        launch.disable().map_err(|e| e.to_string())
+    }
+}
+
+/// Read an image file and return it as a data URL for tile backgrounds and
+/// icons. Done in Rust so no filesystem plugin/scope is needed.
+#[tauri::command]
+fn read_image_data(path: String) -> Result<String, String> {
+    use base64::Engine;
+    let ext = path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        _ => return Err(format!("unsupported image type \".{ext}\"")),
+    };
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 #[tauri::command]

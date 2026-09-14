@@ -1,5 +1,5 @@
 <script setup>
-import { reactive, ref } from "vue";
+import { reactive } from "vue";
 import { api } from "../api";
 
 const props = defineProps({
@@ -10,9 +10,9 @@ const emit = defineEmits(["close", "saved"]);
 
 const form = reactive({
   name: props.board?.name ?? "",
-  width: props.board?.width ?? 4,
-  height: props.board?.height ?? 3,
-  background: props.board?.background ?? "#2c3e50",
+  width: props.board?.width ?? 6,
+  height: props.board?.height ?? 4,
+  background: props.board?.background ?? "#437072",
 });
 
 async function save() {
@@ -50,42 +50,44 @@ async function deleteBoard() {
 <template>
   <div class="overlay" @click.self="emit('close')">
     <div class="modal">
-      <h2>{{ mode === 'create' ? 'New board' : 'Edit board' }}</h2>
-      <label class="field">
-        Name
-        <input v-model="form.name" placeholder="Board name" @keyup.enter="save" />
-      </label>
-      <div class="row">
-        <label class="field">
-          Columns (width)
-          <input v-model.number="form.width" type="number" min="1" max="15" />
-        </label>
-        <label class="field">
-          Rows (height)
-          <input v-model.number="form.height" type="number" min="1" max="15" />
-        </label>
-        <label class="field">
-          Background
-          <input v-model="form.background" type="color" class="color-input" />
-        </label>
+      <div class="modal-head" :style="{ '--canvas-head': form.background }">
+        {{ mode === "create" ? "New board" : "Edit board" }}
       </div>
-      <div class="actions">
+      <div class="modal-body">
+        <label class="field">
+          Name
+          <input v-model="form.name" placeholder="Board name" @keyup.enter="save" />
+        </label>
+        <div class="row">
+          <label class="field">
+            Columns (width)
+            <input v-model.number="form.width" type="number" min="1" max="15" />
+          </label>
+          <label class="field">
+            Rows (height)
+            <input v-model.number="form.height" type="number" min="1" max="15" />
+          </label>
+          <label class="field">
+            Background
+            <input v-model="form.background" type="color" class="color-input" />
+          </label>
+        </div>
+      </div>
+      <div class="modal-actions">
         <template v-if="mode === 'edit'">
-          <button class="danger left" @click="clearBoard">Clear tiles</button>
-          <button class="danger left" @click="deleteBoard">Delete board</button>
+          <button class="btn-text danger left" @click="clearBoard">Clear tiles</button>
+          <button class="btn-text danger" @click="deleteBoard">Delete board</button>
         </template>
-        <button @click="emit('close')">Cancel</button>
-        <button class="primary" @click="save">Save</button>
+        <button class="btn-text" @click="emit('close')">Cancel</button>
+        <button class="btn-text accent" @click="save">Save</button>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.error { color: #f08585; font-size: 13px; }
-.actions { display: flex; gap: 8px; justify-content: flex-end; }
-.left { margin-right: auto; }
-.actions .left + .left { margin-right: 0; }
-.actions .danger.left:first-child { margin-right: 0; }
-.actions { justify-content: flex-end; }
+.modal-head { background: color-mix(in srgb, var(--canvas-head) 82%, black); color: #f4fbfa; }
+.row { display: flex; gap: 10px; }
+.row > * { flex: 1; }
+.color-input { height: 38px; padding: 3px; cursor: pointer; }
 </style>

@@ -10,6 +10,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@fontsource/roboto": "^5.3.0",
     "@fortawesome/fontawesome-free": "5.15.4",
     "@tauri-apps/api": "^2.9",
     "@tauri-apps/plugin-dialog": "^2.7.3",
