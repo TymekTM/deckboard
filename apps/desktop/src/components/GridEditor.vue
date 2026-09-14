@@ -8,8 +8,20 @@ const props = defineProps({
   board: { type: Object, required: true },
   touch: { type: Boolean, default: false },
   zoom: { type: Number, default: 1 },
+  // type -> {icon, color} fallbacks from the action catalog + extensions
+  typeMeta: { type: Object, default: () => ({}) },
 });
-const emit = defineEmits(["tile-open", "tile-moved", "tile-add", "tile-add-default", "tile-exec", "tile-slider"]);
+const emit = defineEmits(["tile-open", "tile-moved", "tile-add", "tile-exec", "tile-slider"]);
+
+function metaOf(tile) {
+  return props.typeMeta?.[tile.type] || {};
+}
+function tileBg(tile) {
+  return tile.color || metaOf(tile).color || "#2c3e50";
+}
+function tileIcon(tile) {
+  return tile.icon || metaOf(tile).icon || "";
+}
 
 const drag = ref(null); // {tile, mode:'move'|'resize', dx, dy, pointerId}
 
@@ -150,7 +162,7 @@ function onGridClick(event) {
           class="tile"
           :class="{ dragging: drag && drag.tile.id === tile.id }"
           :style="{
-            background: tile.color || '#2c3e50',
+            background: tileBg(tile),
             borderColor: tile.border_color || 'transparent',
             borderRadius: tile.shape === 1 ? '50%' : '8px',
           }"
@@ -160,9 +172,9 @@ function onGridClick(event) {
         >
           <img v-if="tile.img" class="tile-img" :src="tile.img" alt="" />
           <i
-            v-if="tile.icon"
+            v-if="tileIcon(tile)"
             class="tile-icon"
-            :class="'fas fa-' + tile.icon"
+            :class="'fas fa-' + tileIcon(tile)"
             :style="{ color: tile.icon_color || '#ffffff' }"
           ></i>
           <span

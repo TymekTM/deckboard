@@ -17,6 +17,8 @@ struct DesktopState {
     broadcaster: Option<EditorBroadcaster>,
     hub: Option<Arc<Hub>>,
     port: u16,
+    /// Loaded extensions, for the editor's action catalog and tile styling.
+    ext: Option<Arc<ExtManager>>,
     /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
     hotkey: std::sync::Mutex<String>,
     /// `deckboard/editor.json` - editor-local settings (hotkey), kept
@@ -85,6 +87,7 @@ pub fn run() {
             get_autostart,
             set_autostart,
             read_image_data,
+            list_known_inputs,
             export_boards,
             import_boards,
         ])
@@ -130,6 +133,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             backend: None,
             broadcaster: None,
             hub: None,
+            ext: None,
             port,
             hotkey: std::sync::Mutex::new("Ctrl+Alt+D".to_string()),
             settings_path: None,
@@ -233,6 +237,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         backend: Some(backend),
         broadcaster: Some(broadcaster),
         hub: Some(hub),
+        ext: Some(ext_manager),
         port,
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
@@ -350,6 +355,48 @@ async fn server_status(
 fn get_autostart(app: AppHandle) -> bool {
     use tauri_plugin_autostart::ManagerExt;
     app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+/// Action/style metadata for everything the editor did not statically ship:
+/// extension inputs and device declarations (Voicemeeter, Discord). The
+/// editor merges this into its action dropdown and uses it to style tiles
+/// that carry no icon/color of their own.
+#[tauri::command]
+fn list_known_inputs(state: State<'_, DesktopState>) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    if let Some(ext) = &state.ext {
+        for input in ext.inputs() {
+            out.push(serde_json::json!({
+                "value": input.value,
+                "icon": input.icon,
+                "color": input.color,
+                "mode": input.mode,
+                "command": input.command,
+                "source": "extension",
+            }));
+        }
+    }
+    for (value, icon, _font_icon, color) in deckboard_vm::input_declarations() {
+        out.push(serde_json::json!({
+            "value": value,
+            "icon": icon,
+            "color": color,
+            "mode": serde_json::Value::Null,
+            "command": serde_json::Value::Null,
+            "source": "device",
+        }));
+    }
+    for (value, icon, color, mode) in deckboard_discord::input_declarations() {
+        out.push(serde_json::json!({
+            "value": value,
+            "icon": icon,
+            "color": color,
+            "mode": mode,
+            "command": serde_json::Value::Null,
+            "source": "device",
+        }));
+    }
+    out
 }
 
 #[tauri::command]

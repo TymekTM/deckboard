@@ -1,30 +1,64 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
 import { ask, open } from "@tauri-apps/plugin-dialog";
-import { CATALOG, DUAL_STATE_TYPES, MULTIACTION_STEPS } from "../catalog";
+import { CATALOG } from "../catalog";
 import { api } from "../api";
 
 const props = defineProps({
-  button: { type: Object, required: true },
+  button: { type: Object, default: null }, // null = create mode
+  create: { type: Object, default: null }, // {x, y, boardId} for create mode
   boards: { type: Array, required: true },
   boardBackground: { type: String, default: "#437072" },
+  knownInputs: { type: Array, default: () => [] },
 });
-const emit = defineEmits(["save", "delete", "close"]);
+const emit = defineEmits(["save", "create", "delete", "close"]);
 
-// editable copy: every column the edit dialog touches
-const form = reactive(JSON.parse(JSON.stringify(props.button)));
+const isCreate = computed(() => !props.button);
 
-const catalogEntry = computed(
-  () => CATALOG.find((c) => c.value === form.type) || null
+// editable copy: every column the dialog touches
+const form = reactive(
+  props.button
+    ? JSON.parse(JSON.stringify(props.button))
+    : {
+        id: null,
+        board_id: props.create?.boardId ?? null,
+        type: "key",
+        mode: "button",
+        command: "",
+        title: "",
+        color: "#ef4836",
+        border_color: "",
+        shape: 0,
+        title_position: 0,
+        title_color: "",
+        title_box_color: "",
+        icon: "",
+        icon_color: "",
+        img: "",
+        color2: "",
+        icon2: "",
+        img2: "",
+        options: "",
+        x: props.create?.x ?? 0,
+        y: props.create?.y ?? 0,
+        w: 1,
+        h: 1,
+      }
 );
-const isKnownType = computed(() => catalogEntry.value !== null);
-const showDual = computed(
-  () =>
-    DUAL_STATE_TYPES.has(form.type) ||
-    Boolean(form.color2 || form.icon2 || form.img2)
-);
 
-// ---- action dropdown groups (headers/dividers from the catalog) -----------
+// ---- action catalog (static groups + live extension inputs) ----------------
+
+function prettify(value) {
+  const s = String(value).replace(/[-_]/g, " ").trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+const extInputs = computed(() => {
+  const seen = new Set(CATALOG.filter((c) => c.value).map((c) => c.value));
+  return props.knownInputs.filter(
+    (i) => i.source === "extension" && !seen.has(i.value)
+  );
+});
 
 const actionGroups = computed(() => {
   const groups = [];
@@ -37,8 +71,36 @@ const actionGroups = computed(() => {
       current.items.push(entry);
     }
   }
+  if (extInputs.value.length) {
+    groups.push({
+      header: "Extensions",
+      items: extInputs.value.map((i) => ({
+        value: i.value,
+        label: prettify(i.value),
+        icon: i.icon || "puzzle-piece",
+        color: i.color || "#7f8c8d",
+        extInput: i,
+      })),
+    });
+  }
   return groups;
 });
+
+const catalogEntry = computed(
+  () =>
+    CATALOG.find((c) => c.value === form.type) ||
+    actionGroups.value
+      .flatMap((g) => g.items)
+      .find((c) => c.value === form.type) ||
+    null
+);
+const isKnownType = computed(() => catalogEntry.value !== null);
+const showDual = computed(
+  () =>
+    Boolean(catalogEntry.value?.dual) ||
+    Boolean(form.color2 || form.icon2 || form.img2)
+);
+const stepConfig = computed(() => catalogEntry.value?.stepEditor || null);
 
 // ---- command fields --------------------------------------------------------
 
@@ -60,6 +122,15 @@ function loadFields() {
   for (const f of entry.fields) {
     fields[f.key] = f.key === "" ? form.command || "" : obj[f.key] ?? "";
   }
+  // sensible defaults for selects
+  for (const f of entry.fields) {
+    if (f.kind === "select" && fields[f.key] === "" && f.options.length) {
+      fields[f.key] = f.options[0].value;
+    }
+  }
+}
+function fieldVisible(f) {
+  return !f.showIf || fields[f.showIf.key] === f.showIf.value;
 }
 function applyFields() {
   const entry = catalogEntry.value;
@@ -70,11 +141,31 @@ function applyFields() {
   }
   const obj = {};
   for (const f of entry.fields) {
-    if (f.key !== "" && fields[f.key] !== "") obj[f.key] = fields[f.key];
+    const raw = fields[f.key];
+    if (f.kind === "number") {
+      if (raw !== "" && raw !== null && !Number.isNaN(Number(raw))) {
+        obj[f.key] = Number(raw);
+      }
+    } else if (raw !== "") {
+      obj[f.key] = raw;
+    }
   }
   form.command = JSON.stringify(obj);
 }
 loadFields();
+
+function onTypeChange() {
+  const entry = catalogEntry.value;
+  // extension inputs carry a preconfigured command template / slider mode
+  if (entry?.extInput) {
+    if (entry.extInput.command) form.command = entry.extInput.command;
+    if (entry.extInput.mode) form.mode = entry.extInput.mode;
+    if (entry.extInput.icon && !form.icon) form.icon = entry.extInput.icon;
+    if (entry.extInput.color && !form.color) form.color = entry.extInput.color;
+  }
+  if (entry?.mode) form.mode = entry.mode;
+  loadFields();
+}
 
 // board select (type "board": command is {"id": <boardId>})
 const boardId = ref(parseBoardId(form.command));
@@ -89,12 +180,12 @@ function applyBoardId() {
   form.command = boardId.value === "" ? "" : JSON.stringify({ id: Number(boardId.value) });
 }
 
-// select fields (type "vol": command is the raw value)
+// select-style command (vol): command is the raw value
 function applySelect(event) {
   form.command = event.target.value;
 }
 
-// ---- multiaction -----------------------------------------------------------
+// ---- step editor (multiaction / advance-key) -------------------------------
 
 const steps = ref(parseSteps(form.command));
 function parseSteps(command) {
@@ -106,10 +197,24 @@ function parseSteps(command) {
   }
 }
 function applySteps() {
-  form.command = JSON.stringify(steps.value.filter((s) => s.type));
+  const cfg = stepConfig.value;
+  const numberTypes = new Set(
+    (cfg?.types || []).filter((t) => t.number).map((t) => t.value)
+  );
+  form.command = JSON.stringify(
+    steps.value
+      .filter((s) => s.type)
+      .map((s) => ({
+        type: s.type,
+        command:
+          numberTypes.has(s.type) && s.command !== "" && s.command !== null
+            ? Number(s.command)
+            : s.command,
+      }))
+  );
 }
 function addStep() {
-  steps.value.push({ type: "delay", command: "100" });
+  steps.value.push({ ...(stepConfig.value?.addDefaults || { type: "delay", command: "100" }) });
 }
 function removeStep(i) {
   steps.value.splice(i, 1);
@@ -125,9 +230,13 @@ function stepBoardId(step) {
     return "";
   }
 }
+function stepTypeMeta(type) {
+  return stepConfig.value?.types.find((t) => t.value === type) || null;
+}
 
 // ---- image -----------------------------------------------------------------
 
+const imageError = ref("");
 async function pickImage(field) {
   const path = await open({
     multiple: false,
@@ -140,9 +249,8 @@ async function pickImage(field) {
     imageError.value = String(e);
   }
 }
-const imageError = ref("");
 
-// ---- save ------------------------------------------------------------------
+// ---- save / delete ---------------------------------------------------------
 
 async function removeTile() {
   const ok = await ask(`Delete tile "${form.title || form.type}"?`, {
@@ -157,8 +265,8 @@ function save() {
   // leave the stored command untouched
   applyFields();
   if (form.type === "board") applyBoardId();
-  if (form.type === "multiaction") applySteps();
-  emit("save", { ...form, ...resolveTypeMeta() });
+  if (stepConfig.value) applySteps();
+  emit(isCreate.value ? "create" : "save", { ...form, ...resolveTypeMeta() });
 }
 
 // tiles added from outside the catalog keep their stored icon/color
@@ -167,6 +275,7 @@ function resolveTypeMeta() {
   if (!entry) return {};
   const out = {};
   if (entry.mode) out.mode = entry.mode;
+  if (entry.extInput?.command && !form.command) out.command = entry.extInput.command;
   if (entry.init && !form.command) out.command = entry.init;
   return out;
 }
@@ -199,17 +308,13 @@ const ICONS = [
   "desktop", "mobile", "puzzle-piece", "rocket", "search", "share", "tag",
 ];
 
-// preview helpers mirror GridEditor's tile rendering
+// preview falls back to the action's own icon/color like the original
+const effIcon = computed(() => form.icon || catalogEntry.value?.icon || "");
+const effColor = computed(() => form.color || catalogEntry.value?.color || "#2c3e50");
 const prevShape = computed(() => (form.shape === 1 ? "50%" : "8px"));
 const titlePos = computed(() => form.title_position ?? 0);
 function colorOr(val, fallback) {
   return val || fallback;
-}
-function hexOf(val) {
-  return val || "";
-}
-function setHex(field, value) {
-  form[field] = value;
 }
 </script>
 
@@ -217,7 +322,7 @@ function setHex(field, value) {
   <div class="overlay" @click.self="emit('close')">
     <div class="modal btn-modal">
       <div class="modal-head" :style="{ '--tint': boardBackground }">
-        {{ button.id ? "Edit Button" : "New Button" }}
+        {{ isCreate ? "New Button" : "Edit Button" }}
       </div>
 
       <div class="btn-body">
@@ -227,16 +332,16 @@ function setHex(field, value) {
             <div
               class="prev-tile"
               :style="{
-                background: colorOr(form.color, '#2c3e50'),
+                background: effColor,
                 borderColor: form.border_color || 'transparent',
                 borderRadius: prevShape,
               }"
             >
               <img v-if="form.img" class="prev-img" :src="form.img" alt="" />
               <i
-                v-if="form.icon"
+                v-if="effIcon"
                 class="fas"
-                :class="'fa-' + form.icon"
+                :class="'fa-' + effIcon"
                 :style="{ color: colorOr(form.icon_color, '#ffffff') }"
               ></i>
               <span
@@ -251,7 +356,7 @@ function setHex(field, value) {
             </div>
           </div>
 
-          <div class="props" @keydown.esc="closeProps">
+          <div class="props">
             <div v-for="row in [
                  ['shape', 'Shape'],
                  ['color', 'Background Color'],
@@ -273,19 +378,19 @@ function setHex(field, value) {
                   </template>
                   <template v-else-if="row[0] === 'mode'">{{ form.mode || "button" }}</template>
                   <template v-else-if="row[0] === 'icon'">
-                    <i v-if="form.icon" class="fas" :class="'fa-' + form.icon"></i>
+                    <i v-if="form.icon || effIcon" class="fas" :class="'fa-' + (form.icon || effIcon)"></i>
                     <template v-else>N/A</template>
                   </template>
                   <template v-else-if="row[0] === 'image'">
                     {{ form.img ? "Replace" : "Pick" }}
                   </template>
-                  <template v-else-if="row[0].endsWith('_color') || row[0] === 'color'">
+                  <template v-else>
                     <span
-                      v-if="hexOf(form[row[0]])"
+                      v-if="form[row[0]]"
                       class="chip"
                       :style="{ background: form[row[0]] }"
                     ></span>
-                    {{ hexOf(form[row[0]]) || "N/A" }}
+                    {{ form[row[0]] || "N/A" }}
                   </template>
                 </span>
               </button>
@@ -344,16 +449,16 @@ function setHex(field, value) {
                         type="color"
                         class="swatch"
                         :value="form[row[0]] || '#000000'"
-                        @input="setHex(row[0], $event.target.value)"
+                        @input="form[row[0]] = $event.target.value"
                       />
                       <input
                         class="hex"
                         :value="form[row[0]]"
                         placeholder="#rrggbb"
-                        @input="setHex(row[0], $event.target.value)"
+                        @input="form[row[0]] = $event.target.value"
                         @keydown.enter.prevent
                       />
-                      <button class="mini" @click="setHex(row[0], ''); closeProps()">None</button>
+                      <button class="mini" @click="form[row[0]] = ''; closeProps()">None</button>
                     </div>
                   </template>
                 </div>
@@ -371,7 +476,7 @@ function setHex(field, value) {
 
           <label class="field">
             Action
-            <select v-model="form.type" @change="loadFields(); closeProps()">
+            <select v-model="form.type" @change="onTypeChange(); closeProps()">
               <optgroup v-for="g in actionGroups" :key="g.header" :label="g.header">
                 <option v-for="c in g.items" :key="c.value" :value="c.value">{{ c.label }}</option>
               </optgroup>
@@ -400,17 +505,17 @@ function setHex(field, value) {
             </select>
           </label>
 
-          <!-- multiaction step editor -->
-          <template v-else-if="form.type === 'multiaction'">
+          <!-- step editor (multiaction / advance keyboard macro) -->
+          <template v-else-if="stepConfig">
             <div class="steps">
               <div v-for="(step, i) in steps" :key="i" class="step">
                 <select v-model="step.type" class="step-type">
-                  <option v-for="s in MULTIACTION_STEPS" :key="s.value" :value="s.value">
-                    {{ s.label }}
+                  <option v-for="t in stepConfig.types" :key="t.value" :value="t.value">
+                    {{ t.label }}
                   </option>
                 </select>
                 <select
-                  v-if="step.type === 'board'"
+                  v-if="stepTypeMeta(step.type)?.board"
                   :value="stepBoardId(step)"
                   @change="stepBoardChange(step, $event)"
                 >
@@ -420,7 +525,8 @@ function setHex(field, value) {
                 <input
                   v-else
                   v-model="step.command"
-                  :placeholder="step.type === 'delay' ? 'milliseconds' : 'value'"
+                  :inputmode="stepTypeMeta(step.type)?.number ? 'numeric' : undefined"
+                  :placeholder="stepTypeMeta(step.type)?.number ? 'milliseconds' : 'value'"
                 />
                 <button class="step-del" title="Remove step" @click="removeStep(i)">
                   <i class="fas fa-times"></i>
@@ -430,17 +536,30 @@ function setHex(field, value) {
             </div>
           </template>
 
-          <!-- generic fields -->
+          <!-- structured / generic fields -->
           <template v-else-if="catalogEntry?.fields">
-            <label v-for="f in catalogEntry.fields" :key="f.key" class="field">
+            <label
+              v-for="f in catalogEntry.fields.filter(fieldVisible)"
+              :key="f.key"
+              class="field"
+            >
               {{ f.label }}
+              <select v-if="f.kind === 'select'" v-model="fields[f.key]">
+                <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
               <textarea
-                v-if="f.multiline"
+                v-else-if="f.kind === 'textarea'"
                 v-model="fields[f.key]"
                 rows="3"
                 :placeholder="f.placeholder"
               ></textarea>
-              <input v-else v-model="fields[f.key]" :placeholder="f.placeholder" @keydown.enter.prevent />
+              <input
+                v-else
+                v-model="fields[f.key]"
+                :inputmode="f.kind === 'number' ? 'numeric' : undefined"
+                :placeholder="f.placeholder"
+                @keydown.enter.prevent
+              />
             </label>
           </template>
 
@@ -450,7 +569,7 @@ function setHex(field, value) {
             <input v-model="form.command" placeholder="command" @keydown.enter.prevent />
           </label>
 
-          <label class="field">
+          <label v-if="catalogEntry?.options" class="field">
             Options (program arguments)
             <input v-model="form.options" placeholder="--flag" @keydown.enter.prevent />
           </label>
@@ -482,9 +601,9 @@ function setHex(field, value) {
       </div>
 
       <div class="modal-actions">
-        <button class="btn-text danger left" @click="removeTile">Delete</button>
+        <button v-if="!isCreate" class="btn-text danger left" @click="removeTile">Delete</button>
         <button class="btn-text" @click="emit('close')">Cancel</button>
-        <button class="btn-text accent" @click="save">{{ button.id ? "Save" : "Add" }}</button>
+        <button class="btn-text accent" @click="save">{{ isCreate ? "Add" : "Save" }}</button>
       </div>
     </div>
   </div>
@@ -647,7 +766,7 @@ function setHex(field, value) {
 .right-col .field { margin-bottom: 13px; }
 .steps { display: flex; flex-direction: column; gap: 6px; margin-bottom: 13px; }
 .step { display: flex; gap: 6px; }
-.step-type { max-width: 140px; flex: none; }
+.step-type { max-width: 150px; flex: none; }
 .step-del {
   width: 32px;
   flex: none;

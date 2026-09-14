@@ -3,16 +3,31 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { save, open, ask } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
+import { CATALOG } from "./catalog";
 import GridEditor from "./components/GridEditor.vue";
 import EditTileModal from "./components/EditTileModal.vue";
 import BoardModal from "./components/BoardModal.vue";
-import AddTileModal from "./components/AddTileModal.vue";
 
 const boards = ref([]);
 const currentId = ref(null);
 const status = ref({ dbOk: false, port: 0, clients: 0, version: "" });
 const touchMode = ref(false);
 const touchBoardId = ref(null);
+const knownInputs = ref([]);
+
+// type -> {icon, color, mode} fallbacks: static catalog + extension inputs
+const typeMeta = computed(() => {
+  const map = {};
+  for (const e of CATALOG) {
+    if (e.value) {
+      map[e.value] = { icon: e.icon || "", color: e.color || "", mode: e.mode || "" };
+    }
+  }
+  for (const i of knownInputs.value) {
+    map[i.value] = { icon: i.icon || "", color: i.color || "", mode: i.mode || "" };
+  }
+  return map;
+});
 
 const hotkey = ref("Ctrl+Alt+D");
 const hotkeyDraft = ref("");
@@ -27,8 +42,8 @@ const railPopover = ref(null); // 'status' | 'settings' | null
 const kebabOpen = ref(false);
 
 const editingTile = ref(null); // button being edited
+const createFlow = ref(null); // {x, y, boardId} for the New Button dialog
 const boardModal = ref(null); // {mode: 'create'|'edit', board?}
-const addFlow = ref(null); // {x, y} position for the new tile
 
 const currentBoard = computed(
   () => boards.value.find((b) => b.id === currentId.value) || null
@@ -38,6 +53,7 @@ const boardBg = computed(() => currentBoard.value?.background || "#437072");
 async function load() {
   status.value = await api.serverStatus();
   hotkey.value = (await api.getSettings()).hotkey;
+  knownInputs.value = await api.listKnownInputs();
   if (status.value.dbOk) {
     boards.value = await api.listBoards();
     if (!boards.value.some((b) => b.id === currentId.value)) {
@@ -57,33 +73,32 @@ async function editBoard() {
   if (currentBoard.value) boardModal.value = { mode: "edit", board: currentBoard.value };
 }
 
-async function addTile(kind, at) {
-  const board = currentBoard.value;
+// New Button flow: create the row with the chosen type, then apply the
+// dialog's full payload (label, styling, command) in one update.
+async function tileCreated(form) {
+  const boardId_ = form.board_id ?? currentId.value;
+  const board = boards.value.find((b) => b.id === boardId_);
   if (!board) return;
-  const spot = at || firstFreeCell(board);
   const id = await api.createButton(
     board.id,
-    kind,
-    kind === "speaker-volume" ? "slider" : "button",
-    spot.x,
-    spot.y
+    form.type,
+    form.mode || "button",
+    form.x,
+    form.y
   );
-  addFlow.value = null;
+  await api.updateButton({
+    ...form,
+    id,
+    board_id: board.id,
+    w: form.w || 1,
+    h: form.h || 1,
+  });
+  createFlow.value = null;
   await load();
   const tile = boards.value
     .find((b) => b.id === board.id)
     ?.buttons.find((b) => b.id === id);
   if (tile) editingTile.value = tile;
-}
-
-function firstFreeCell(board) {
-  const taken = new Set(board.buttons.map((t) => `${t.x},${t.y}`));
-  for (let y = 0; y < board.height; y++) {
-    for (let x = 0; x < board.width; x++) {
-      if (!taken.has(`${x},${y}`)) return { x, y };
-    }
-  }
-  return { x: 0, y: 0 };
 }
 
 async function tileSlider(tile, value) {
@@ -376,11 +391,18 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
             v-if="currentBoard && !touchMode"
             :board="currentBoard"
             :zoom="zoom"
+            :type-meta="typeMeta"
             @tile-open="editingTile = $event"
             @tile-moved="tileMoved"
-            @tile-add="addFlow = { ...$event }"
-            @tile-add-default="addFlow = { ...firstFreeCell(currentBoard) }"
-            @board-cleared="load"
+            @tile-add="createFlow = { ...$event, boardId: currentId }"
+          />
+          <GridEditor
+            v-if="touchBoardId && touchMode"
+            :board="boards.find((b) => b.id === touchBoardId) || currentBoard"
+            touch
+            :type-meta="typeMeta"
+            @tile-exec="api.execButton($event.id)"
+            @tile-slider="tileSlider"
           />
           <div
             v-if="currentBoard && !touchMode && !currentBoard.buttons.length"
@@ -388,13 +410,6 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
           >
             Click an empty cell to add your first tile
           </div>
-          <GridEditor
-            v-else-if="touchBoardId && touchMode"
-            :board="boards.find((b) => b.id === touchBoardId) || currentBoard"
-            touch
-            @tile-exec="api.execButton($event.id)"
-            @tile-slider="tileSlider"
-          />
 
           <template v-if="!touchMode">
             <div class="canvas-overlay zoom">
@@ -429,17 +444,25 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
     <Transition name="modal">
       <EditTileModal
         v-if="editingTile"
+        key="edit"
         :button="editingTile"
         :boards="boards"
         :board-background="boardBg"
+        :known-inputs="knownInputs"
         @save="tileEdited"
         @delete="tileDeleted"
         @close="editingTile = null"
       />
-    </Transition>
-
-    <Transition name="modal">
-      <AddTileModal v-if="addFlow" @pick="addTile($event, addFlow)" @close="addFlow = null" />
+      <EditTileModal
+        v-else-if="createFlow"
+        key="create"
+        :create="createFlow"
+        :boards="boards"
+        :board-background="boardBg"
+        :known-inputs="knownInputs"
+        @create="tileCreated"
+        @close="createFlow = null"
+      />
     </Transition>
 
     <Transition name="modal">

@@ -1,12 +1,39 @@
-// Command catalog for "add tile", ported from the original renderer's
-// `utils/contants/commands` (subset - every type remains editable as text).
-// `fields` write into the `command` column; key "" is the command itself,
-// other keys become JSON properties ({"speaker": ...}).
+// Command catalog for the tile dialog, ported from the original renderer's
+// `utils/contants/commands`. Field model:
+//   { key, label, placeholder? }        - text input ("" key = raw command)
+//   { key, kind: "textarea" }           - multiline text
+//   { key, kind: "number" }             - numeric, stored as JSON number
+//   { key, kind: "select", options }    - dropdown, stored raw
+//   { key, showIf: { key, value } }     - rendered only when another field has a value
+// Entry extras:
+//   stepEditor - the tile command is an array of steps edited as rows
+//   options    - show the "program arguments" input (DB `options` column)
 
 export const CATALOG = [
   { header: "Deckboard" },
-  { value: "board", label: "Switch Board", boardSelect: true },
-  { value: "multiaction", label: "Multi Actions", multiaction: true },
+  {
+    value: "board",
+    label: "Switch Board",
+    boardSelect: true,
+    icon: "th",
+    color: "#2c3e50",
+  },
+  {
+    value: "multiaction",
+    label: "Multi Actions",
+    icon: "th-large",
+    color: "#2c3e50",
+    stepEditor: {
+      addDefaults: { type: "delay", command: "100" },
+      types: [
+        { value: "delay", label: "Delay (ms)" },
+        { value: "board", label: "Switch board", board: true },
+        { value: "key", label: "Keystroke" },
+        { value: "type", label: "Type text" },
+        { value: "url", label: "Open URL" },
+      ],
+    },
+  },
   { divider: true },
   { header: "General" },
   {
@@ -21,13 +48,15 @@ export const CATALOG = [
     label: "Advance Keyboard Macro",
     icon: "keyboard",
     color: "#2c3e50",
-    fields: [
-      {
-        key: "",
-        label: "Steps JSON",
-        placeholder: '[{"action":"down","value":"CTRL"}]',
-      },
-    ],
+    stepEditor: {
+      addDefaults: { type: "down", command: "" },
+      types: [
+        { value: "down", label: "Key down" },
+        { value: "up", label: "Key up" },
+        { value: "delay", label: "Delay (ms)", number: true },
+        { value: "type", label: "Type text" },
+      ],
+    },
   },
   {
     value: "mouse-ctrl",
@@ -35,7 +64,18 @@ export const CATALOG = [
     icon: "mouse",
     color: "#2c3e50",
     fields: [
-      { key: "", label: "Action JSON", placeholder: '{"action":"move","x":100,"y":100}' },
+      {
+        key: "action",
+        kind: "select",
+        label: "Action",
+        options: [
+          { value: "move", label: "Move cursor" },
+          { value: "lclick", label: "Left click" },
+          { value: "rclick", label: "Right click" },
+        ],
+      },
+      { key: "x", kind: "number", label: "X", showIf: { key: "action", value: "move" } },
+      { key: "y", kind: "number", label: "Y", showIf: { key: "action", value: "move" } },
     ],
   },
   {
@@ -43,7 +83,7 @@ export const CATALOG = [
     label: "Type Text",
     icon: "font",
     color: "#16a085",
-    fields: [{ key: "", label: "Text", multiline: true }],
+    fields: [{ key: "", label: "Text", kind: "textarea" }],
   },
   {
     value: "url",
@@ -65,6 +105,7 @@ export const CATALOG = [
     icon: "cog",
     color: "#7f8c8d",
     fields: [{ key: "", label: "Executable path" }],
+    options: true,
   },
   {
     value: "file",
@@ -114,7 +155,49 @@ export const CATALOG = [
     fields: [{ key: "", label: "Audio file path" }],
   },
   { divider: true },
-  { header: "Integrations (executed by extensions / native bridges)" },
+  { header: "OBS Studio" },
+  { value: "obs-scene", label: "Switch Scene", icon: "video", color: "#2980b9", dual: true,
+    fields: [{ key: "scene", label: "Scene name" }] },
+  { value: "obs-source", label: "Toggle Source", icon: "photo-video", color: "#2980b9", dual: true,
+    fields: [{ key: "source", label: "Source name" }] },
+  { value: "obs-device-audio", label: "Toggle Audio Source", icon: "volume-up", color: "#2980b9", dual: true,
+    fields: [{ key: "device", label: "Source name" }] },
+  { value: "obs-filter", label: "Toggle Filter", icon: "filter", color: "#2980b9", dual: true,
+    fields: [{ key: "filter", label: "Filter name" }] },
+  { value: "obs-studio-mode", label: "Toggle Studio Mode", icon: "columns", color: "#2980b9", dual: true },
+  { divider: true },
+  { header: "Streamlabs & XSplit" },
+  { value: "slobs-scene", label: "SLOBS: Switch Scene", icon: "video", color: "#3070b0", dual: true,
+    fields: [{ key: "scene", label: "Scene name" }] },
+  { value: "slobs-source", label: "SLOBS: Toggle Source", icon: "photo-video", color: "#3070b0", dual: true,
+    fields: [{ key: "source", label: "Source name" }] },
+  { value: "slobs-device-audio", label: "SLOBS: Toggle Audio Source", icon: "volume-up", color: "#3070b0", dual: true,
+    fields: [{ key: "device", label: "Source name" }] },
+  { value: "xsplit-scene", label: "XSplit: Switch Scene", icon: "video", color: "#2d7dd2", dual: true,
+    fields: [{ key: "scene", label: "Scene name" }] },
+  { divider: true },
+  { header: "Twitch" },
+  { value: "twitch-slow", label: "Slow Mode", icon: "hourglass-half", color: "#9146ff", dual: true },
+  { value: "twitch-follow-only", label: "Followers-Only Mode", icon: "user-plus", color: "#9146ff", dual: true },
+  { value: "twitch-subs-only", label: "Subs-Only Mode", icon: "star", color: "#9146ff", dual: true },
+  { value: "twitch-emote-only", label: "Emote-Only Mode", icon: "smile", color: "#9146ff", dual: true },
+  { divider: true },
+  { header: "Integrations (extensions / native bridges)" },
+  {
+    value: "custom-value",
+    label: "Variable Value (display)",
+    icon: "tag",
+    color: "#171A21",
+    fields: [{ key: "", label: "Variable key", placeholder: "set by the Variables & Logic extension" }],
+  },
+  {
+    value: "discord-voice-channel",
+    label: "Discord: Join Voice Channel",
+    icon: "headphones",
+    color: "#5865f2",
+    dual: true,
+    fields: [{ key: "channel", label: "Channel id" }],
+  },
   {
     value: "discord-toggle-mute",
     label: "Discord: Toggle Mute",
@@ -129,49 +212,13 @@ export const CATALOG = [
     color: "#5865f2",
     dual: true,
   },
-  {
-    value: "vm-toggle-voice",
-    label: "Voicemeeter toggle (vm-*)",
-    icon: "sliders-h",
-    color: "#e67e22",
-    dual: true,
-    fields: [{ key: "", label: "Strip/bus JSON" }],
-  },
 ];
 
-export const MULTIACTION_STEPS = [
-  { value: "delay", label: "Delay (ms)" },
-  { value: "board", label: "Switch board" },
-  { value: "key", label: "Keystroke" },
-  { value: "type", label: "Type text" },
-  { value: "url", label: "Open URL" },
-];
-
-// Dual-state types from the original button.js - state 2 styling matters.
-export const DUAL_STATE_TYPES = new Set([
-  "speaker-device",
-  "obs-scene",
-  "obs-source",
-  "obs-device-audio",
-  "obs-filter",
-  "obs-studio-mode",
-  "slobs-scene",
-  "slobs-source",
-  "slobs-device-audio",
-  "xsplit-scene",
-  "twitch-slow",
-  "twitch-follow-only",
-  "twitch-subs-only",
-  "twitch-emote-only",
-  "discord-voice-channel",
-  "discord-toggle-mute",
-  "discord-toggle-deaf",
-  "vmod-voice",
-  "vmod-hearmyself",
-  "vmod-voicechanger",
-  "vmod-background",
-  "custom-value",
-]);
+// Fallback style/config for a tile type (static catalog only; extension
+// inputs are merged at runtime via list_known_inputs).
+export function findTypeMeta(type) {
+  return CATALOG.find((c) => c.value === type) || null;
+}
 
 // Grid geometry of the original editor: 96 px cell, 100 px row.
 export const CELL_W = 96;

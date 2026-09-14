@@ -21,6 +21,7 @@ export const api = {
   getAutostart: () => invoke("get_autostart"),
   setAutostart: (enable) => invoke("set_autostart", { enable }),
   readImageData: (path) => invoke("read_image_data", { path }),
+  listKnownInputs: () => invoke("list_known_inputs"),
   exportBoards: (ids, path) => invoke("export_boards", { ids, path }),
   importBoards: (path) => invoke("import_boards", { path }),
 };
