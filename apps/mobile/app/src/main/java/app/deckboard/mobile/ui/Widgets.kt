@@ -7,10 +7,12 @@
 
 package app.deckboard.mobile.ui
 
+import android.content.Context
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +41,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -91,52 +94,137 @@ fun templateFor(shortcut: Shortcut): String {
     }
 }
 
+/** Clock visual styles. Tapping the tile cycles to the next entry and
+ *  the choice persists per tile id in shared preferences. */
+val CLOCK_STYLES = listOf("icon", "big", "analog", "date")
+
+private fun clockText(cal: java.util.Calendar, twelveHour: Boolean): String {
+    val minute = cal.get(java.util.Calendar.MINUTE).toString().padStart(2, '0')
+    return if (twelveHour) {
+        val h = cal.get(java.util.Calendar.HOUR_OF_DAY)
+        val hour12 = if (h % 12 == 0) 12 else h % 12
+        val ampm = if (cal.get(java.util.Calendar.AM_PM) == java.util.Calendar.AM) "AM" else "PM"
+        "$hour12:$minute $ampm"
+    } else {
+        "${cal.get(java.util.Calendar.HOUR_OF_DAY).toString().padStart(2, '0')}:$minute"
+    }
+}
+
+private fun hand(center: Offset, angleDeg: Double, len: Float): Offset {
+    val a = Math.toRadians(angleDeg)
+    return center + Offset((len * sin(a)).toFloat(), (-len * cos(a)).toFloat())
+}
+
 /** Native clock. The extension only picks the format (`command` holds
- *  `clock-12h` or `clock-24h`); the time itself comes from the device and
- *  re-renders right after each minute boundary, no JS round-trip. */
+ *  `clock-12h` or `clock-24h`, respected by the digital styles); the time
+ *  itself comes from the device and re-renders right after each minute
+ *  boundary, no JS round-trip. Tapping the tile cycles CLOCK_STYLES. */
 @Composable
 fun ClockTile(
     shortcut: Shortcut,
     titleColor: Color,
     modifier: Modifier = Modifier,
 ) {
-    var text by remember(shortcut.id) { mutableStateOf("") }
+    val context = LocalContext.current
+    val prefs = remember(shortcut.id) { context.getSharedPreferences("deckboard", Context.MODE_PRIVATE) }
+    var style by remember(shortcut.id) {
+        mutableStateOf(prefs.getString("clock_style_${shortcut.id}", "icon") ?: "icon")
+    }
+    var now by remember(shortcut.id) { mutableStateOf(java.util.Calendar.getInstance()) }
     LaunchedEffect(shortcut.id) {
         while (true) {
-            val cal = java.util.Calendar.getInstance()
-            val minute = cal.get(java.util.Calendar.MINUTE).toString().padStart(2, '0')
-            text = if (shortcut.command == "clock-12h") {
-                val h = cal.get(java.util.Calendar.HOUR_OF_DAY)
-                val hour12 = if (h % 12 == 0) 12 else h % 12
-                val ampm = if (cal.get(java.util.Calendar.AM_PM) == java.util.Calendar.AM) "AM" else "PM"
-                "$hour12:$minute $ampm"
-            } else {
-                "${cal.get(java.util.Calendar.HOUR_OF_DAY).toString().padStart(2, '0')}:$minute"
-            }
-            delay(60_000L - (cal.get(java.util.Calendar.SECOND) * 1000L + cal.get(java.util.Calendar.MILLISECOND)))
+            now = java.util.Calendar.getInstance()
+            delay(60_000L - (now.get(java.util.Calendar.SECOND) * 1000L + now.get(java.util.Calendar.MILLISECOND)))
         }
     }
-    Column(
+    Box(
         modifier
             .fillMaxSize()
-            .padding(4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+            .pointerInput(shortcut.id) {
+                detectTapGestures(onTap = {
+                    style = CLOCK_STYLES[(CLOCK_STYLES.indexOf(style) + 1) % CLOCK_STYLES.size]
+                    prefs.edit().putString("clock_style_${shortcut.id}", style).apply()
+                })
+            },
+        contentAlignment = Alignment.Center,
     ) {
-        if (shortcut.unicode.isNotEmpty()) {
-            Text(
-                text = faChar(shortcut.unicode),
-                fontFamily = faFamily(shortcut.prefix),
-                fontSize = 20.sp,
+        val twelveHour = shortcut.command == "clock-12h"
+        when (style) {
+            // huge bare time filling the tile
+            "big" -> Text(
+                text = clockText(now, twelveHour),
+                fontSize = 30.sp,
+                fontWeight = FontWeight.Bold,
                 color = titleColor,
             )
+            // drawn face with hour and minute hands
+            "analog" -> Canvas(Modifier.fillMaxSize().padding(12.dp)) {
+                val stroke = 4f
+                val radius = min(size.width, size.height) / 2f - stroke
+                val center = Offset(size.width / 2f, size.height / 2f)
+                drawCircle(titleColor, radius = radius, center = center, style = Stroke(stroke))
+                repeat(4) { i ->
+                    drawLine(
+                        titleColor,
+                        start = hand(center, i * 90.0, radius * 0.82f),
+                        end = hand(center, i * 90.0, radius),
+                        strokeWidth = stroke,
+                        cap = StrokeCap.Round,
+                    )
+                }
+                val cal = now
+                val minuteAngle = cal.get(java.util.Calendar.MINUTE) / 60.0 * 360.0
+                val hourAngle = (cal.get(java.util.Calendar.HOUR_OF_DAY) % 12) / 12.0 * 360.0 +
+                    cal.get(java.util.Calendar.MINUTE) / 720.0 * 360.0
+                drawLine(
+                    titleColor,
+                    start = center,
+                    end = hand(center, hourAngle, radius * 0.5f),
+                    strokeWidth = stroke * 1.6f,
+                    cap = StrokeCap.Round,
+                )
+                drawLine(
+                    titleColor,
+                    start = center,
+                    end = hand(center, minuteAngle, radius * 0.78f),
+                    strokeWidth = stroke,
+                    cap = StrokeCap.Round,
+                )
+                drawCircle(titleColor, radius = stroke * 1.2f, center = center)
+            }
+            // time with the weekday and date underneath
+            "date" -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = clockText(now, twelveHour),
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = titleColor,
+                )
+                Text(
+                    text = java.text.SimpleDateFormat("EEE d.MM", java.util.Locale.getDefault())
+                        .format(now.time),
+                    fontSize = 11.sp,
+                    color = titleColor.copy(alpha = 0.75f),
+                )
+            }
+            // original look: glyph above the time
+            else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (shortcut.unicode.isNotEmpty()) {
+                    Text(
+                        text = faChar(shortcut.unicode),
+                        fontFamily = faFamily(shortcut.prefix),
+                        fontSize = 20.sp,
+                        color = titleColor,
+                    )
+                }
+                Text(
+                    text = clockText(now, twelveHour),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = titleColor,
+                )
+            }
         }
-        Text(
-            text = text,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-            color = titleColor,
-        )
     }
 }
 

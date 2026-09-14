@@ -90,9 +90,9 @@ fun Tile(
     )
     val titleColor = hex(if (active) shortcut.titleColor2 else shortcut.titleColor, Color.White)
 
-    // passive templates have no gesture: graph widgets are pure displays
-    // and the clock shows local time. They sit flat on the board instead
-    // of raised like the physical keys everything else emulates
+    // graph widgets are pure displays and the clock's tap only changes
+    // its local style (no server action). Both sit flat on the board
+    // instead of raised like the physical keys everything else emulates
     val template = templateFor(shortcut)
     val raised = template != "graph" && template != "clock"
 
