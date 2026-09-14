@@ -17,10 +17,21 @@ function metaOf(tile) {
   return props.typeMeta?.[tile.type] || {};
 }
 function tileBg(tile) {
-  return tile.color || metaOf(tile).color || "#2c3e50";
+  const base = tile.color || metaOf(tile).color || "#2c3e50";
+  return props.touch && activeTiles.has(tile.id) ? tile.color2 || base : base;
 }
 function tileIcon(tile) {
-  return tile.icon || metaOf(tile).icon || "";
+  const base = tile.icon || metaOf(tile).icon || "";
+  return props.touch && activeTiles.has(tile.id) ? tile.icon2 || base : base;
+}
+
+// dual-state tiles flip to their second state when tapped, like the
+// tablet client; the toggle lives for the editor session only
+const activeTiles = reactive(new Set());
+function isDual(tile) {
+  return Boolean(
+    tile.color2 || tile.icon2 || tile.img2 || metaOf(tile).dual
+  );
 }
 
 const drag = ref(null); // {tile, mode:'move'|'resize', dx, dy, pointerId}
@@ -59,6 +70,7 @@ function clamp(v, min, max) {
 
 function startDrag(tile, mode, event) {
   if (props.touch) return;
+  if (event.button !== 0) return; // right/middle click must not drag
   event.preventDefault();
   const startX = event.clientX;
   const startY = event.clientY;
@@ -103,7 +115,19 @@ function startDrag(tile, mode, event) {
 }
 
 function onTileTap(tile) {
-  if (props.touch && tile.mode !== "slider") emit("tile-exec", tile);
+  if (!props.touch) return;
+  if (tile.mode === "slider") return;
+  if (isDual(tile)) {
+    // flip to the second state like the tablet client does
+    if (activeTiles.has(tile.id)) activeTiles.delete(tile.id);
+    else activeTiles.add(tile.id);
+  }
+  emit("tile-exec", tile);
+}
+
+// right-click (long-press on touch devices) opens the tile's settings
+function onTileContext(tile) {
+  emit("tile-open", tile);
 }
 
 // Touch-mode sliders: drag vertically on the tile, value 0..1 from the
@@ -167,10 +191,17 @@ function onGridClick(event) {
             borderRadius: tile.shape === 1 ? '50%' : '8px',
           }"
           @dblclick="!touch && $emit('tile-open', tile)"
+          @contextmenu.prevent="onTileContext(tile)"
           @pointerdown="startDrag(tile, 'move', $event)"
           @click.stop="onTileTap(tile)"
         >
-          <img v-if="tile.img" class="tile-img" :src="tile.img" alt="" />
+          <img
+            v-if="touch && activeTiles.has(tile.id) && tile.img2"
+            class="tile-img"
+            :src="tile.img2"
+            alt=""
+          />
+          <img v-else-if="tile.img" class="tile-img" :src="tile.img" alt="" />
           <i
             v-if="tileIcon(tile)"
             class="tile-icon"

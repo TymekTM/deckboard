@@ -368,11 +368,21 @@ fn list_known_inputs(state: State<'_, DesktopState>) -> Vec<serde_json::Value> {
         for input in ext.inputs() {
             out.push(serde_json::json!({
                 "value": input.value,
+                "label": input.label,
                 "icon": input.icon,
                 "color": input.color,
                 "mode": input.mode,
                 "command": input.command,
                 "source": "extension",
+                "fields": input.fields.iter().map(|f| serde_json::json!({
+                    "kind": f.kind,
+                    "label": f.label,
+                    "key": f.key,
+                    "items": f.items.iter().map(|(v, l)| serde_json::json!({
+                        "value": v,
+                        "label": l,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
             }));
         }
     }

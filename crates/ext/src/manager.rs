@@ -52,6 +52,23 @@ pub struct ExtInputInfo {
     pub font_icon: Option<String>,
     pub mode: Option<String>,
     pub command: Option<String>,
+    /// Human action label from the extension declaration.
+    pub label: Option<String>,
+    /// Per-action parameter fields declared by the extension (`inputs`).
+    pub fields: Vec<ExtFieldInfo>,
+}
+
+/// One parameter field of an extension action: how the editor (and the
+/// original renderer) builds the button dialog for that action.
+#[derive(Debug, Clone)]
+pub struct ExtFieldInfo {
+    /// INPUT_METHOD string, e.g. "input:text" / "input:select".
+    pub kind: String,
+    pub label: String,
+    /// JSON key of the value inside the button's command object.
+    pub key: String,
+    /// Choices for `input:select` fields.
+    pub items: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for ExtEntry {
@@ -231,6 +248,37 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
     raw.iter()
         .filter_map(|i| {
             let value = i.get("value").and_then(Value::as_str)?.to_string();
+            // field declarations come as "inputs" (deckboard-extension-kit)
+            // or "input" (older deckboard-kit) - accept both spellings
+            let fields = i
+                .get("inputs")
+                .or_else(|| i.get("input"))
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|f| {
+                            let kind = f.get("type").and_then(Value::as_str)?.to_string();
+                            let label = f.get("label").and_then(Value::as_str)?.to_string();
+                            let key = f.get("ref").and_then(Value::as_str)?.to_string();
+                            let items = f
+                                .get("items")
+                                .and_then(Value::as_array)
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .filter_map(|it| {
+                                            let v = it.get("value").and_then(Value::as_str)?;
+                                            let l = it.get("label").and_then(Value::as_str)?;
+                                            Some((v.to_string(), l.to_string()))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            Some(ExtFieldInfo { kind, label, key, items })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(ExtInputInfo {
                 value,
                 icon: i.get("icon").and_then(Value::as_str).map(str::to_string),
@@ -238,6 +286,8 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
                 font_icon: i.get("fontIcon").and_then(Value::as_str).map(str::to_string),
                 mode: i.get("mode").and_then(Value::as_str).map(str::to_string),
                 command: i.get("command").and_then(Value::as_str).map(str::to_string),
+                label: i.get("label").and_then(Value::as_str).map(str::to_string),
+                fields,
             })
         })
         .collect()

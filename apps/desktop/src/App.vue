@@ -15,16 +15,26 @@ const touchMode = ref(false);
 const touchBoardId = ref(null);
 const knownInputs = ref([]);
 
-// type -> {icon, color, mode} fallbacks: static catalog + extension inputs
+// type -> {icon, color, mode, dual} fallbacks: static catalog + extensions
 const typeMeta = computed(() => {
   const map = {};
   for (const e of CATALOG) {
     if (e.value) {
-      map[e.value] = { icon: e.icon || "", color: e.color || "", mode: e.mode || "" };
+      map[e.value] = {
+        icon: e.icon || "",
+        color: e.color || "",
+        mode: e.mode || "",
+        dual: Boolean(e.dual),
+      };
     }
   }
   for (const i of knownInputs.value) {
-    map[i.value] = { icon: i.icon || "", color: i.color || "", mode: i.mode || "" };
+    map[i.value] = {
+      icon: i.icon || "",
+      color: i.color || "",
+      mode: i.mode || "",
+      dual: (i.mode || "").includes("toggle"),
+    };
   }
   return map;
 });
@@ -403,6 +413,7 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
             :type-meta="typeMeta"
             @tile-exec="api.execButton($event.id)"
             @tile-slider="tileSlider"
+            @tile-open="editingTile = $event"
           />
           <div
             v-if="currentBoard && !touchMode && !currentBoard.buttons.length"

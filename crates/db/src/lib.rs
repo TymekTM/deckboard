@@ -483,6 +483,34 @@ fn insert_button_on(conn: &Connection, row: &ButtonRow) -> Result<i64> {
     Ok(conn.last_insert_rowid())
 }
 
+/// Read an integer column that legacy databases may store as text
+/// (the original schema uses text-affinity columns; "" and "3" both occur).
+fn row_int(
+    row: &rusqlite::Row<'_>,
+    idx: usize,
+    default: i64,
+) -> std::result::Result<i64, rusqlite::Error> {
+    Ok(match row.get::<_, Option<rusqlite::types::Value>>(idx)? {
+        Some(rusqlite::types::Value::Integer(n)) => n,
+        Some(rusqlite::types::Value::Real(n)) => n as i64,
+        Some(rusqlite::types::Value::Text(s)) => s.trim().parse().unwrap_or(default),
+        _ => default,
+    })
+}
+
+/// Same as [`row_int`], but keeps SQL NULL as `None`.
+fn row_opt_int(
+    row: &rusqlite::Row<'_>,
+    idx: usize,
+) -> std::result::Result<Option<i64>, rusqlite::Error> {
+    Ok(match row.get::<_, Option<rusqlite::types::Value>>(idx)? {
+        Some(rusqlite::types::Value::Integer(n)) => Some(n),
+        Some(rusqlite::types::Value::Real(n)) => Some(n as i64),
+        Some(rusqlite::types::Value::Text(s)) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    })
+}
+
 fn map_button_row(row: &rusqlite::Row<'_>) -> std::result::Result<ButtonRow, rusqlite::Error> {
     Ok(ButtonRow {
         id: row.get(0)?,
@@ -490,33 +518,33 @@ fn map_button_row(row: &rusqlite::Row<'_>) -> std::result::Result<ButtonRow, rus
         kind: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
         command: row.get(3)?,
         title: row.get(4)?,
-        title_position: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+        title_position: row_int(row, 5, 0)?,
         title_color: row.get(6)?,
         title_box_color: row.get(7)?,
         color: row.get(8)?,
         icon_color: row.get(9)?,
         icon_color2: row.get(10)?,
         border_color: row.get(11)?,
-        shape: row.get::<_, Option<i64>>(12)?.unwrap_or(0),
+        shape: row_int(row, 12, 0)?,
         icon: row.get(13)?,
         img: row.get(14)?,
         img2: row.get(15)?,
         icon2: row.get(16)?,
         color2: row.get(17)?,
-        shape2: row.get::<_, Option<i64>>(18)?.unwrap_or(0),
+        shape2: row_int(row, 18, 0)?,
         border_color2: row.get(19)?,
-        title_position2: row.get::<_, Option<i64>>(20)?.unwrap_or(0),
+        title_position2: row_int(row, 20, 0)?,
         title_box_color2: row.get(21)?,
         title_color2: row.get(22)?,
-        position: row.get(23)?,
-        position2: row.get::<_, Option<i64>>(24)?.unwrap_or(0),
+        position: row_opt_int(row, 23)?,
+        position2: row_int(row, 24, 0)?,
         mode: row
             .get::<_, Option<String>>(25)?
             .unwrap_or_else(|| "button".into()),
-        x: row.get(26)?,
-        y: row.get(27)?,
-        w: row.get::<_, Option<i64>>(28)?.unwrap_or(1),
-        h: row.get::<_, Option<i64>>(29)?.unwrap_or(1),
+        x: row_opt_int(row, 26)?,
+        y: row_opt_int(row, 27)?,
+        w: row_int(row, 28, 1)?,
+        h: row_int(row, 29, 1)?,
         options: row.get(30)?,
     })
 }

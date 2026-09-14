@@ -60,6 +60,30 @@ const extInputs = computed(() => {
   );
 });
 
+// extension field declarations ("input:text" / "input:select" / ...) use the
+// same shape as catalog fields so the generic renderer can handle them
+function extFieldShape(f) {
+  if (f.kind === "input:select") {
+    return {
+      key: f.key,
+      label: f.label,
+      kind: "select",
+      options: (f.items || []).map((it) => ({ value: it.value, label: it.label })),
+    };
+  }
+  if (f.kind === "input:key") {
+    return { key: f.key, label: f.label, placeholder: "e.g. CTRL + K" };
+  }
+  if (f.kind === "input:file" || f.kind === "input:folder") {
+    return {
+      key: f.key,
+      label: f.label,
+      placeholder: f.kind === "input:file" ? "file path" : "folder path",
+    };
+  }
+  return { key: f.key, label: f.label };
+}
+
 const actionGroups = computed(() => {
   const groups = [];
   let current = null;
@@ -76,10 +100,11 @@ const actionGroups = computed(() => {
       header: "Extensions",
       items: extInputs.value.map((i) => ({
         value: i.value,
-        label: prettify(i.value),
+        label: i.label || prettify(i.value),
         icon: i.icon || "puzzle-piece",
         color: i.color || "#7f8c8d",
         extInput: i,
+        fields: (i.fields || []).map(extFieldShape),
       })),
     });
   }
@@ -139,7 +164,14 @@ function applyFields() {
     form.command = fields[""] ?? "";
     return;
   }
-  const obj = {};
+  // merge into the stored command so keys the extension declared outside
+  // of its field list survive an edit
+  let obj = {};
+  try {
+    obj = JSON.parse(form.command || "{}") || {};
+  } catch {
+    obj = {};
+  }
   for (const f of entry.fields) {
     const raw = fields[f.key];
     if (f.kind === "number") {
@@ -536,8 +568,8 @@ function colorOr(val, fallback) {
             </div>
           </template>
 
-          <!-- structured / generic fields -->
-          <template v-else-if="catalogEntry?.fields">
+          <!-- structured / generic fields (catalog + extension-declared) -->
+          <template v-else-if="catalogEntry?.fields?.length">
             <label
               v-for="f in catalogEntry.fields.filter(fieldVisible)"
               :key="f.key"
@@ -562,6 +594,11 @@ function colorOr(val, fallback) {
               />
             </label>
           </template>
+
+          <!-- extension action without declared options: command is fixed -->
+          <div v-else-if="catalogEntry?.extInput" class="no-opts">
+            This action has no options.
+          </div>
 
           <!-- unknown / custom type -->
           <label v-else class="field">
@@ -764,6 +801,14 @@ function colorOr(val, fallback) {
   padding: 16px 20px 8px;
 }
 .right-col .field { margin-bottom: 13px; }
+.no-opts {
+  font-size: 13px;
+  color: var(--modal-muted);
+  background: var(--modal-field);
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin-bottom: 13px;
+}
 .steps { display: flex; flex-direction: column; gap: 6px; margin-bottom: 13px; }
 .step { display: flex; gap: 6px; }
 .step-type { max-width: 150px; flex: none; }
