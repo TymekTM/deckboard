@@ -269,7 +269,7 @@ private const val MAX_DRAWN_POINTS = 40
 
 /** Bucket-average [history] down to at most [max] points (keeps shape,
  *  drops jitter). A no-op when the window already fits. */
-private fun downsample(history: List<Double>, max: Int): List<Double> {
+internal fun downsample(history: List<Double>, max: Int): List<Double> {
     if (history.size <= max) return history
     val bucket = history.size.toDouble() / max
     return List(max) { i ->

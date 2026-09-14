@@ -201,7 +201,7 @@ sealed class BoardOp {
         fun from(el: JsonElement, json: Json): BoardOp? {
             val obj = el as? JsonObject ?: return null
             val op = obj["op"]?.contentOrNull() ?: return null
-            val boardId = obj["board"]?.jsonPrimitive?.content?.toLongOrNull()
+            val boardId = (obj["board"] as? JsonPrimitive)?.content?.toLongOrNull()
             return when (op) {
                 "board-set" -> obj["board"]?.let {
                     json.decodeFromString(Board.serializer(), it.toString())
@@ -212,7 +212,7 @@ sealed class BoardOp {
                         ?.let { TileSet(b, it) }
                 }
                 "tile-remove" -> boardId?.let { b ->
-                    obj["tile"]?.jsonPrimitive?.content?.toLongOrNull()?.let { TileRemove(b, it) }
+                    (obj["tile"] as? JsonPrimitive)?.content?.toLongOrNull()?.let { TileRemove(b, it) }
                 }
                 "tile-clear" -> boardId?.let { TileClear(it) }
                 else -> null

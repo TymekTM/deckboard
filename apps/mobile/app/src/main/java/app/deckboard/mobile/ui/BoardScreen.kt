@@ -5,6 +5,7 @@
 
 package app.deckboard.mobile.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -31,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.deckboard.mobile.net.displayText
@@ -95,15 +97,23 @@ private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) 
     // toggles without a state channel keep client-side position state
     val positions = remember(board.id) { mutableStateMapOf<Long, Boolean>() }
 
-    val background = when {
-        board.background?.kind == "color" -> hex(board.background!!.color, DeckColors.background)
-        // asset backgrounds need the image loader (later increment)
-        else -> DeckColors.background
-    }
+    // a board image wins over the color (like the original client); the
+    // color shows through while the asset loads
+    val bgAsset = board.background?.hash
+    LaunchedEffect(bgAsset) { bgAsset?.let { vm.ensureAsset(it) } }
+    val bgBitmap = bgAsset?.let { bitmaps[it] }
 
     BoxWithConstraints(
-        modifier.background(background),
+        modifier.background(hex(board.background?.color, DeckColors.background)),
     ) {
+        bgBitmap?.let {
+            Image(
+                bitmap = it,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+        }
         val tile = maxWidth / board.width.coerceAtLeast(1)
         val tileHeight = maxHeight / board.height.coerceAtLeast(1)
 

@@ -107,9 +107,10 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         scope.cancel()
     }
 
-    /** Kick off a fetch for [hash] once. Reads [ServerConfig.token], so
-     *  nothing loads before the device is authenticated. */
-    fun ensureAsset(hash: String) {
+    /** Kick off a fetch for [hash]. Reads [ServerConfig.token], so nothing
+     *  loads before the device is authenticated. Failures back off and
+     *  retry a few times - e.g. an asset fetched during a server restart. */
+    fun ensureAsset(hash: String, attempt: Int = 0) {
         if (_bitmaps.value.containsKey(hash) || !assetFetches.add(hash)) return
         val cfg = _config.value
         val token = cfg.token ?: return
@@ -124,6 +125,10 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (bitmap != null) {
                 _bitmaps.value = _bitmaps.value + (hash to bitmap.asImageBitmap())
+            } else if (attempt < ASSET_RETRIES) {
+                delay(30_000L * (attempt + 1))
+                assetFetches.remove(hash)
+                ensureAsset(hash, attempt + 1)
             }
         }
     }
@@ -265,54 +270,14 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Deltas mutate the snapshot the server already sent (docs/protocol-v2.md §4). */
     private fun applyDelta(ops: List<BoardOp>) {
-        val boards = _boards.value.toMutableList()
-        fun boardIndex(id: Long) = boards.indexOfFirst { it.id == id }
-
-        for (op in ops) {
-            when (op) {
-                is BoardOp.BoardSet -> {
-                    val at = boardIndex(op.board.id)
-                    if (at >= 0) boards[at] = op.board else boards.add(op.board)
-                }
-                is BoardOp.BoardRemove -> {
-                    val at = boardIndex(op.boardId)
-                    if (at >= 0) boards.removeAt(at)
-                }
-                is BoardOp.TileSet -> {
-                    val at = boardIndex(op.boardId)
-                    if (at >= 0) {
-                        val b = boards[at]
-                        val tiles = b.tiles.toMutableList()
-                        val tileAt = tiles.indexOfFirst { it.id == op.tile.id }
-                        if (tileAt >= 0) tiles[tileAt] = op.tile else tiles.add(op.tile)
-                        boards[at] = b.copy(tiles = tiles)
-                    }
-                }
-                is BoardOp.TileRemove -> {
-                    val at = boardIndex(op.boardId)
-                    if (at >= 0) {
-                        val b = boards[at]
-                        boards[at] = b.copy(tiles = b.tiles.filterNot { it.id == op.tileId })
-                    }
-                }
-                is BoardOp.TileClear -> {
-                    val at = boardIndex(op.boardId)
-                    if (at >= 0) {
-                        val b = boards[at]
-                        boards[at] = b.copy(tiles = emptyList())
-                    }
-                }
-            }
-        }
-
-        _boards.value = boards
+        _boards.value = applyBoardOps(_boards.value, ops)
         val cur = _currentBoard.value
         val currentId = cur?.id
-        if (currentId != null && boards.none { it.id == currentId }) {
-            _currentBoard.value = boards.firstOrNull()
+        if (currentId != null && _boards.value.none { it.id == currentId }) {
+            _currentBoard.value = _boards.value.firstOrNull()
         } else if (currentId != null) {
             // refresh the selected board object so tile edits show up
-            _currentBoard.value = boards.firstOrNull { it.id == currentId }
+            _currentBoard.value = _boards.value.firstOrNull { it.id == currentId }
         }
     }
 
@@ -372,6 +337,8 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val TAG = "DeckboardViewModel"
+
+        private const val ASSET_RETRIES = 3
 
         /** Shared by reconnects and asset fetches - see V2Client.http. */
         private val sharedHttp = OkHttpClient.Builder()
