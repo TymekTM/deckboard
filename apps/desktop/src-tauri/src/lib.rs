@@ -17,6 +17,11 @@ struct DesktopState {
     broadcaster: Option<EditorBroadcaster>,
     hub: Option<Arc<Hub>>,
     port: u16,
+    /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
+    hotkey: std::sync::Mutex<String>,
+    /// `deckboard/editor.json` - editor-local settings (hotkey), kept
+    /// separate from the original app's settings.json.
+    settings_path: Option<std::path::PathBuf>,
 }
 
 impl DesktopState {
@@ -56,12 +61,10 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            let state = setup_core();
-            let port = state.port;
+            let state = setup_core(app.handle().clone());
             app.manage(state);
 
             build_tray(app.handle())?;
-            register_touch_mode_hotkey(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -76,6 +79,9 @@ pub fn run() {
             delete_button,
             clear_board,
             exec_button,
+            exec_slider,
+            get_settings,
+            set_touch_mode_hotkey,
             export_boards,
             import_boards,
         ])
@@ -106,7 +112,7 @@ fn register_ext_input(
 /// Open the database (read-write: the editor is now the single writer,
 /// ADR-001), load extensions and start the embedded legacy server. A failure
 /// keeps the UI alive with `backend: None` so the window can explain why.
-fn setup_core() -> DesktopState {
+fn setup_core(app: tauri::AppHandle) -> DesktopState {
     let port: u16 = std::env::var("DECKBOARD_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -122,11 +128,14 @@ fn setup_core() -> DesktopState {
             broadcaster: None,
             hub: None,
             port,
+            hotkey: std::sync::Mutex::new("Ctrl+Alt+D".to_string()),
+            settings_path: None,
         };
     }
     let db = db.unwrap();
 
     let home = dirs::home_dir().expect("home directory");
+    let settings_path = home.join("deckboard/editor.json");
     let settings: serde_json::Value = std::fs::read_to_string(home.join("deckboard/settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -210,11 +219,20 @@ fn setup_core() -> DesktopState {
         }
     });
 
+    let hotkey = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("hotkey").and_then(|h| h.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "Ctrl+Alt+D".to_string());
+    register_touch_mode_hotkey(&app, &hotkey);
+
     DesktopState {
         backend: Some(backend),
         broadcaster: Some(broadcaster),
         hub: Some(hub),
         port,
+        hotkey: std::sync::Mutex::new(hotkey),
+        settings_path: Some(settings_path),
     }
 }
 
@@ -283,20 +301,27 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
-/// Ctrl+Alt+D toggles touch mode from anywhere, mirroring the original's
-/// configurable `toggleTouchMode` hotkey (fixed binding for now).
-fn register_touch_mode_hotkey(app: AppHandle) {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-    app.global_shortcut()
-        .on_shortcut(
-            "Ctrl+Alt+D".parse::<Shortcut>().expect("valid shortcut"),
-            move |app, _shortcut, event| {
-                if event.state() == ShortcutState::Pressed {
-                    let _ = app.emit("toggle-touch-mode", ());
-                }
-            },
-        )
-        .expect("register global hotkey");
+/// Register the touch-mode hotkey. The combo is user-configurable
+/// (`deckboard/editor.json`, default Ctrl+Alt+D - the original's
+/// `toggleTouchMode` concept); an unusable stored combo falls back to the
+/// default with a warning.
+fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+    let shortcut = match combo.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!("invalid hotkey \"{combo}\" - touch-mode hotkey not registered");
+            return;
+        }
+    };
+    let result = app.global_shortcut().on_shortcut(shortcut, |app, _s, event| {
+        if event.state() == ShortcutState::Pressed {
+            let _ = app.emit("toggle-touch-mode", ());
+        }
+    });
+    if let Err(e) = result {
+        tracing::warn!("could not register hotkey \"{combo}\": {e}");
+    }
 }
 
 // ---- tauri commands --------------------------------------------------------
@@ -458,6 +483,54 @@ async fn exec_button(
 
 /// Write the selected boards to `path` in the original's `.boardjson`
 /// format. The file IO lives here so the webview needs no fs permissions.
+/// Touch mode slider: forward the 0..1 value to the tile's backend.
+#[tauri::command]
+async fn exec_slider(state: State<'_, DesktopState>, id: i64, value: f64) -> Result<(), String> {
+    let backend = state.backend()?;
+    let Some(button) = backend.get_button(id) else {
+        return Ok(());
+    };
+    let _ = tauri::async_runtime::spawn_blocking(move || backend.slider(button, value)).await;
+    Ok(())
+}
+
+/// Editor-local settings (currently just the touch-mode hotkey).
+#[tauri::command]
+async fn get_settings(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let hotkey = state.hotkey.lock().unwrap().clone();
+    Ok(serde_json::json!({ "hotkey": hotkey }))
+}
+
+/// Validate, register and persist a new touch-mode hotkey combo.
+#[tauri::command]
+async fn set_touch_mode_hotkey(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    combo: String,
+) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+
+    // validation only: registration re-parses the combo
+    let _validated: Shortcut = combo
+        .parse()
+        .map_err(|_| format!("invalid shortcut \"{combo}\" - use e.g. Ctrl+Alt+D"))?;
+
+    let old = state.hotkey.lock().unwrap().clone();
+    if let Ok(old_shortcut) = old.parse::<Shortcut>() {
+        let _ = app.global_shortcut().unregister(old_shortcut);
+    }
+    register_touch_mode_hotkey(&app, &combo);
+    *state.hotkey.lock().unwrap() = combo.clone();
+
+    if let Some(path) = &state.settings_path {
+        let json = serde_json::json!({ "hotkey": combo }).to_string();
+        if let Err(e) = std::fs::write(path, json) {
+            tracing::warn!(error = %e, "could not persist hotkey");
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn export_boards(
     state: State<'_, DesktopState>,

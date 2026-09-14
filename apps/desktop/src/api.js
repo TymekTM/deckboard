@@ -15,6 +15,9 @@ export const api = {
   deleteButton: (id, boardId) => invoke("delete_button", { id, boardId }),
   clearBoard: (boardId) => invoke("clear_board", { boardId }),
   execButton: (id) => invoke("exec_button", { id }),
+  execSlider: (id, value) => invoke("exec_slider", { id, value }),
+  getSettings: () => invoke("get_settings"),
+  setHotkey: (combo) => invoke("set_touch_mode_hotkey", { combo }),
   exportBoards: (ids, path) => invoke("export_boards", { ids, path }),
   importBoards: (path) => invoke("import_boards", { path }),
 };

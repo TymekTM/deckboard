@@ -15,6 +15,11 @@ const status = ref({ dbOk: false, port: 0, clients: 0 });
 const touchMode = ref(false);
 const touchBoardId = ref(null);
 
+const hotkey = ref("Ctrl+Alt+D");
+const hotkeyDraft = ref("");
+const hotkeyError = ref("");
+const editingHotkey = ref(false);
+
 const editingTile = ref(null); // button being edited
 const boardModal = ref(null); // {mode: 'create'|'edit', board?}
 const addFlow = ref(null); // {x, y} position for the new tile
@@ -25,6 +30,7 @@ const currentBoard = computed(() =>
 
 async function load() {
   status.value = await api.serverStatus();
+  hotkey.value = (await api.getSettings()).hotkey;
   if (status.value.dbOk) {
     boards.value = await api.listBoards();
     if (!boards.value.some((b) => b.id === currentId.value)) {
@@ -71,6 +77,10 @@ function firstFreeCell(board) {
   return { x: 0, y: 0 };
 }
 
+async function tileSlider(tile, value) {
+  await api.execSlider(tile.id, value);
+}
+
 async function tileMoved(tile, x, y, w, h) {
   await api.moveButton(tile.id, tile.board_id, x, y, w, h);
   tile.x = x;
@@ -108,6 +118,18 @@ async function doImport() {
   if (!path) return;
   await api.importBoards(path);
   await load();
+}
+
+async function saveHotkey() {
+  const combo = hotkeyDraft.value.trim();
+  try {
+    await api.setHotkey(combo);
+    hotkey.value = combo;
+    hotkeyError.value = "";
+    editingHotkey.value = false;
+  } catch (e) {
+    hotkeyError.value = String(e);
+  }
 }
 
 function toggleTouch() {
@@ -173,6 +195,20 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
         </button>
       </div>
 
+      <div class="hotkey">
+        <template v-if="!editingHotkey">
+          <span class="dim">Hotkey</span>
+          <kbd class="combo">{{ hotkey }}</kbd>
+          <button class="mini" :disabled="!status.dbOk" @click="editingHotkey = true; hotkeyDraft = hotkey">Edit</button>
+        </template>
+        <template v-else>
+          <input v-model="hotkeyDraft" placeholder="Ctrl+Alt+D" @keyup.enter="saveHotkey" />
+          <button class="mini primary" @click="saveHotkey">Set</button>
+          <button class="mini" @click="editingHotkey = false">Cancel</button>
+          <span v-if="hotkeyError" class="hotkey-error">{{ hotkeyError }}</span>
+        </template>
+      </div>
+
       <div class="status">
         <span :class="['dot', status.dbOk ? 'ok' : 'bad']"></span>
         port {{ status.port }} - {{ status.clients }} client(s)
@@ -194,6 +230,7 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
         :board="boards.find((b) => b.id === touchBoardId) || currentBoard"
         touch
         @tile-exec="api.execButton($event.id)"
+        @tile-slider="tileSlider"
       />
     </main>
 
@@ -283,6 +320,10 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
   align-items: center;
   gap: 6px;
 }
+.hotkey { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.hotkey .combo { font-size: 12px; background: var(--surface-2); border-radius: 4px; padding: 2px 6px; }
+.hotkey .mini { padding: 3px 8px; font-size: 12px; }
+.hotkey-error { font-size: 11px; color: #f08585; width: 100%; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.ok { background: var(--accent); }
 .dot.bad { background: var(--danger); }

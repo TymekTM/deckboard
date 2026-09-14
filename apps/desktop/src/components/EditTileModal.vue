@@ -130,9 +130,11 @@ async function pickImage(field) {
 // ---- save ------------------------------------------------------------------
 
 function save() {
+  // each writer owns the command only for its own type - the others must
+  // leave the stored command untouched
   applyFields();
-  applyBoardId();
-  applySteps();
+  if (form.type === "board") applyBoardId();
+  if (form.type === "multiaction") applySteps();
   emit("save", { ...form, ...resolveTypeMeta() });
 }
 

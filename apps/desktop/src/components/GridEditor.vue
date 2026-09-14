@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from "vue";
+import { computed, reactive, ref } from "vue";
 import { CELL_W, ROW_H } from "../catalog";
 
 // Edit-mode grid: drag to move, corner handle to resize, double-click to
@@ -8,7 +8,7 @@ const props = defineProps({
   board: { type: Object, required: true },
   touch: { type: Boolean, default: false },
 });
-const emit = defineEmits(["tile-open", "tile-moved", "tile-add", "tile-add-default", "tile-exec"]);
+const emit = defineEmits(["tile-open", "tile-moved", "tile-add", "tile-add-default", "tile-exec", "tile-slider"]);
 
 const drag = ref(null); // {tile, mode:'move'|'resize', dx, dy, pointerId}
 
@@ -86,7 +86,29 @@ function startDrag(tile, mode, event) {
 }
 
 function onTileTap(tile) {
-  if (props.touch) emit("tile-exec", tile);
+  if (props.touch && tile.mode !== "slider") emit("tile-exec", tile);
+}
+
+// Touch-mode sliders: drag vertically on the tile, value 0..1 from the
+// pointer position, sent to the backend on release (fill previews live).
+const sliderVals = reactive({});
+function sliderValue(tile) {
+  return sliderVals[tile.id] ?? 0.5;
+}
+function startSlider(tile, event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const setVal = (e) => {
+    sliderVals[tile.id] = clamp(1 - (e.clientY - rect.top) / rect.height, 0, 1);
+  };
+  setVal(event);
+  const onMove = (e) => setVal(e);
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    emit("tile-slider", tile, sliderVals[tile.id] ?? 0.5);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
 }
 
 function onGridClick(event) {
@@ -158,6 +180,17 @@ function onGridClick(event) {
             <span v-if="tile.mode === 'slider'" class="tile-badge">
               <i class="fas fa-sliders-h"></i>
             </span>
+            <template v-if="touch && tile.mode === 'slider'">
+              <div
+                class="slider-fill"
+                :style="{ height: sliderValue(tile) * 100 + '%' }"
+              ></div>
+              <div
+                class="slider-thumb"
+                :style="{ top: (1 - sliderValue(tile)) * 100 + '%' }"
+              ></div>
+              <div class="slider-capture" @pointerdown.stop.prevent="startSlider(tile, $event)"></div>
+            </template>
             <span
               v-if="!touch"
               class="resize-handle"
@@ -232,6 +265,28 @@ function onGridClick(event) {
   right: 6px;
   font-size: 12px;
   opacity: 0.85;
+}
+.slider-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.28);
+  pointer-events: none;
+}
+.slider-thumb {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  transform: translateY(-50%);
+  background: rgba(255, 255, 255, 0.85);
+  pointer-events: none;
+}
+.slider-capture {
+  position: absolute;
+  inset: 0;
+  cursor: ns-resize;
 }
 .resize-handle {
   position: absolute;
