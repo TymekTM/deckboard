@@ -1,6 +1,6 @@
-//! Tile rendering compatible with the stock client: hex colors from the
-//! payload, FontAwesome unicode icons, dual-state toggles, drag sliders
-//! and custom-value/graph displays.
+//! Tile rendering over protocol v2 (docs/protocol-v2.md §4/§5): styles
+//! arrive resolved (hex colors, unicode glyphs, active-state pairs), the
+//! kind picks the template, unknown kinds degrade to a plain button.
 
 package app.deckboard.mobile.ui
 
@@ -45,16 +45,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.times
 import app.deckboard.mobile.R
-import app.deckboard.mobile.proto.Shortcut
+import app.deckboard.mobile.proto.Tile
+import app.deckboard.mobile.proto.V2
+import kotlinx.serialization.json.JsonElement
 
 val FaBrands = FontFamily(Font(R.font.fa_brands_400))
 val FaSolid = FontFamily(Font(R.font.fa_solid_900))
 
-fun faFamily(prefix: String): FontFamily = if (prefix == "fab") FaBrands else FaSolid
+fun faFamily(prefix: String?): FontFamily = if (prefix == "fab") FaBrands else FaSolid
 
-fun hex(color: String, fallback: Color): Color =
-    runCatching { Color(android.graphics.Color.parseColor(color.trim())) }
-        .getOrDefault(fallback)
+fun hex(color: String?, fallback: Color): Color =
+    color?.let { runCatching { Color(android.graphics.Color.parseColor(it.trim())) }.getOrNull() }
+        ?: fallback
 
 /** shape: 0 = square, 1 = rounded, 2 = circle. Square tiles still get a
  *  small corner radius so the grid reads softly on a tablet. */
@@ -64,61 +66,53 @@ private fun shapeOf(shape: Int, radius: Float): Shape = when (shape) {
     else -> RoundedCornerShape(radius / 2f)
 }
 
+/** Template for a tile: the kind decides, with `params.widget` hints
+ *  (clock) on top. Unknown kinds degrade to a button. */
+fun templateFor(tile: Tile): String = when (tile.kind) {
+    V2.KIND_SLIDER -> "slider"
+    V2.KIND_KNOB -> "knob"
+    V2.KIND_GRAPH -> "graph"
+    V2.KIND_LIST -> "list"
+    V2.KIND_TOGGLE -> "toggle"
+    else -> if (tile.widgetHint() == "clock") "clock" else "button"
+}
+
 @Composable
 fun Tile(
-    shortcut: Shortcut,
+    tile: Tile,
     tileSize: androidx.compose.ui.unit.Dp,
-    customValue: String?,
-    suffix: String?,
-    history: List<Float>,
-    listItems: List<String>,
-    position: Int,
+    active: Boolean,
+    liveText: String?,
+    series: List<Double>,
+    items: List<String>,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
-    onToggle: () -> Unit,
     onSlider: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val active = position == 1
-    // discord voice toggles skip the ON/OFF text and switch color
-    // instead: a pushed OFF (muted or deafened) lights the tile red
-    // like the official voice-channel controls, ON keeps the tile color
-    val discordToggle = shortcut.type.startsWith("toggle-")
-    val muted = discordToggle && customValue == "OFF"
-    val color = if (muted) {
-        Color(0xFFED4245)
-    } else {
-        hex(if (active) shortcut.color2.ifEmpty { shortcut.color } else shortcut.color, DeckColors.tileFallback)
-    }
-    // the glyph switches with state like the official controls:
-    // microphone / microphone-slash, headphones / deaf (FA has no
-    // slashed headphones and the ear icon reads as deafened)
-    val discordIcon = when {
-        shortcut.type == "toggle-microphone" -> if (muted) "\uF131" else "\uF130"
-        shortcut.type == "toggle-headphone" -> if (muted) "\uF2A4" else "\uF025"
-        else -> null
-    }
-    val unicode = discordIcon
-        ?: if (active) shortcut.unicode2.ifEmpty { shortcut.unicode } else shortcut.unicode
-    val borderColor = hex(if (active) shortcut.borderColor2.orEmpty() else shortcut.borderColor.orEmpty(), Color.Transparent)
-    val shape = shapeOf(if (active) shortcut.shape2 else shortcut.shape, tileSize.value * 0.18f)
-    val iconColor = hex(
-        (if (active) shortcut.iconColor2.orEmpty() else shortcut.iconColor.orEmpty()).ifEmpty { "#ffffff" },
-        Color.White,
-    )
-    val titleColor = hex(if (active) shortcut.titleColor2 else shortcut.titleColor, Color.White)
+    val style = tile.style
+    val baseColor = hex(style?.color, DeckColors.tileFallback)
+    val activeColor = hex(style?.color2, baseColor)
+    val color = if (active) activeColor else baseColor
+    // active state swaps in the paired glyph (mic -> mic-slash, ...)
+    val icon = (if (active) style?.icon2 ?: style?.icon else style?.icon).orEmpty()
+    val iconFamily = faFamily(style?.iconFamily)
+    val iconColor = Color.White
+    val titleColor = Color.White
+    val title = style?.title.orEmpty()
+    val shape = shapeOf(style?.shape?.toIntOrNull() ?: 0, tileSize.value * 0.18f)
 
     // graph widgets are pure displays and the clock's tap only changes
     // its local style (no server action). Both sit flat on the board
     // instead of raised like the physical keys everything else emulates
-    val template = templateFor(shortcut)
+    val template = templateFor(tile)
     val raised = template != "graph" && template != "clock"
 
     // physical key feedback: tiles sit raised with a hard shadow cast to
     // the bottom-right; pressing sinks the face (scale + shift toward the
     // shadow) and softens the shadow, release pops back with a small
     // bounce so it reads like a real key springing up
-    var pressed by remember(shortcut.id) { mutableStateOf(false) }
+    var pressed by remember(tile.id) { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
         animationSpec = if (pressed) {
@@ -154,7 +148,7 @@ fun Tile(
                 scaleX = scale
                 scaleY = scale
             }
-            .aspectRatio(shortcut.w.toFloat() / shortcut.h.toFloat())
+            .aspectRatio(tile.w.toFloat() / tile.h.toFloat())
             .padding(3.dp),
     ) {
         // hard offset shadow behind the face, not clipped so it bleeds
@@ -174,61 +168,25 @@ fun Tile(
                 .offset(x = sink, y = sink)
                 .clip(shape)
                 .background(color)
-                .then(
-                    if (borderColor != Color.Transparent) {
-                        Modifier.border(2.dp, borderColor, shape)
-                    } else {
-                        Modifier
-                    },
-                ),
+                .border(0.dp, Color.Transparent),
             contentAlignment = Alignment.Center,
         ) {
             if (scrim > 0f) {
                 Box(Modifier.matchParentSize().background(Color.White.copy(alpha = scrim)))
             }
             when (template) {
-                "slider" -> SliderTile(shortcut, color, iconColor, onSlider)
-                "knob" -> KnobTile(shortcut, color, iconColor, titleColor, onSlider)
-                "graph" -> GraphTile(shortcut, history, suffix, titleColor)
-                "clock" -> ClockTile(shortcut, titleColor)
-                "list" -> ListTile(shortcut, listItems, titleColor, onPress = onPressEnd)
-                "custom-value" -> if (discordToggle) {
-                    // icon-only button: the state glyph on the red or
-                    // tile-colored face, no label like official Discord
-                    DiscordToggleTile(
-                        shortcut,
-                        unicode,
-                        iconColor,
-                        onPressStart = {
-                            pressed = true
-                            onPressStart()
-                        },
-                        onPressEnd = {
-                            pressed = false
-                            onPressEnd()
-                        },
-                    )
-                } else {
-                    CustomValueTile(
-                        shortcut,
-                        customValue,
-                        suffix,
-                        titleColor,
-                        onPressStart = {
-                            pressed = true
-                            onPressStart()
-                        },
-                        onPressEnd = {
-                            pressed = false
-                            onPressEnd()
-                        },
-                    )
-                }
+                "slider" -> SliderTile(tile, color, icon, iconFamily, iconColor, onSlider)
+                "knob" -> KnobTile(tile, titleColor, iconColor, titleColor, onSlider)
+                "graph" -> GraphTile(tile, series, liveText, titleColor)
+                "clock" -> ClockTile(tile, icon, iconFamily, titleColor)
+                "list" -> ListTile(tile, items, titleColor, onPress = onPressEnd)
                 else -> ButtonTile(
-                    shortcut = shortcut,
-                    unicode = unicode,
+                    tile = tile,
+                    unicode = icon,
+                    iconFamily = iconFamily,
                     iconColor = iconColor,
                     titleColor = titleColor,
+                    liveText = if (template == "toggle") liveText else null,
                     onPressStart = {
                         pressed = true
                         onPressStart()
@@ -237,66 +195,33 @@ fun Tile(
                         pressed = false
                         onPressEnd()
                     },
-                    onToggle = onToggle,
                 )
             }
         }
     }
 }
 
-@Composable
-private fun DiscordToggleTile(
-    shortcut: Shortcut,
-    unicode: String,
-    iconColor: Color,
-    onPressStart: () -> Unit,
-    onPressEnd: () -> Unit,
-) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .pointerInput(shortcut.id) {
-                detectTapGestures(
-                    onPress = {
-                        onPressStart()
-                        try {
-                            awaitRelease()
-                        } finally {
-                            onPressEnd()
-                        }
-                    },
-                )
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        if (unicode.isNotEmpty()) {
-            // state glyphs are hardcoded FA solid codepoints
-            Text(
-                text = faChar(unicode),
-                fontFamily = FaSolid,
-                fontSize = 26.sp,
-                color = iconColor,
-            )
-        }
-    }
-}
-
+/** Button (and toggle) tiles: press feedback per the declared gestures. */
 @Composable
 private fun ButtonTile(
-    shortcut: Shortcut,
+    tile: Tile,
     unicode: String,
+    iconFamily: FontFamily,
     iconColor: Color,
     titleColor: Color,
+    liveText: String?,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
-    onToggle: () -> Unit,
 ) {
-    val title = shortcut.title.orEmpty()
+    val title = listOfNotNull(
+        liveText,
+        tile.style?.title,
+    ).filter { it.isNotEmpty() }.joinToString("  ")
 
     Box(
         Modifier
             .fillMaxSize()
-            .pointerInput(shortcut.id) {
+            .pointerInput(tile.id) {
                 detectTapGestures(
                     onPress = {
                         onPressStart()
@@ -304,7 +229,6 @@ private fun ButtonTile(
                             awaitRelease()
                         } finally {
                             onPressEnd()
-                            if (shortcut.mode == "toggle") onToggle()
                         }
                     },
                 )
@@ -315,7 +239,7 @@ private fun ButtonTile(
             if (unicode.isNotEmpty()) {
                 Text(
                     text = faChar(unicode),
-                    fontFamily = faFamily(shortcut.prefix),
+                    fontFamily = iconFamily,
                     fontSize = 26.sp,
                     color = iconColor,
                 )
@@ -323,8 +247,13 @@ private fun ButtonTile(
             if (title.isNotEmpty()) {
                 Text(
                     text = title,
-                    fontSize = 12.sp,
+                    fontSize = if (liveText != null) 18.sp else 12.sp,
                     color = titleColor,
+                    fontWeight = if (liveText != null) {
+                        androidx.compose.ui.text.font.FontWeight.Bold
+                    } else {
+                        androidx.compose.ui.text.font.FontWeight.Normal
+                    },
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
@@ -337,22 +266,21 @@ private fun ButtonTile(
 
 @Composable
 private fun SliderTile(
-    shortcut: Shortcut,
+    tile: Tile,
     baseColor: Color,
+    icon: String,
+    iconFamily: FontFamily,
     iconColor: Color,
     onSlider: (Float) -> Unit,
 ) {
-    var value by remember(shortcut.id) { mutableFloatStateOf(0.5f) }
-    val fill = if (shortcut.color2.isNotEmpty()) {
-        hex(shortcut.color2, baseColor.copy(alpha = 0.6f))
-    } else {
-        baseColor.copy(alpha = 0.55f)
-    }
+    var value by remember(tile.id) { mutableFloatStateOf(0.5f) }
+    val fill = tile.style?.color2?.let { hex(it, baseColor.copy(alpha = 0.6f)) }
+        ?: baseColor.copy(alpha = 0.55f)
 
     Box(
         Modifier
             .fillMaxSize()
-            .pointerInput(shortcut.id) {
+            .pointerInput(tile.id) {
                 detectDragGestures(
                     onDragStart = { offset ->
                         value = (1f - offset.y / size.height).coerceIn(0f, 1f)
@@ -373,72 +301,12 @@ private fun SliderTile(
                 .fillMaxHeight(value)
                 .background(fill),
         )
-        if (shortcut.unicode.isNotEmpty()) {
+        if (icon.isNotEmpty()) {
             Text(
-                text = faChar(shortcut.unicode),
-                fontFamily = faFamily(shortcut.prefix),
+                text = faChar(icon),
+                fontFamily = iconFamily,
                 fontSize = 22.sp,
                 color = iconColor,
-            )
-        }
-    }
-}
-
-@Composable
-private fun CustomValueTile(
-    shortcut: Shortcut,
-    customValue: String?,
-    suffix: String?,
-    titleColor: Color,
-    onPressStart: () -> Unit,
-    onPressEnd: () -> Unit,
-) {
-    val display = listOfNotNull(customValue, suffix).joinToString("") { it }
-    Column(
-        Modifier
-            .fillMaxSize()
-            // custom-value tiles are buttons too in the original app: the
-            // tap fires the action and the extension pushes a new label
-            .pointerInput(shortcut.id) {
-                detectTapGestures(
-                    onPress = {
-                        onPressStart()
-                        try {
-                            awaitRelease()
-                        } finally {
-                            onPressEnd()
-                        }
-                    },
-                )
-            }
-            .padding(4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-    ) {
-        if (shortcut.unicode.isNotEmpty()) {
-            Text(
-                text = faChar(shortcut.unicode),
-                fontFamily = faFamily(shortcut.prefix),
-                fontSize = 20.sp,
-                color = titleColor,
-            )
-        }
-        Text(
-            text = display,
-            fontSize = 18.sp,
-            color = titleColor,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-        )
-        if (!shortcut.title.isNullOrEmpty()) {
-            Text(
-                text = shortcut.title,
-                fontSize = 10.sp,
-                color = titleColor.copy(alpha = 0.75f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
             )
         }
     }

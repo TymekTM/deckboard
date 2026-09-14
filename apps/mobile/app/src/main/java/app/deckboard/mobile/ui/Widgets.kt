@@ -1,9 +1,6 @@
-//! Widget templates (M5 widget kit): graph sparkline, knob and list.
-//!
-//! A tile uses a template when its manifest asks for one - the manifest
-//! travels in the shortcut `options` field (`{"widget": "knob"}` etc.) -
-//! or implicitly for `mode: "graph"`, which the original app renders as a
-//! value history series.
+//! Widget templates over protocol v2: graph sparkline fed by the server's
+//! series ring buffer, knob, list, and the locally rendered clock (the
+//! tile announces itself via `params.widget = "clock"`).
 
 package app.deckboard.mobile.ui
 
@@ -42,14 +39,14 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.deckboard.mobile.proto.Shortcut
-import kotlinx.serialization.json.jsonPrimitive
+import app.deckboard.mobile.proto.Tile
 import kotlinx.coroutines.delay
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
@@ -58,41 +55,8 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 
-private fun parse(value: Float?): String =
+private fun parse(value: Double?): String =
     if (value == null) "" else if (value == ceil(value)) value.toInt().toString() else "%.1f".format(value)
-
-/**
- * Widget manifest carried in the shortcut `options` field. Missing or
- * unparsable options mean "no manifest" and the mode decides the template.
- */
-data class WidgetManifest(val widget: String) {
-    companion object {
-        fun of(shortcut: Shortcut): WidgetManifest? {
-            val el = shortcut.options ?: return null
-            val obj = el as? kotlinx.serialization.json.JsonObject ?: return null
-            val name = obj["widget"]?.let {
-                runCatching { it.jsonPrimitive.content }.getOrNull()
-            } ?: return null
-            return WidgetManifest(name)
-        }
-    }
-}
-
-/** True for the deckboard-clock extension's display tile (`type` is its
- *  input value); we render the time locally instead of consuming the
- *  extension's minute pushes. */
-fun isClockTile(shortcut: Shortcut): Boolean = shortcut.type == "clock-display-time"
-
-/** Implicit template for a shortcut when no manifest overrides it. */
-fun templateFor(shortcut: Shortcut): String {
-    if (isClockTile(shortcut)) return "clock"
-    val manifest = WidgetManifest.of(shortcut)
-    if (manifest != null) return manifest.widget
-    return when (shortcut.mode) {
-        "graph" -> "graph"
-        else -> shortcut.mode
-    }
-}
 
 /** Clock visual styles. Tapping the tile cycles to the next entry and
  *  the choice persists per tile id in shared preferences. */
@@ -115,23 +79,24 @@ private fun hand(center: Offset, angleDeg: Double, len: Float): Offset {
     return center + Offset((len * sin(a)).toFloat(), (-len * cos(a)).toFloat())
 }
 
-/** Native clock. The extension only picks the format (`command` holds
- *  `clock-12h` or `clock-24h`, respected by the digital styles); the time
- *  itself comes from the device and re-renders right after each minute
- *  boundary, no JS round-trip. Tapping the tile cycles CLOCK_STYLES. */
+/** Native clock. `params.clock_format` ("12h"/"24h") picks the format;
+ *  the time itself comes from the device and re-renders right after each
+ *  minute boundary, no JS round-trip. Tapping the tile cycles CLOCK_STYLES. */
 @Composable
 fun ClockTile(
-    shortcut: Shortcut,
+    tile: Tile,
+    icon: String,
+    iconFamily: FontFamily,
     titleColor: Color,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val prefs = remember(shortcut.id) { context.getSharedPreferences("deckboard", Context.MODE_PRIVATE) }
-    var style by remember(shortcut.id) {
-        mutableStateOf(prefs.getString("clock_style_${shortcut.id}", "icon") ?: "icon")
+    val prefs = remember(tile.id) { context.getSharedPreferences("deckboard", Context.MODE_PRIVATE) }
+    var style by remember(tile.id) {
+        mutableStateOf(prefs.getString("clock_style_${tile.id}", "icon") ?: "icon")
     }
-    var now by remember(shortcut.id) { mutableStateOf(java.util.Calendar.getInstance()) }
-    LaunchedEffect(shortcut.id) {
+    var now by remember(tile.id) { mutableStateOf(java.util.Calendar.getInstance()) }
+    LaunchedEffect(tile.id) {
         while (true) {
             now = java.util.Calendar.getInstance()
             delay(60_000L - (now.get(java.util.Calendar.SECOND) * 1000L + now.get(java.util.Calendar.MILLISECOND)))
@@ -140,15 +105,15 @@ fun ClockTile(
     Box(
         modifier
             .fillMaxSize()
-            .pointerInput(shortcut.id) {
+            .pointerInput(tile.id) {
                 detectTapGestures(onTap = {
                     style = CLOCK_STYLES[(CLOCK_STYLES.indexOf(style) + 1) % CLOCK_STYLES.size]
-                    prefs.edit().putString("clock_style_${shortcut.id}", style).apply()
+                    prefs.edit().putString("clock_style_${tile.id}", style).apply()
                 })
             },
         contentAlignment = Alignment.Center,
     ) {
-        val twelveHour = shortcut.command == "clock-12h"
+        val twelveHour = tile.param("clock_format") == "12h"
         when (style) {
             // huge bare time filling the tile
             "big" -> Text(
@@ -209,10 +174,10 @@ fun ClockTile(
             }
             // original look: glyph above the time
             else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                if (shortcut.unicode.isNotEmpty()) {
+                if (icon.isNotEmpty()) {
                     Text(
-                        text = faChar(shortcut.unicode),
-                        fontFamily = faFamily(shortcut.prefix),
+                        text = faChar(icon),
+                        fontFamily = iconFamily,
                         fontSize = 20.sp,
                         color = titleColor,
                     )
@@ -228,16 +193,15 @@ fun ClockTile(
     }
 }
 
-/** Line chart of the last values, with current value and title. */
+/** Line chart of the server-side series window, with current value and title. */
 @Composable
 fun GraphTile(
-    shortcut: Shortcut,
-    history: List<Float>,
-    suffix: String?,
+    tile: Tile,
+    history: List<Double>,
+    liveText: String?,
     titleColor: Color,
     modifier: Modifier = Modifier,
 ) {
-    val latest = history.lastOrNull()
     val lineColor = titleColor.copy(alpha = 0.9f)
     Column(
         modifier
@@ -246,16 +210,16 @@ fun GraphTile(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = if (latest == null) "" else parse(latest) + (suffix ?: ""),
+            text = liveText.orEmpty(),
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
             color = titleColor,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (!shortcut.title.isNullOrEmpty()) {
+        if (!tile.style?.title.isNullOrEmpty()) {
             Text(
-                text = shortcut.title,
+                text = tile.style?.title.orEmpty(),
                 fontSize = 10.sp,
                 color = titleColor.copy(alpha = 0.75f),
                 maxLines = 1,
@@ -263,22 +227,26 @@ fun GraphTile(
             )
         }
         Canvas(Modifier.fillMaxWidth().fillMaxHeight().padding(top = 2.dp)) {
-            if (history.size < 2) return@Canvas
+            // The server keeps a 120-point window; that is denser than a
+            // tile can show, so bucket-average down to MAX_DRAWN_POINTS -
+            // same shape, calmer line.
+            val points = downsample(history, MAX_DRAWN_POINTS)
+            if (points.size < 2) return@Canvas
             // normalize around the window's average so the ordinary level
             // sits at mid-height: a strong machine idles near a few percent
             // and a fixed 0..100 scale would pin the whole curve to the
             // floor. The span has an absolute and relative floor so a quiet
             // series stays calm instead of amplifying noise to full height.
-            val avg = history.sum() / history.size
-            val dev = maxOf(history.max() - avg, avg - history.min())
-            val half = maxOf(dev, 0.2f * abs(avg), 5f)
+            val avg = points.sum() / points.size
+            val dev = maxOf(points.max() - avg, avg - points.min())
+            val half = maxOf(dev, 0.2 * abs(avg), 5.0)
             val minV = avg - half
-            val span = 2f * half
-            val stepX = size.width / (history.size - 1)
+            val span = 2.0 * half
+            val stepX = size.width / (points.size - 1)
             val line = Path()
-            history.forEachIndexed { i, v ->
+            points.forEachIndexed { i, v ->
                 val x = i * stepX
-                val y = size.height - ((v - minV) / span).coerceIn(0f, 1f) * size.height
+                val y = size.height - ((v - minV) / span).toFloat().coerceIn(0f, 1f) * size.height
                 if (i == 0) line.moveTo(x, y) else line.lineTo(x, y)
             }
             // wash the area under the curve with a lighter tone of the
@@ -295,26 +263,42 @@ fun GraphTile(
     }
 }
 
+/** Upper bound on points drawn per chart; larger windows are averaged
+ *  per bucket so small tiles stay readable. */
+private const val MAX_DRAWN_POINTS = 40
+
+/** Bucket-average [history] down to at most [max] points (keeps shape,
+ *  drops jitter). A no-op when the window already fits. */
+private fun downsample(history: List<Double>, max: Int): List<Double> {
+    if (history.size <= max) return history
+    val bucket = history.size.toDouble() / max
+    return List(max) { i ->
+        val from = kotlin.math.floor(i * bucket).toInt()
+        val to = minOf(kotlin.math.ceil((i + 1) * bucket).toInt(), history.size)
+        history.subList(from, to).average()
+    }
+}
+
 /**
  * Circular control: drag around the center to set a 0..1 value, sent via
- * the same `exec_slider` channel as slider tiles.
+ * the same slide interaction as slider tiles.
  */
 @Composable
 fun KnobTile(
-    shortcut: Shortcut,
+    tile: Tile,
     baseColor: Color,
     iconColor: Color,
     titleColor: Color,
     onSlider: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var value by remember(shortcut.id) { mutableFloatStateOf(0.5f) }
-    val arcColor = if (shortcut.color2.isNotEmpty()) hex(shortcut.color2, titleColor) else titleColor
+    var value by remember(tile.id) { mutableFloatStateOf(0.5f) }
+    val arcColor = tile.style?.color2?.let { hex(it, titleColor) } ?: titleColor
 
     Box(
         modifier
             .fillMaxSize()
-            .pointerInput(shortcut.id) {
+            .pointerInput(tile.id) {
                 detectDragGestures(
                     onDrag = { change, _ ->
                         change.consume()
@@ -359,7 +343,7 @@ fun KnobTile(
                 style = Stroke(stroke),
             )
             // pointer dot at the current angle
-            val angle = Math.toRadians((135.0 + 270.0 * value))
+            val angle = Math.toRadians((135.0 + 270.0 * value).toDouble())
             val radius = min(size.width, size.height) / 2f - inset
             drawCircle(
                 color = iconColor,
@@ -371,7 +355,7 @@ fun KnobTile(
             )
         }
         Text(
-            text = parse(value),
+            text = parse(value.toDouble()),
             fontSize = 16.sp,
             fontWeight = FontWeight.Bold,
             color = titleColor,
@@ -380,20 +364,19 @@ fun KnobTile(
 }
 
 /**
- * Scrollable option list. Items come from the manifest (`options.items`)
- * or from the live value when the extension pushes an array. Tapping an
- * item selects it and sends the button press (the extension sees the tap;
- * per-item args arrive with protocol v2).
+ * Scrollable option list. Items come from the manifest (`params.items`)
+ * or from the live list value when the extension pushes an array. Tapping
+ * an item selects it and fires the tile's tap.
  */
 @Composable
 fun ListTile(
-    shortcut: Shortcut,
+    tile: Tile,
     items: List<String>,
     titleColor: Color,
     onPress: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var selected by remember(shortcut.id) { androidx.compose.runtime.mutableStateOf(-1) }
+    var selected by remember(tile.id) { androidx.compose.runtime.mutableStateOf(-1) }
     Column(
         modifier
             .fillMaxSize()
@@ -401,9 +384,9 @@ fun ListTile(
             .clip(RoundedCornerShape(6.dp))
             .background(titleColor.copy(alpha = 0.08f)),
     ) {
-        if (!shortcut.title.isNullOrEmpty()) {
+        if (!tile.style?.title.isNullOrEmpty()) {
             Text(
-                text = shortcut.title,
+                text = tile.style?.title.orEmpty(),
                 fontSize = 11.sp,
                 color = titleColor,
                 maxLines = 1,
@@ -439,8 +422,8 @@ fun ListTile(
 }
 
 /** Items for a list tile: manifest items first, else a pushed array value. */
-fun listItems(shortcut: Shortcut, live: kotlinx.serialization.json.JsonElement?): List<String> {
-    val fromManifest = (shortcut.options as? kotlinx.serialization.json.JsonObject)
+fun listItems(tile: Tile, live: kotlinx.serialization.json.JsonElement?): List<String> {
+    val fromManifest = (tile.params as? kotlinx.serialization.json.JsonObject)
         ?.get("items")
         ?.let { el ->
             (el as? kotlinx.serialization.json.JsonArray)?.mapNotNull { item ->

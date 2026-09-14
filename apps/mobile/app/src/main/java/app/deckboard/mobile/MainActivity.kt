@@ -18,11 +18,12 @@ class MainActivity : ComponentActivity() {
             DeckboardTheme {
                 val vm: DeckboardViewModel = viewModel()
                 val conn by vm.connState.collectAsState()
-                when (conn) {
-                    is app.deckboard.mobile.net.ConnState.Connected,
-                    is app.deckboard.mobile.net.ConnState.Connecting,
-                    -> BoardScreen(vm)
-                    else -> ConnectScreen(vm, onConnected = {})
+                // Only a completed hello/welcome means the board screen has
+                // data; Connecting stays on the connect screen (spinner).
+                if (conn is app.deckboard.mobile.net.ConnState.Connected) {
+                    BoardScreen(vm)
+                } else {
+                    ConnectScreen(vm, onConnected = {})
                 }
             }
         }

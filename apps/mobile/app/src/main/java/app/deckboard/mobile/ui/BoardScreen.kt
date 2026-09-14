@@ -1,7 +1,7 @@
-//! Board screen: staggered grid laid out exactly like the stock client -
-//! tiles are placed at (x, y) with size (w, h) on a board.width x
-//! board.height grid. No top bar: a small floating chip (board name) opens
-//! the board menu; live values come from merged APP_CUSTOM_VALUE data.
+//! Board screen over protocol v2: tiles at (x, y) sized (w, h) on a
+//! board.width x board.height grid. Live values and series come from the
+//! server's channels keyed by the tile's state channel; board switches
+//! arrive as `board.open` or via the floating chip.
 
 package app.deckboard.mobile.ui
 
@@ -9,7 +9,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -33,14 +32,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import app.deckboard.mobile.net.displayText
+import app.deckboard.mobile.net.isActiveValue
 import app.deckboard.mobile.proto.Board
+import app.deckboard.mobile.proto.V2
 import app.deckboard.mobile.state.DeckboardViewModel
-
-private fun hex(color: String?, fallback: Color): Color =
-    color?.let { runCatching { Color(android.graphics.Color.parseColor(it.trim())) }.getOrNull() }
-        ?: fallback
 
 @Composable
 fun BoardScreen(vm: DeckboardViewModel) {
@@ -79,76 +75,61 @@ private fun BoardChip(vm: DeckboardViewModel) {
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
             boards.forEach { b ->
                 DropdownMenuItem(
-                    text = { Text(b.name ?: "board ${b.id}") },
+                    text = { Text(b.name.ifEmpty { "board ${b.id}" }) },
                     onClick = {
                         menuOpen = false
                         vm.selectBoard(b)
                     },
                 )
             }
-            DropdownMenuItem(
-                text = { Text("Refresh") },
-                onClick = {
-                    menuOpen = false
-                    vm.refresh()
-                },
-            )
         }
     }
 }
 
 @Composable
 private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) {
-    val liveValues by vm.customValues.collectAsState()
-    val histories by vm.valueHistory.collectAsState()
-    // toggle positions are client-side state like in the stock app
-    val positions = remember(board.id) { mutableStateMapOf<Long, Int>() }
+    val liveValues by vm.values.collectAsState()
+    val series by vm.series.collectAsState()
+    // toggles without a state channel keep client-side position state
+    val positions = remember(board.id) { mutableStateMapOf<Long, Boolean>() }
+
+    val background = when {
+        board.background?.kind == "color" -> hex(board.background!!.color, DeckColors.background)
+        // asset backgrounds need the image loader (later increment)
+        else -> DeckColors.background
+    }
 
     BoxWithConstraints(
-        modifier
-            .background(hex(board.background, DeckColors.background)),
+        modifier.background(background),
     ) {
         val tile = maxWidth / board.width.coerceAtLeast(1)
         val tileHeight = maxHeight / board.height.coerceAtLeast(1)
 
-        board.shortcuts.filter { it.id != null }.forEach { s ->
-            val id = s.id ?: return@forEach
-            val pos = positions[id] ?: (s.position ?: 0)
+        board.tiles.forEach { t ->
+            val watchChannel = t.state?.channel
+            val live = liveValues[watchChannel]
+            val active = when {
+                watchChannel != null -> isActiveValue(live)
+                else -> positions[t.id] ?: false
+            }
             Box(
                 Modifier
-                    .offset(x = tile * s.x, y = tileHeight * s.y)
-                    .width(tile * s.w)
-                    .height(tileHeight * s.h),
+                    .offset(x = tile * t.x, y = tileHeight * t.y)
+                    .width(tile * t.w)
+                    .height(tileHeight * t.h),
             ) {
-                // watched key per the original client: extra, then
-                // command, then the type itself
-                val watchKey = s.extra.ifEmpty { s.command }.ifEmpty { s.type }
-                val live = liveValues[watchKey]
-                // payloads are scalars ("14:33") or objects ({value, suffix});
-                // custom-value tiles show value + suffix, graph tiles read
-                // the series from histories
-                val liveObj = live as? JsonObject
-                val liveText = live?.let { el ->
-                    (liveObj?.get("value") ?: el).let { runCatching { it.jsonPrimitive.content }.getOrNull() }
-                }
-                val liveSuffix = liveObj?.get("suffix")?.let {
-                    runCatching { it.jsonPrimitive.content }.getOrNull()
-                }
                 Tile(
-                    shortcut = s,
+                    tile = t,
                     tileSize = tile,
-                    customValue = liveText,
-                    suffix = liveSuffix,
-                    history = histories[watchKey] ?: emptyList(),
-                    listItems = listItems(s, live),
-                    position = pos,
-                    onPressStart = { vm.holdStart(s) },
-                    onPressEnd = { vm.holdEnd(s) },
-                    onToggle = { positions[id] = if (pos == 1) 0 else 1 },
-                    onSlider = { v -> vm.slider(s, v) },
+                    active = active,
+                    liveText = displayText(live),
+                    series = series[watchChannel] ?: emptyList(),
+                    items = listItems(t, live),
+                    onPressStart = { vm.pressStart(board.id, t) },
+                    onPressEnd = { vm.pressEnd(board.id, t) },
+                    onSlider = { v -> vm.slider(board.id, t, v) },
                 )
             }
         }
     }
 }
-
