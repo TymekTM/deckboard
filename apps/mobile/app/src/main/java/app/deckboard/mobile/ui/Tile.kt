@@ -165,7 +165,14 @@ fun Tile(
                 "knob" -> KnobTile(shortcut, color, iconColor, titleColor, onSlider)
                 "graph" -> GraphTile(shortcut, history, suffix, titleColor)
                 "list" -> ListTile(shortcut, listItems, titleColor, onPress = onPressEnd)
-                "custom-value" -> CustomValueTile(shortcut, customValue, suffix, titleColor)
+                "custom-value" -> CustomValueTile(
+                    shortcut,
+                    customValue,
+                    suffix,
+                    titleColor,
+                    onPressStart = onPressStart,
+                    onPressEnd = onPressEnd,
+                )
                 else -> ButtonTile(
                     shortcut = shortcut,
                     unicode = unicode,
@@ -295,11 +302,27 @@ private fun CustomValueTile(
     customValue: String?,
     suffix: String?,
     titleColor: Color,
+    onPressStart: () -> Unit,
+    onPressEnd: () -> Unit,
 ) {
     val display = listOfNotNull(customValue, suffix).joinToString("") { it }
     Column(
         Modifier
             .fillMaxSize()
+            // custom-value tiles are buttons too in the original app: the
+            // tap fires the action and the extension pushes a new label
+            .pointerInput(shortcut.id) {
+                detectTapGestures(
+                    onPress = {
+                        onPressStart()
+                        try {
+                            awaitRelease()
+                        } finally {
+                            onPressEnd()
+                        }
+                    },
+                )
+            }
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
