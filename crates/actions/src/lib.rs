@@ -11,6 +11,8 @@ use thiserror::Error;
 
 use enigo::{Keyboard as _, Mouse as _};
 
+pub mod audio;
+
 #[derive(Error, Debug)]
 pub enum ActionError {
     #[error("unsupported command type: {0}")]
@@ -220,10 +222,12 @@ pub fn run_command(
 }
 
 /// Slider value change (`exec_slider {id, value}`), value in 0..1.
-pub fn run_slider_command(_input: &mut dyn Input, cmd: &Command, _value: f64) -> Result<()> {
+pub fn run_slider_command(_input: &mut dyn Input, cmd: &Command, value: f64) -> Result<()> {
     match cmd.kind.as_str() {
-        "speaker-volume" | "wheels-volume" | "slider-obs-audio" | "slider-slobs-audio"
-        | "obs-audio-slider" | "slobs-audio-slider" => {
+        "speaker-volume" => audio::set_master_volume(value as f32)
+            .map_err(|e| ActionError::BadPayload("speaker-volume".into(), e)),
+        "wheels-volume" | "slider-obs-audio" | "slider-slobs-audio" | "obs-audio-slider"
+        | "slobs-audio-slider" => {
             tracing::warn!(
                 kind = cmd.kind.as_str(),
                 "slider backends not implemented yet"

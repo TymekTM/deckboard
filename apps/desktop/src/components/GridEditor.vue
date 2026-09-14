@@ -191,7 +191,12 @@ function onTileContext(tile) {
 // pointer position, sent to the backend on release (fill previews live).
 const sliderVals = reactive({});
 function sliderValue(tile) {
-  return sliderVals[tile.id] ?? 0.5;
+  if (sliderVals[tile.id] != null) return sliderVals[tile.id];
+  if (tile.type === "speaker-volume") {
+    const live = Number(props.customValues["speaker-volume"]);
+    if (Number.isFinite(live)) return clamp(live, 0, 1);
+  }
+  return 0.5;
 }
 function startSlider(tile, event) {
   const rect = event.currentTarget.getBoundingClientRect();

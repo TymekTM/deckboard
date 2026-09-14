@@ -17,7 +17,12 @@ through a legacy compatibility layer until the new client ships.
 - [ ] **M2 - Action engine complete**: remaining command types (audio
       volume via windows-rs, speaker-device, screenshot, clipboard-based
       unicode typing, media info), audio/device status watchers
-      (5 s / 60 s like the original).
+      (5 s / 60 s like the original). Status (2026-09-14): master audio
+      landed - `speaker-volume` slider sets the endpoint volume, and a
+      5 s watcher broadcasts `speaker-volume`/`speaker-muted` as
+      `app_status_update` (tablets flip live; the editor mirrors it via
+      the customValues store). Still open: speaker-device switching,
+      screenshot, unicode typing, media info, device watcher.
 - [ ] **M3 - Desktop editor (MVP gate)**: Tauri 2 + Vue 3 editor: boards,
       buttons, sliders CRUD, drag/resize, dual-state, `.boardjson`
       import/export (format-compatible), touch mode, tray, hotkeys,

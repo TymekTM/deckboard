@@ -193,7 +193,32 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         tauri::async_runtime::spawn(async move {
             while let Some(deckboard_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
                 let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
-                hub.broadcast("app_status_update", Some(&payload.to_string())).await;
+                hub.broadcast("app_status_update", Some(&payload.to_string()))
+                    .await;
+                let _ = app.emit("app-status-update", &payload);
+            }
+        });
+    }
+
+    // master audio status watcher: the original polls every 5 s and pushes
+    // speaker-volume/speaker-muted; that is what flips mute tiles live
+    {
+        let hub = hub.clone();
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some((volume, muted)) = deckboard_actions::audio::master_status() else {
+                    continue;
+                };
+                let payload = serde_json::json!({
+                    "app": "APP_CUSTOM_VALUE",
+                    "data": {"speaker-volume": volume, "speaker-muted": muted},
+                });
+                hub.broadcast("app_status_update", Some(&payload.to_string()))
+                    .await;
                 let _ = app.emit("app-status-update", &payload);
             }
         });
