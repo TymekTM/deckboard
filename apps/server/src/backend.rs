@@ -22,8 +22,10 @@ pub struct SqlBackend {
     /// Native Voicemeeter remote (replaces the ffi-napi based extension,
     /// which cannot load in our JS host).
     voicemeeter: Mutex<VoicemeeterState>,
-    /// Discord local-RPC credentials (the original app's saved OAuth token).
+    /// Discord local-RPC credentials (the original app's saved OAuth token)
+    /// plus the settings path, so fresh tokens can be persisted.
     discord: Mutex<Option<DiscordConfig>>,
+    discord_settings_path: Option<std::path::PathBuf>,
 }
 
 impl SqlBackend {
@@ -34,11 +36,13 @@ impl SqlBackend {
             extensions: None,
             voicemeeter: Mutex::new(VoicemeeterState::new()),
             discord: Mutex::new(None),
+            discord_settings_path: None,
         }
     }
 
-    pub fn with_discord(mut self, config: Option<DiscordConfig>) -> Self {
+    pub fn with_discord(mut self, config: Option<DiscordConfig>, settings_path: std::path::PathBuf) -> Self {
         self.discord = Mutex::new(config);
+        self.discord_settings_path = Some(settings_path);
         self
     }
 
@@ -91,8 +95,10 @@ impl SqlBackend {
         true
     }
 
-    /// Run one Discord action over the local RPC pipe. Returns true when
-    /// the action kind belongs to Discord (even on error - logged).
+    /// Run one Discord action over the local RPC pipe. On an expired token
+    /// a silent refresh is tried first; without a refresh token Discord's
+    /// consent popup shows on the desktop and the new tokens are saved to
+    /// settings.json. Returns true when the action kind belongs to Discord.
     fn exec_discord(
         &self,
         cmd: &Command,
@@ -101,9 +107,8 @@ impl SqlBackend {
         if !deckboard_discord::is_discord_action(&cmd.kind) {
             return false;
         }
-        let config = self.discord.lock().unwrap().clone();
-        let Some(config) = config else {
-            tracing::warn!(kind = %cmd.kind, "discord not configured (no client id / access token in settings)");
+        let Some(config) = self.discord.lock().unwrap().clone() else {
+            tracing::warn!(kind = %cmd.kind, "discord not configured (no client id in settings)");
             return true;
         };
         let args = cmd
@@ -114,10 +119,51 @@ impl SqlBackend {
         let result = deckboard_discord::execute(&config, &cmd.kind, &args, |key, value| {
             sink.app_value(&key, &value);
         });
+        let result = match result {
+            Err(deckboard_discord::DiscordError::AuthRejected) => {
+                match self.reauthorize_discord(&config) {
+                    Ok(fresh) => {
+                        tracing::info!("discord re-authorized, retrying action");
+                        deckboard_discord::execute(&fresh, &cmd.kind, &args, |key, value| {
+                            sink.app_value(&key, &value);
+                        })
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            other => other,
+        };
         if let Err(e) = result {
             tracing::warn!(kind = %cmd.kind, error = %e, "discord action failed");
         }
         true
+    }
+
+    /// Refresh or re-authorize the Discord token and persist it. The
+    /// interactive path blocks until the user answers Discord's popup.
+    fn reauthorize_discord(
+        &self,
+        config: &DiscordConfig,
+    ) -> Result<DiscordConfig, deckboard_discord::DiscordError> {
+        let tokens = deckboard_discord::refresh(config).or_else(|_| {
+            tracing::info!("discord token refresh unavailable - showing consent popup (confirm it on the desktop)");
+            deckboard_discord::authorize(config, std::time::Instant::now() + std::time::Duration::from_secs(180))
+        })?;
+        let fresh = DiscordConfig {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            ..config.clone()
+        };
+        if let Some(path) = &self.discord_settings_path {
+            if let Err(e) = deckboard_discord::save_tokens(path, &deckboard_discord::AuthTokens {
+                access_token: fresh.access_token.clone(),
+                refresh_token: fresh.refresh_token.clone(),
+            }) {
+                tracing::warn!(error = %e, "could not save discord tokens to settings.json");
+            }
+        }
+        *self.discord.lock().unwrap() = Some(fresh.clone());
+        Ok(fresh)
     }
 
     fn with_input(&self, f: impl FnOnce(&mut EnigoInput)) {

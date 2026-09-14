@@ -16,7 +16,7 @@
 //! same way the original extension failed to load.
 
 use std::ffi::c_void;
-use std::sync::Mutex;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -39,12 +39,14 @@ pub type Result<T> = std::result::Result<T, VmError>;
 /// C API signatures from the Voicemeeter Remote API (ANSI string variants).
 type LoginFn = extern "system" fn() -> i32;
 type LogoutFn = extern "system" fn() -> i32;
+type IsParametersDirtyFn = extern "system" fn() -> i32;
 type GetParameterFloatFn = extern "system" fn(name: *const u8, value: *mut f32) -> i32;
 type SetParametersFn = extern "system" fn(param: *const u8) -> i32;
 
 struct Symbols {
     login: LoginFn,
     logout: LogoutFn,
+    is_parameters_dirty: IsParametersDirtyFn,
     get_parameter_float: GetParameterFloatFn,
     set_parameters: SetParametersFn,
     module: *mut c_void,
@@ -81,6 +83,9 @@ unsafe fn load_symbols(path: &std::ffi::CStr) -> Result<Symbols> {
     Ok(Symbols {
         login: unsafe { std::mem::transmute::<*mut c_void, LoginFn>(resolve("VBVMR_Login")?) },
         logout: unsafe { std::mem::transmute::<*mut c_void, LogoutFn>(resolve("VBVMR_Logout")?) },
+        is_parameters_dirty: unsafe {
+            std::mem::transmute::<*mut c_void, IsParametersDirtyFn>(resolve("VBVMR_IsParametersDirty")?)
+        },
         get_parameter_float: unsafe {
             std::mem::transmute::<*mut c_void, GetParameterFloatFn>(resolve("VBVMR_GetParameterFloat")?)
         },
@@ -147,6 +152,13 @@ impl Remote {
     pub fn get_parameter_float(&self, param: &str) -> Result<f32> {
         let name = std::ffi::CString::new(param)
             .map_err(|_| VmError::BadPayload("parameter", param.into()))?;
+        // the DLL refreshes its parameter bank only when asked; without
+        // this call reads return stale values (and toggles read the old
+        // state forever)
+        let mut syncs = 0;
+        while (self.symbols.is_parameters_dirty)() == 1 && syncs < 20 {
+            syncs += 1;
+        }
         let mut value = 0f32;
         // SAFETY: name outlives the call, value is a valid out-param
         if (self.symbols.get_parameter_float)(name.as_ptr() as *const u8, &mut value) < 0 {
@@ -162,6 +174,9 @@ impl Remote {
         if (self.symbols.set_parameters)(c.as_ptr() as *const u8) < 0 {
             return Err(VmError::Call("VBVMR_SetParameters"));
         }
+        // the engine applies text commands asynchronously; voicemeeter-
+        // connector waited 200 ms so a following read sees the new state
+        std::thread::sleep(Duration::from_millis(200));
         Ok(())
     }
 }
@@ -190,7 +205,7 @@ impl VoicemeeterState {
         VoicemeeterState::default()
     }
 
-    fn with_remote(&mut self, f: impl FnOnce(&Remote) -> Result<()>) -> Result<()> {
+    fn with_remote<T>(&mut self, f: impl FnOnce(&Remote) -> Result<T>) -> Result<T> {
         if self.remote.is_none() {
             self.remote = Some(Remote::open()?);
         }
@@ -235,10 +250,7 @@ impl VoicemeeterState {
 
         match base {
             "vm-set" => {
-                let value = args
-                    .get("value")
-                    .and_then(Value::as_f64)
-                    .ok_or_else(|| VmError::BadPayload("value", "missing".into()))?;
+                let value = parse_value(args)?;
                 self.with_remote(|r| r.set_parameters(&param_text(&index, value as f32)))
             }
             "vm-toggle" => self.with_remote(|r| {
@@ -247,10 +259,7 @@ impl VoicemeeterState {
                 r.set_parameters(&param_text(&index, target))
             }),
             "vm-increase" | "vm-decrease" => {
-                let delta = args
-                    .get("value")
-                    .and_then(Value::as_f64)
-                    .ok_or_else(|| VmError::BadPayload("value", "missing".into()))?;
+                let delta = parse_value(args)?;
                 let delta = if base == "vm-decrease" { -delta } else { delta };
                 self.with_remote(|r| {
                     let current = r.get_parameter_float(&index)?;
@@ -259,6 +268,12 @@ impl VoicemeeterState {
             }
             other => Err(VmError::BadPayload("action", other.into())),
         }
+    }
+
+    /// Read one Strip parameter - used by live diagnostics and tests.
+    pub fn read_strip(&mut self, number: i64, param: &str) -> Result<f32> {
+        let index = format!("Strip[{number}].{param}");
+        self.with_remote(|r| r.get_parameter_float(index.as_str()))
     }
 
     /// `vm-set-output`: device is `"TYPE: name"` (MME/WDM/KS); the switch
@@ -273,6 +288,19 @@ impl VoicemeeterState {
             .ok_or_else(|| VmError::BadPayload("device", device.into()))?;
         let index = format!("Bus[0].Device.{}", kind.to_lowercase());
         self.with_remote(|r| r.set_parameters(&string_param_text(&index, name)))
+    }
+}
+
+/// Values from the editor arrive as JSON strings ("1"), the extension
+/// used parseFloat - numbers and numeric strings both pass.
+fn parse_value(args: &serde_json::Map<String, Value>) -> Result<f64> {
+    match args.get("value") {
+        Some(Value::Number(n)) => n.as_f64().ok_or_else(|| VmError::BadPayload("value", "not a number".into())),
+        Some(Value::String(s)) => s
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| VmError::BadPayload("value", s.clone())),
+        _ => Err(VmError::BadPayload("value", "missing".into())),
     }
 }
 
@@ -348,13 +376,28 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, VmError::BadPayload("number", _)));
         let err = vm
-            .execute("vm-set-strip", &json!({"param": "Gain", "number": 0}))
-            .unwrap_err();
-        assert!(matches!(err, VmError::BadPayload("value", _)));
-        let err = vm
             .execute("vm-set-output", &json!({"device": "no-colon"}))
             .unwrap_err();
         assert!(matches!(err, VmError::BadPayload("device", _)));
+    }
+
+    #[test]
+    fn values_parse_like_the_extension() {
+        // shapes exactly as stored in the user's database
+        assert_eq!(
+            parse_value(json!({"value": "1"}).as_object().unwrap()).unwrap(),
+            1.0
+        );
+        assert_eq!(
+            parse_value(json!({"value": "0.5"}).as_object().unwrap()).unwrap(),
+            0.5
+        );
+        assert_eq!(
+            parse_value(json!({"value": 2}).as_object().unwrap()).unwrap(),
+            2.0
+        );
+        assert!(parse_value(json!({"value": "loud"}).as_object().unwrap()).is_err());
+        assert!(parse_value(json!({}).as_object().unwrap()).is_err());
     }
 
     #[test]
@@ -366,6 +409,30 @@ mod tests {
             .execute("vm-toggle-something", &json!({"param": "Mute", "number": 0}))
             .unwrap_err();
         assert!(matches!(err, VmError::BadPayload("action", _)));
+    }
+
+    /// Live check: reads the real Strip[2].A1 routing state. Run explicitly:
+    /// `cargo test -p deckboard-vm -- --ignored live_get`
+    #[test]
+    #[ignore = "reads the live Voicemeeter state"]
+    fn live_get_strip2_a1() {
+        let mut vm = VoicemeeterState::new();
+        let v = vm.read_strip(2, "A1").expect("read Strip[2].A1");
+        println!("Strip[2].A1 = {v}");
+    }
+
+    /// Live probe of the full toggle round trip on Strip[2].A1: read,
+    /// toggle, read, toggle back, read. Run explicitly.
+    #[test]
+    #[ignore = "flips live audio routing twice"]
+    fn live_toggle_probe() {
+        let mut vm = VoicemeeterState::new();
+        let v0 = vm.read_strip(2, "A1").unwrap();
+        vm.execute("vm-toggle-strip", &serde_json::json!({"param": "A1", "number": 2})).unwrap();
+        let v1 = vm.read_strip(2, "A1").unwrap();
+        vm.execute("vm-toggle-strip", &serde_json::json!({"param": "A1", "number": 2})).unwrap();
+        let v2 = vm.read_strip(2, "A1").unwrap();
+        println!("toggle round trip: {v0} -> {v1} -> {v2}");
     }
 
     /// Live test: touches the real Voicemeeter instance. Run explicitly:
@@ -389,3 +456,4 @@ mod tests {
         assert!(cands.iter().any(|p| p.to_string_lossy().ends_with("Voicemeeter\\VoicemeeterRemote64.dll")));
     }
 }
+

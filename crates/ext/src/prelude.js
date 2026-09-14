@@ -86,7 +86,11 @@ function clearTimeout(id) {
 var __pending_set_values = []; // drained by Rust: JSON objects
 
 function __flush_set_values() {
-    return __pending_set_values;
+    // hand the batch over AND clear it: the host drains after every eval,
+    // so keeping old entries here would replay the whole history forever
+    var out = __pending_set_values;
+    __pending_set_values = [];
+    return out;
 }
 
 // --------------------------------------------------------- native bridge
@@ -267,13 +271,14 @@ var __os = {
     uptime: function () { return 0; },
     cpus: function () {
         // real aggregate CPU times from the OS, split evenly across logical
-        // cores: si derives load percentages from the delta between calls
+        // cores: si derives load percentages from the delta between calls.
+        // node's own Windows shape: sys absorbs all kernel time (idle
+        // included), so user + sys equals real busy time
         var t = __host_cpu_times();
         var n = Math.max(1, __host_cpu_count());
         var idle = Math.floor(t.idle / n);
         var user = Math.floor(t.user / n);
-        // kernel time includes idle on Windows; node reports the rest as sys
-        var sys = Math.max(0, Math.floor((t.kernel - t.idle - t.user) / n));
+        var sys = Math.max(0, Math.floor((t.kernel - t.idle) / n));
         var arr = [];
         for (var i = 0; i < n; i++) {
             arr.push({

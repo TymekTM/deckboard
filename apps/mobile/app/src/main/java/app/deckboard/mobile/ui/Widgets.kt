@@ -117,14 +117,23 @@ fun GraphTile(
         }
         Canvas(Modifier.fillMaxWidth().fillMaxHeight().padding(top = 2.dp)) {
             if (history.size < 2) return@Canvas
-            val minV = history.min()
-            val maxV = history.max()
-            val span = (maxV - minV).takeIf { it > 0f } ?: 1f
+            // percent series sit on a fixed 0..100 scale like a meter;
+            // other units (GB, degrees) use the observed range with a
+            // little headroom so the curve does not pin to the edges
+            val (minV, maxV) = if (suffix == "%") {
+                0f to 100f
+            } else {
+                val lo = history.min()
+                val hi = history.max()
+                val pad = ((hi - lo).takeIf { it > 0f } ?: hi * 0.2f).coerceAtLeast(0.01f)
+                (lo - pad * 0.25f) to (hi + pad)
+            }
+            val span = maxV - minV
             val stepX = size.width / (history.size - 1)
             val path = Path()
             history.forEachIndexed { i, v ->
                 val x = i * stepX
-                val y = size.height - ((v - minV) / span) * size.height
+                val y = size.height - ((v - minV) / span).coerceIn(0f, 1f) * size.height
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             drawPath(path, lineColor, style = Stroke(width = 3f, cap = StrokeCap.Round))

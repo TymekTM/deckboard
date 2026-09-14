@@ -192,6 +192,7 @@ impl ExtRuntime {
             .collect();
         let mut events = Vec::new();
         for id in due {
+            tracing::debug!(package = %self.package, timer = id, intervals = self.intervals.len(), "timer tick");
             events.extend(self.tick(id));
             if let Some(entry) = self.intervals.iter_mut().find(|(eid, _, _)| *eid == id) {
                 let ms = entry.1;

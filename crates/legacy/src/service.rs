@@ -235,6 +235,7 @@ async fn handle_event(
                 tracing::debug!(id, "exec_shortcut: unknown id");
                 return;
             };
+            tracing::info!(id, kind = %button.kind, "exec_shortcut");
             let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
             let (val_tx, mut val_rx) = mpsc::unbounded_channel::<(String, String)>();
             struct Sink(

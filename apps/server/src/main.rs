@@ -86,7 +86,10 @@ async fn main() -> anyhow::Result<()> {
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
-            .with_discord(deckboard_discord::DiscordConfig::from_settings(&settings)),
+            .with_discord(
+                deckboard_discord::DiscordConfig::from_settings(&settings),
+                home.join("deckboard/settings.json"),
+            ),
     );
 
     let state = Arc::new(AppState {

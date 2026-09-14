@@ -20,8 +20,10 @@ use serde_json::{json, Value};
 pub enum DiscordError {
     #[error("Discord is not running (no discord-ipc pipe found)")]
     NotRunning,
-    #[error("Discord rejected the saved access token - re-save it in the original app")]
+    #[error("Discord rejected the saved access token - re-authorization needed")]
     AuthRejected,
+    #[error("authorization popup was declined or timed out")]
+    AuthCancelled,
     #[error("Discord RPC call failed: {0}")]
     Call(&'static str),
     #[error("bad payload for {0}: {1}")]
@@ -35,8 +37,25 @@ pub type Result<T> = std::result::Result<T, DiscordError>;
 #[derive(Debug, Clone, Default)]
 pub struct DiscordConfig {
     pub client_id: String,
+    pub client_secret: String,
     pub access_token: String,
+    pub refresh_token: Option<String>,
 }
+
+/// Scopes the original extension requests - voice control needs
+/// rpc.voice.read/write.
+pub const SCOPES: &[&str] = &[
+    "identify",
+    "rpc",
+    "rpc.notifications.read",
+    "rpc.voice.read",
+    "rpc.voice.write",
+    "rpc.activities.write",
+];
+
+/// The redirect URI the original app registers (never actually opened -
+/// the code arrives over the local RPC pipe).
+const REDIRECT_URI: &str = "https://discord.com";
 
 impl DiscordConfig {
     /// `settings["discord-deckboard"]["<field>"]["value"]` shape.
@@ -52,9 +71,216 @@ impl DiscordConfig {
         };
         Some(DiscordConfig {
             client_id: field("discordClientId")?,
-            access_token: field("discordAccessToken")?,
+            client_secret: field("discordClientSecret").unwrap_or_default(),
+            access_token: field("discordAccessToken").unwrap_or_default(),
+            refresh_token: field("discordRefreshToken"),
         })
     }
+}
+
+/// Tokens issued by the OAuth exchange.
+pub struct AuthTokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+}
+
+/// Discord's local HTTP endpoint (the port that answers 404 on /).
+fn find_endpoint() -> Result<String> {
+    for port in 6463..6473 {
+        let url = format!("http://127.0.0.1:{port}");
+        let agent = ureq::Agent::new_with_defaults();
+        if let Ok(resp) = agent.get(&url).call() {
+            if resp.status().as_u16() == 404 {
+                return Ok(url);
+            }
+        }
+    }
+    Err(DiscordError::NotRunning)
+}
+
+/// x-www-form-urlencoded body from key/value pairs.
+fn form(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{k}={}", urlencode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+fn post_form(url: &str, body: &str) -> Result<Value> {
+    let agent = ureq::Agent::new_with_defaults();
+    let resp = agent
+        .post(url)
+        .content_type("application/x-www-form-urlencoded")
+        .header("Authorization", "Bearer null") // discord-rpc sends this too
+        .send(body.as_bytes())
+        .map_err(|_| DiscordError::Call("oauth request"))?;
+    let text = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|_| DiscordError::Call("oauth body"))?;
+    serde_json::from_str(&text).map_err(|_| DiscordError::Call("oauth json"))
+}
+
+/// Full interactive authorization: shows Discord's consent popup on the
+/// desktop and exchanges the code for tokens. The user must click Allow.
+pub fn authorize(config: &DiscordConfig, deadline: Instant) -> Result<AuthTokens> {
+    if config.client_id.is_empty() || config.client_secret.is_empty() {
+        return Err(DiscordError::BadPayload(
+            "config",
+            "client id / secret missing in settings".into(),
+        ));
+    }
+    let endpoint = find_endpoint()?;
+    let agent = ureq::Agent::new_with_defaults();
+    // step 1: short-lived rpc token bound to this app
+    let body = form(&[
+        ("client_id", &config.client_id),
+        ("client_secret", &config.client_secret),
+    ]);
+    let resp = agent
+        .post(&format!("{endpoint}/oauth2/token/rpc"))
+        .content_type("application/x-www-form-urlencoded")
+        .send(body.as_bytes())
+        .map_err(|_| DiscordError::Call("token/rpc"))?;
+    let text = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|_| DiscordError::Call("token/rpc body"))?;
+    let rpc_token: Value =
+        serde_json::from_str(&text).map_err(|_| DiscordError::Call("token/rpc json"))?;
+    let rpc_token = rpc_token
+        .get("rpc_token")
+        .and_then(Value::as_str)
+        .ok_or(DiscordError::Call("missing rpc_token"))?
+        .to_string();
+
+    // step 2: AUTHORIZE over the pipe - Discord shows the consent popup
+    let mut pipe = Pipe::open()?;
+    pipe.write_all(
+        &encode_frame(
+            OP_HANDSHAKE,
+            &json!({ "v": 1, "client_id": config.client_id }).to_string(),
+        ),
+    )?;
+    let mut session = Session { pipe, nonce: 0 };
+    session.wait_for_ready(deadline)?;
+    let reply = session.request_until(
+        deadline,
+        "AUTHORIZE",
+        json!({
+            "scopes": SCOPES,
+            "client_id": config.client_id,
+            "rpc_token": rpc_token,
+            "prompt": "consent",
+        }),
+    )?;
+    if reply.get("evt").and_then(Value::as_str) == Some("ERROR") {
+        return Err(DiscordError::AuthCancelled);
+    }
+    let code = reply
+        .pointer("/data/code")
+        .and_then(Value::as_str)
+        .ok_or(DiscordError::AuthCancelled)?
+        .to_string();
+
+    // step 3: exchange the code for the real tokens
+    let body = form(&[
+        ("client_id", &config.client_id),
+        ("client_secret", &config.client_secret),
+        ("code", &code),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", REDIRECT_URI),
+    ]);
+    let token_json = post_form(&format!("{endpoint}/oauth2/token"), &body)?;
+    Ok(AuthTokens {
+        access_token: token_json
+            .get("access_token")
+            .and_then(Value::as_str)
+            .ok_or(DiscordError::Call("missing access_token"))?
+            .to_string(),
+        refresh_token: token_json
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// Silent token refresh; works while a refresh token from a previous
+/// authorization is saved.
+pub fn refresh(config: &DiscordConfig) -> Result<AuthTokens> {
+    let refresh_token = config
+        .refresh_token
+        .as_deref()
+        .ok_or(DiscordError::AuthRejected)?;
+    let endpoint = find_endpoint()?;
+    let body = form(&[
+        ("client_id", &config.client_id),
+        ("client_secret", &config.client_secret),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("redirect_uri", REDIRECT_URI),
+    ]);
+    let token_json = post_form(&format!("{endpoint}/oauth2/token"), &body)?;
+    Ok(AuthTokens {
+        access_token: token_json
+            .get("access_token")
+            .and_then(Value::as_str)
+            .ok_or(DiscordError::AuthRejected)?
+            .to_string(),
+        refresh_token: token_json
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| config.refresh_token.clone()),
+    })
+}
+
+/// Persist tokens back into settings.json in the original app's shape
+/// (`discord-deckboard.discordAccessToken.value` etc.), leaving every
+/// other field untouched.
+pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Result<()> {
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
+    let mut settings: Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()));
+    let obj = settings.as_object_mut().expect("settings object");
+    let package = obj
+        .entry("discord-deckboard")
+        .or_insert_with(|| Value::Object(Default::default()));
+    let package = package.as_object_mut().expect("package object");
+    let mut field = |name: &str, value: &str| {
+        let entry = package
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                json!({
+                    "descriptions": "Discord OAuth token (managed by deckboard-server)",
+                    "name": name,
+                    "type": "text",
+                    "value": "",
+                })
+            });
+        if let Some(f) = entry.as_object_mut() {
+            f.insert("value".into(), json!(value));
+        }
+    };
+    field("discordAccessToken", &tokens.access_token);
+    if let Some(r) = &tokens.refresh_token {
+        field("discordRefreshToken", r);
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&settings).unwrap_or_default())
 }
 
 /// Is this action one of ours?
@@ -280,11 +506,16 @@ pub struct Session {
 
 impl Session {
     pub fn connect(config: &DiscordConfig) -> Result<Session> {
-        if config.client_id.is_empty() || config.access_token.is_empty() {
+        if config.client_id.is_empty() || config.client_secret.is_empty() {
+            // no OAuth app configured - nothing to authenticate with
             return Err(DiscordError::BadPayload(
                 "config",
-                "client id / access token missing in settings".into(),
+                "client id / secret missing in settings".into(),
             ));
+        }
+        if config.access_token.is_empty() {
+            // configured but never (re)authorized - the popup flow applies
+            return Err(DiscordError::AuthRejected);
         }
         let mut pipe = Pipe::open()?;
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -572,14 +803,16 @@ mod tests {
         assert_eq!(cfg.client_id, "123");
         assert_eq!(cfg.access_token, "tok");
         assert!(DiscordConfig::from_settings(&json!({})).is_none());
-        // empty token means "not configured"
+        // empty token still yields a config: the app is set up but the
+        // popup authorization has not happened yet
         let empty = json!({
             "discord-deckboard": {
                 "discordClientId": { "value": "123" },
                 "discordAccessToken": { "value": "" },
             }
         });
-        assert!(DiscordConfig::from_settings(&empty).is_none());
+        let cfg = DiscordConfig::from_settings(&empty).unwrap();
+        assert!(cfg.access_token.is_empty());
     }
 
     #[test]
