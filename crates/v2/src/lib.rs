@@ -21,7 +21,16 @@ pub use assets::AssetStore;
 pub use devices::{DeviceEntry, DeviceStore, PairError, Pairing};
 pub use hub::V2Hub;
 pub use service::{router, Auth, V2Config, V2State};
-pub use state::StateEngine;
+pub use state::{ext_channel, StateEngine};
+
+/// Milliseconds since the Unix epoch; the shared clock for session
+/// watchdogs and device timestamps.
+pub fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Board generation counter: one bump per committed write batch, starts
 /// at 1 so generation 0 always means "no sync seen yet" client-side.
@@ -52,37 +61,11 @@ pub async fn run_flusher(engine: Arc<StateEngine>, hub: Arc<V2Hub>, interval: Du
         tick.tick().await;
         let changes = engine.drain_dirty();
         if !changes.is_empty() {
-            let frame = Frame::push(
-                TYPE_STATE_PATCH,
-                serde_json::to_value(&StatePatch { changes }).unwrap_or(serde_json::Value::Null),
-            );
-            hub.broadcast_frame(&frame);
+            hub.broadcast_frame(&Frame::push_typed(TYPE_STATE_PATCH, &StatePatch { changes }));
         }
     }
 }
 
-/// Kills connections silent longer than the watchdog timeout. Spawn once.
-pub async fn run_watchdog(hub: Arc<V2Hub>, timeout: Duration) {
-    let mut tick = tokio::time::interval(Duration::from_secs(15));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tick.tick().await;
-    loop {
-        tick.tick().await;
-        let silent: Vec<u64> = hub
-            .session_ids()
-            .into_iter()
-            .filter(|id| {
-                hub.silent_ms(*id)
-                    .map(|ms| Duration::from_millis(ms) >= timeout)
-                    .unwrap_or(false)
-            })
-            .collect();
-        for id in silent {
-            tracing::info!(session = id, "v2 watchdog closing silent connection");
-            hub.remove(id);
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

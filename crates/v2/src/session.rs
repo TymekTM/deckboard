@@ -15,7 +15,7 @@ use deckboard_db::ButtonRow;
 use deckboard_proto::*;
 
 use crate::devices::PairError;
-use crate::state::StateEngine;
+use crate::state::{ext_channel, StateEngine};
 use crate::hub::V2Session;
 use crate::service::{Auth, V2State};
 
@@ -133,27 +133,24 @@ async fn run_session(
     }
 
     if version_lt(&hello.version, &state.config.min_client) {
-        session.send_frame(&Frame {
-            v: PROTOCOL_VERSION,
-            id: None,
-            ack: frame.id.clone(),
-            kind: TYPE_ERROR.into(),
-            payload: Some(json!({
-                "code": error_code::OUTDATED_CLIENT,
-                "message": format!("client {} < min {}", hello.version, state.config.min_client),
-            })),
-        });
+        session.send_frame(&error_ack(
+            &frame,
+            error_code::OUTDATED_CLIENT,
+            &format!("client {} < min {}", hello.version, state.config.min_client),
+        ));
         tracing::info!(session = session.id, client = %hello.client, version = %hello.version, "outdated client");
         return End::Fatal;
     }
 
     // 2) Resolve the device: known token, or consume the pairing code.
     let device = match auth {
-        Auth::Device(mut device) => {
-            if let Some(name) = hello.name.as_deref().filter(|n| !n.is_empty() && *n != device.name) {
-                device.name = name.to_string();
+        Auth::Device(device) => {
+            match hello.name.as_deref().filter(|n| !n.is_empty()) {
+                // hello may rename a paired device; persisted so the next
+                // welcome and the desktop device list agree.
+                Some(name) if name != device.name => state.devices.rename(&device.id, name),
+                _ => state.devices.touch(&device.id),
             }
-            state.devices.touch(&device.id);
             device
         }
         Auth::Pair(code) => match state.pairing.consume(&code) {
@@ -193,11 +190,11 @@ async fn run_session(
         kind: TYPE_WELCOME.into(),
         payload: Some(serde_json::to_value(&welcome).unwrap_or(Value::Null)),
     });
-    session.send_frame(&Frame::push(
+    session.send_frame(&Frame::push_typed(
         TYPE_BOARDS_SYNC,
-        serde_json::to_value(&BoardsSync { generation: state.generation.get(), boards }).unwrap_or(Value::Null),
+        &BoardsSync { generation: state.generation.get(), boards },
     ));
-    session.send_frame(&Frame::push(TYPE_STATE_SYNC, serde_json::to_value(state.engine.snapshot()).unwrap_or(Value::Null)));
+    session.send_frame(&Frame::push_typed(TYPE_STATE_SYNC, &state.engine.snapshot()));
 
     // 4) Live frames until the client goes away.
     while let Some(msg) = stream.next().await {
@@ -293,6 +290,12 @@ fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Fra
         session.send_frame(&error_ack(&frame, error_code::UNKNOWN_TILE, "no such tile on that board"));
         return;
     };
+    // Only gestures the tile declares are served; everything else (incl.
+    // wheel/drag, which no M1 tile declares) is a typed error.
+    if !crate::boards::allowed_interactions(&button).contains(&payload.interaction) {
+        session.send_frame(&error_ack(&frame, error_code::UNSUPPORTED_INTERACTION, "gesture not declared for this tile"));
+        return;
+    }
 
     // An ack echoes the request's `id` and its type; the client matches
     // on `ack` alone.
@@ -331,8 +334,10 @@ fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Fra
             let backend = state.backend.clone();
             tokio::task::spawn_blocking(move || backend.slider(button, value));
         }
+        // Unreachable while the allowed-interactions check stands (no tile
+        // declares wheel/drag); kept as a defensive typed error.
         Interaction::Wheel | Interaction::Drag | Interaction::Other => {
-            session.send_frame(&error_ack(&frame, error_code::UNSUPPORTED_INTERACTION, "gesture not supported for this tile"));
+            session.send_frame(&error_ack(&frame, error_code::UNSUPPORTED_INTERACTION, "gesture not declared for this tile"));
         }
     }
 }
@@ -399,10 +404,10 @@ fn exec_blocking(
     let mut sink = Sink(board_tx, value_tx);
     backend.exec(button, is_tap_start, &mut sink);
     while let Ok(board) = board_rx.try_recv() {
-        hub.broadcast_frame(&Frame::push(TYPE_BOARD_OPEN, serde_json::to_value(BoardOpen { board }).unwrap_or(Value::Null)));
+        hub.broadcast_frame(&Frame::push_typed(TYPE_BOARD_OPEN, &BoardOpen { board }));
     }
     while let Ok((key, value)) = value_rx.try_recv() {
-        engine.set(&format!("ext.{key}"), Value::String(value));
+        engine.set(&ext_channel(&key), Value::String(value));
     }
 }
 

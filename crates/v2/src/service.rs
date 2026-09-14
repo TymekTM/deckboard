@@ -31,9 +31,9 @@ pub struct V2Config {
     pub patch_interval: Duration,
     pub ping_interval: Duration,
     pub hello_timeout: Duration,
-    /// Close a connection silent longer than this (covers the zombie case).
-    pub watchdog_timeout: Duration,
     pub hold_cap: Duration,
+    /// Port clients reach this server on (QR payload / pairing logs).
+    pub public_port: u16,
 }
 
 impl Default for V2Config {
@@ -44,8 +44,8 @@ impl Default for V2Config {
             patch_interval: Duration::from_millis(100),
             ping_interval: Duration::from_secs(60),
             hello_timeout: Duration::from_secs(5),
-            watchdog_timeout: Duration::from_secs(90),
             hold_cap: Duration::from_secs(120),
+            public_port: 8500,
         }
     }
 }
@@ -93,10 +93,9 @@ async fn ws_connect(
             None => return (StatusCode::UNAUTHORIZED, "unknown device token").into_response(),
         }
     } else if let Some(code) = q.pair {
-        match state.pairing.peek(&code) {
-            Ok(()) => Some(Auth::Pair(code)),
-            Err(_) => return (StatusCode::UNAUTHORIZED, "invalid or expired pairing code").into_response(),
-        }
+        // Pairing codes are validated on the socket (pair-invalid /
+        // pair-expired frames after hello), not at the upgrade.
+        Some(Auth::Pair(code))
     } else {
         return (StatusCode::UNAUTHORIZED, "missing token").into_response();
     };
@@ -119,11 +118,26 @@ async fn pair_create(
         return (StatusCode::FORBIDDEN, "pairing codes are local-only").into_response();
     }
     let code = state.pairing.new_code();
+    // M1 has no desktop UI: log the QR-able URL so the operator can relay
+    // it to the device by hand.
+    let host = local_lan_ip().await.unwrap_or_else(|| "127.0.0.1".to_string());
+    tracing::info!(
+        url = %format!("deckboard://{}:{}?pair={}", host, state.config.public_port, code),
+        "pairing code minted - expires in 5 minutes"
+    );
     Json(json!({
         "code": code,
         "expires_in": crate::devices::PAIR_CODE_TTL.as_secs(),
     }))
     .into_response()
+}
+
+/// Best-effort LAN address (the local end of the default route); never
+/// sends a packet. Falls back to loopback when there is no route.
+async fn local_lan_ip() -> Option<String> {
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    socket.connect("8.8.8.8:80").await.ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
 }
 
 async fn asset_get(
@@ -167,10 +181,9 @@ impl V2State {
     /// write path calls this in-process right after its DB commit.
     pub fn publish_delta(&self, ops: Vec<deckboard_proto::BoardOp>) -> u64 {
         let generation = self.generation.bump();
-        let frame = Frame::push(
+        let frame = Frame::push_typed(
             deckboard_proto::TYPE_BOARDS_DELTA,
-            serde_json::to_value(&deckboard_proto::BoardsDelta { generation, ops })
-                .unwrap_or(serde_json::Value::Null),
+            &deckboard_proto::BoardsDelta { generation, ops },
         );
         self.hub.broadcast_frame(&frame);
         generation

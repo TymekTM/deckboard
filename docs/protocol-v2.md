@@ -69,19 +69,25 @@ last_seen}`; `id` and `token` are random hex, 16 and 32 bytes).
 
 ### Pairing a new device
 
-1. Desktop generates a one-time code (8 chars, alphabet `A-Z2-7`, valid
-   5 minutes) via `POST /v2/pair` (loopback callers only). Response:
-   `{"code": "ABCD2345", "expires_in": 300}`. M1 headless server prints
-   the QR-able URL to the log; the desktop UI prompt ships with the editor.
+1. Desktop generates a one-time code (8 chars from an unambiguous
+   alphabet - A-Z minus I/O plus digits 2-7, so no 0/O, 1/I look-alikes;
+   valid 5 minutes) via `POST /v2/pair` (loopback callers only).
+   Response: `{"code": "ABCD2345", "expires_in": 300}`. The M1 headless
+   server logs the QR-able URL (`deckboard://<lan-ip>:<port>?pair=<CODE>`);
+   the desktop UI prompt ships with the editor.
 2. Tablet connects `/v2/ws?pair=<CODE>` and sends `hello` within 5 s.
+   Unknown or burned codes are answered on the socket with
+   `pair-invalid` (expired: `pair-expired`) and closed - only unknown
+   device *tokens* get an HTTP 401 at the upgrade.
 3. The desktop shows "Trust this device?" using the `hello` name. M1:
-   auto-accept with a warning log (no UI yet). Reject/timeout closes the
-   socket with `pair-invalid`/`pair-expired`.
+   auto-accept with a warning log (no UI yet).
 4. On trust: a device entry is created, `welcome` flows, the tablet stores
    the token (Android: `EncryptedSharedPreferences`).
-5. Every later connect uses `?token=...`; no prompt. Revoking a device
-   (removing it from `devices.json` via future desktop UI) makes the next
-   connect fail with `unauthorized`.
+5. Every later connect uses `?token=...`; no prompt. A non-empty
+   `hello.name` may rename the paired device - the change is persisted to
+   `devices.json` so the welcome and the desktop device list agree.
+   Revoking a device (removing it from `devices.json` via future desktop
+   UI) makes the next connect fail with `unauthorized`.
 
 QR payload: `deckboard://<host>:<port>?pair=<CODE>`.
 

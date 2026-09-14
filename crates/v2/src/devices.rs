@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -16,10 +16,7 @@ pub const PAIR_CODE_LEN: usize = 8;
 pub const PAIR_CODE_TTL: Duration = Duration::from_secs(300);
 
 pub fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::unix_millis() / 1000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -64,11 +61,24 @@ impl DeviceStore {
     }
 
     pub fn touch(&self, id: &str) {
-        let mut entries = self.entries.lock().expect("device store poisoned");
-        if let Some(d) = entries.iter_mut().find(|d| d.id == id) {
-            d.last_seen = unix_now();
+        self.update(id, None);
+    }
+
+    /// hello.name may rename a paired device; persisted with the touch.
+    pub fn rename(&self, id: &str, name: &str) {
+        self.update(id, Some(name.to_string()));
+    }
+
+    fn update(&self, id: &str, name: Option<String>) {
+        {
+            let mut entries = self.entries.lock().expect("device store poisoned");
+            if let Some(d) = entries.iter_mut().find(|d| d.id == id) {
+                d.last_seen = unix_now();
+                if let Some(name) = name {
+                    d.name = name;
+                }
+            }
         }
-        drop(entries);
         self.save();
     }
 

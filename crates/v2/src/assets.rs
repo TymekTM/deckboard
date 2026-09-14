@@ -100,6 +100,7 @@ fn mime_to_ext(mime: &str) -> Option<&'static str> {
         "image/svg+xml" => Some("svg"),
         "video/mp4" => Some("mp4"),
         "video/webm" => Some("webm"),
+        "audio/ogg" => Some("ogg"), // kept in sync with content_type()
         _ => None,
     }
 }

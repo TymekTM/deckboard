@@ -283,17 +283,32 @@ async fn pairing_flow_mints_welcome_and_device() {
     let code = pair["code"].as_str().unwrap().to_string();
     assert_eq!(pair["expires_in"].as_u64(), Some(300));
 
-    // Bad codes never upgrade.
-    let bad = tokio_tungstenite::connect_async(format!("ws://{addr}/v2/ws?pair=WRONG123")).await;
-    assert!(bad.is_err());
+    // Bad codes upgrade but die with a typed error frame after hello.
+    let mut bad = ws_open(&format!("ws://{addr}/v2/ws?pair=WRONG123")).await;
+    send_frame(&mut bad, &Frame::request(TYPE_HELLO, "h9", serde_json::json!({"client": "deckboard-mobile", "version": "0.2.0"}))).await;
+    let err = next_frame(&mut bad).await;
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!((err.kind.as_str(), err.ack.as_deref(), payload.code.as_str()),
+               (TYPE_ERROR, Some("h9"), error_code::PAIR_INVALID));
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = bad.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_))) {
+                break;
+            }
+        }
+    }).await;
+    assert!(closed.is_ok(), "socket must close after pair-invalid");
 
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
     let (welcome, _sync, _state_sync) = handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
     assert_eq!(welcome.device.name, "Test tablet");
     assert_eq!(welcome.protocol, PROTOCOL_VERSION);
-    // The code burned on use.
-    let burned = tokio_tungstenite::connect_async(format!("ws://{addr}/v2/ws?pair={code}")).await;
-    assert!(burned.is_err());
+    // The code burned on use: a second pairing with it fails on the socket.
+    let mut burned = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
+    send_frame(&mut burned, &Frame::request(TYPE_HELLO, "h9", serde_json::json!({"client": "deckboard-mobile", "version": "0.2.0"}))).await;
+    let err = next_frame(&mut burned).await;
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(payload.code, error_code::PAIR_INVALID);
     // A device entry exists now.
     assert!(state.devices.list().iter().any(|d| d.id == welcome.device.id));
 }
@@ -419,6 +434,22 @@ async fn hold_repeat_runs_until_press_end() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let settled = backend.exec_count();
     assert!(settled <= after + 1, "repeat stops after press-end ({after} -> {settled})");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn undeclared_interactions_are_rejected() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let device = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+
+    // The slider tile (21) declares only `slide`; press-start is not in
+    // its manifest, so it must not reach the backend.
+    send_frame(&mut ws, &Frame::request(TYPE_INTERACTION, "u1", serde_json::json!({"board": 3, "tile": 21, "interaction": "press-start"}))).await;
+    let err = next_frame(&mut ws).await;
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(payload.code, error_code::UNSUPPORTED_INTERACTION);
 }
 
 #[tokio::test(flavor = "multi_thread")]

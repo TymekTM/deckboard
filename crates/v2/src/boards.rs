@@ -13,7 +13,7 @@ use deckboard_proto::{
 use serde_json::Value;
 
 use crate::assets::AssetStore;
-use crate::state::StateEngine;
+use crate::state::{ext_channel, StateEngine};
 
 /// All boards with their tiles, in legacy `order`.
 pub fn build_boards(
@@ -93,6 +93,13 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
     }
 }
 
+/// Gestures a tile declares - the same set the manifest carries, derived
+/// so the interaction handler can enforce it.
+pub fn allowed_interactions(row: &ButtonRow) -> Vec<Interaction> {
+    let legacy = Mapper::new().shortcut_payload(row);
+    widget_kind(row, &legacy).1
+}
+
 /// Widget kind from the legacy `mode`/`app` columns: rendering modes map
 /// 1:1, custom-value buttons are toggles, everything else is a button.
 fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>) {
@@ -118,7 +125,7 @@ fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<St
         return None;
     }
     let shape = if row.mode == "graph" { StateShape::Series } else { StateShape::Scalar };
-    let channel = format!("ext.{key}");
+    let channel = ext_channel(key);
     engine.register(&channel, shape, None);
     Some(StateRef { channel, shape })
 }

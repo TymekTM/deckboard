@@ -6,19 +6,11 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use deckboard_proto::Frame;
 use tokio::sync::mpsc;
 
 use crate::devices::DeviceEntry;
-
-pub fn unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 #[derive(Default)]
 pub struct V2Hub {
@@ -36,7 +28,7 @@ impl V2Hub {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             out,
             device: Mutex::new(None),
-            last_seen: AtomicU64::new(unix_millis()),
+            last_seen: AtomicU64::new(crate::unix_millis()),
             holds: Mutex::new(HashMap::new()),
         });
         self.sessions
@@ -56,19 +48,6 @@ impl V2Hub {
         self.sessions.lock().expect("v2 hub poisoned").len()
     }
 
-    /// Live session ids (for the watchdog).
-    pub fn session_ids(&self) -> Vec<u64> {
-        self.sessions.lock().expect("v2 hub poisoned").keys().copied().collect()
-    }
-
-    /// Milliseconds a session has been silent, or `None` if it is gone.
-    pub fn silent_ms(&self, id: u64) -> Option<u64> {
-        self.sessions
-            .lock()
-            .expect("v2 hub poisoned")
-            .get(&id)
-            .map(|s| s.silent_for_ms())
-    }
 
     /// Serializes once and pushes to every live session. Send errors mean a
     /// dying connection; its own loop notices and cleans up.
@@ -107,12 +86,12 @@ impl V2Session {
     }
 
     pub fn touch(&self) {
-        self.last_seen.store(unix_millis(), Ordering::Relaxed);
+        self.last_seen.store(crate::unix_millis(), Ordering::Relaxed);
     }
 
     /// Milliseconds since the last inbound frame.
     pub fn silent_for_ms(&self) -> u64 {
-        unix_millis().saturating_sub(self.last_seen.load(Ordering::Relaxed))
+        crate::unix_millis().saturating_sub(self.last_seen.load(Ordering::Relaxed))
     }
 
     pub fn insert_hold(&self, tile: i64, handle: tokio::task::JoinHandle<()>) {

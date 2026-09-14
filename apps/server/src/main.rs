@@ -132,6 +132,11 @@ async fn main() -> anyhow::Result<()> {
         backend: backend as Arc<dyn deckboard_legacy::Backend>,
     });
 
+    let port: u16 = std::env::var("DECKBOARD_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8501);
+
     // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
     // /v2/pair. Devices/assets live next to the DB; DECKBOARD_DEVICES and
     // DECKBOARD_ASSETS override them (hermetic runs).
@@ -151,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
         )?),
         engine: Arc::new(deckboard_v2::StateEngine::new(deckboard_proto::SERIES_CAP)),
         generation: deckboard_v2::Generation::starting_at(1),
-        config: Default::default(),
+        config: deckboard_v2::V2Config { public_port: port, ..Default::default() },
     });
 
     // Extension pushes feed both protocols: the legacy app_status_update
@@ -191,15 +196,11 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // v2 background tasks: coalesced state patches + silent-connection reaper.
+    // v2 background task: coalesced state patches.
     tokio::spawn(deckboard_v2::run_flusher(
         v2.engine.clone(),
         v2.hub.clone(),
         v2.config.patch_interval,
-    ));
-    tokio::spawn(deckboard_v2::run_watchdog(
-        v2.hub.clone(),
-        v2.config.watchdog_timeout,
     ));
 
     // TEMPORARY default 8501: the original desktop app still owns 8500 and
@@ -207,10 +208,6 @@ async fn main() -> anyhow::Result<()> {
     // with the real tablet requires closing the old app so we can bind 8500
     // (set DECKBOARD_PORT=8500), or waiting for protocol v2 (our client).
     // Flip the default back to 8500 when the original app is retired.
-    let port: u16 = std::env::var("DECKBOARD_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8501);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("deckboard server listening on {addr} (legacy /socket.io/ + v2 /v2/ws)");

@@ -83,6 +83,11 @@ impl Frame {
     pub fn push(kind: &str, payload: serde_json::Value) -> Frame {
         Frame { v: PROTOCOL_VERSION, id: None, ack: None, kind: kind.to_string(), payload: Some(payload) }
     }
+
+    /// Server push with a typed payload, serialized to JSON.
+    pub fn push_typed<T: Serialize>(kind: &str, payload: &T) -> Frame {
+        Frame::push(kind, serde_json::to_value(payload).unwrap_or(serde_json::Value::Null))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

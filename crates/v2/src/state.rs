@@ -7,6 +7,13 @@ use std::sync::Mutex;
 
 use deckboard_proto::{ChannelInfo, ChannelValue, StateShape, StateSync};
 
+/// The one place that knows how pushed keys map to channels: everything
+/// extension/native producers push lands under `ext.<key>` (the key being
+/// the legacy watch key).
+pub fn ext_channel(key: &str) -> String {
+    format!("ext.{key}")
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ChannelMeta {
     pub shape: StateShape,
@@ -88,6 +95,11 @@ impl StateEngine {
                 }
             }
             _ => {
+                // Producers push only on change; identical values are
+                // dropped here so the flusher stays silent too.
+                if inner.values.get(channel) == Some(&value) {
+                    return;
+                }
                 inner.values.insert(channel.to_string(), value);
             }
         }
@@ -164,6 +176,18 @@ mod tests {
         assert_eq!(sync.values["ext.count"], 3);
         let changes = engine.drain_dirty();
         assert_eq!(changes.len(), 2); // latest wins per channel
+    }
+
+    #[test]
+    fn scalar_pushes_only_on_change() {
+        let engine = StateEngine::new(120);
+        engine.set("ext.x", serde_json::json!("a"));
+        assert_eq!(engine.drain_dirty().len(), 1);
+        // Identical value: dropped before it can dirty the channel.
+        engine.set("ext.x", serde_json::json!("a"));
+        assert!(engine.drain_dirty().is_empty());
+        engine.set("ext.x", serde_json::json!("b"));
+        assert_eq!(engine.drain_dirty().len(), 1);
     }
 
     #[test]
