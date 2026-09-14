@@ -35,6 +35,10 @@ impl Backend for MockBackend {
         }]
     }
 
+    fn get_board(&self, board_id: i64) -> Option<BoardRow> {
+        (board_id == 1).then(|| self.get_boards().remove(0))
+    }
+
     fn get_buttons_by_board(&self, _board_id: i64) -> Vec<ButtonRow> {
         vec![url_button(10, 0, 0)]
     }

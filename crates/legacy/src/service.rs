@@ -20,6 +20,7 @@ use crate::mapping::Mapper;
 /// Storage + execution seam so the transport layer stays testable.
 pub trait Backend: Send + Sync + 'static {
     fn get_boards(&self) -> Vec<deckboard_db::BoardRow>;
+    fn get_board(&self, board_id: i64) -> Option<deckboard_db::BoardRow>;
     fn get_buttons_by_board(&self, board_id: i64) -> Vec<deckboard_db::ButtonRow>;
     fn get_button(&self, id: i64) -> Option<deckboard_db::ButtonRow>;
     fn exec(&self, button: deckboard_db::ButtonRow, is_tap_start: bool, sink: &mut dyn deckboard_actions::EventSink);

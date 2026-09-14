@@ -1,0 +1,442 @@
+//! Deckboard desktop editor: Tauri 2 shell that embeds the legacy socket.io
+//! v2 server (so the stock Android client keeps working) and adds the board
+//! editor write path on top of the shared [`SqlBackend`].
+
+use std::sync::Arc;
+
+use deckboard_backend::SqlBackend;
+use deckboard_db::{BoardRow, ButtonRow};
+use deckboard_ext::ExtManager;
+use deckboard_legacy::{AppState, Backend, EditorBroadcaster, Hub};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Everything the UI commands need, built once in [`setup_core`].
+struct DesktopState {
+    backend: Option<Arc<SqlBackend>>,
+    broadcaster: Option<EditorBroadcaster>,
+    hub: Option<Arc<Hub>>,
+    port: u16,
+}
+
+impl DesktopState {
+    fn backend(&self) -> Result<Arc<SqlBackend>, String> {
+        self.backend
+            .clone()
+            .ok_or_else(|| "database unavailable - is the original Deckboard app still running?".into())
+    }
+
+    fn broadcaster(&self) -> Result<&EditorBroadcaster, String> {
+        self.broadcaster
+            .as_ref()
+            .ok_or_else(|| "database unavailable".into())
+    }
+}
+
+/// One board together with its tiles - the editor's full state payload.
+#[derive(Serialize)]
+struct BoardWithButtons {
+    #[serde(flatten)]
+    board: BoardRow,
+    buttons: Vec<ButtonRow>,
+}
+
+pub fn run() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .setup(|app| {
+            let state = setup_core();
+            let port = state.port;
+            app.manage(state);
+
+            build_tray(app.handle())?;
+            register_touch_mode_hotkey(app.handle().clone());
+
+            // keep the window handle for tray toggle
+            let _ = port;
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            server_status,
+            list_boards,
+            create_board,
+            update_board,
+            delete_board,
+            create_button,
+            update_button,
+            move_button,
+            delete_button,
+            clear_board,
+            exec_button,
+            export_boards,
+            import_boards,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+/// Open the database (read-write: the editor is now the single writer,
+/// ADR-001), load extensions and start the embedded legacy server. A failure
+/// keeps the UI alive with `backend: None` so the window can explain why.
+fn setup_core() -> DesktopState {
+    let port: u16 = std::env::var("DECKBOARD_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8501);
+
+    // DECKBOARD_DB overrides the database location (profiling / hermetic runs)
+    let db_path = std::env::var_os("DECKBOARD_DB").map(std::path::PathBuf::from);
+    let db = deckboard_db::Db::open_read_write(db_path.as_deref());
+    if let Err(e) = &db {
+        tracing::error!("cannot open database read-write: {e}");
+        return DesktopState { backend: None, broadcaster: None, hub: None, port };
+    }
+    let db = db.unwrap();
+
+    let home = dirs::home_dir().expect("home directory");
+    let settings: serde_json::Value = std::fs::read_to_string(home.join("deckboard/settings.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let ext_dir = std::env::var_os("DECKBOARD_EXT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join("deckboard/extensions"));
+    let (ext_manager, mut ext_events) = ExtManager::load(&ext_dir, &settings);
+    for (package, name, error) in ext_manager.summary() {
+        match error {
+            Some(e) => tracing::warn!(package, name, error = e, "extension disabled"),
+            None => tracing::info!(package, name, "extension ready"),
+        }
+    }
+    for input in ext_manager.inputs() {
+        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+            value: input.value.clone(),
+            icon: input.icon.clone(),
+            color: input.color.clone(),
+            font_icon: input.font_icon.clone(),
+            mode: input.mode.clone(),
+            command: input.command.clone(),
+        });
+    }
+    for (value, icon, font_icon, color) in deckboard_vm::input_declarations() {
+        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+            value: value.to_string(),
+            icon: icon.map(str::to_string),
+            color: Some(color.to_string()),
+            font_icon: Some(font_icon.to_string()),
+            mode: None,
+            command: None,
+        });
+    }
+    for (value, icon, color, mode) in deckboard_discord::input_declarations() {
+        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+            value: value.to_string(),
+            icon: Some(icon.to_string()),
+            color: Some(color.to_string()),
+            font_icon: Some("fas".to_string()),
+            mode: mode.map(str::to_string),
+            command: None,
+        });
+    }
+
+    let backend = Arc::new(
+        SqlBackend::new(db)
+            .with_extensions(ext_manager.clone())
+            .with_discord(
+                deckboard_discord::DiscordConfig::from_settings(&settings),
+                home.join("deckboard/settings.json"),
+            ),
+    );
+
+    let hub = Arc::new(Hub::new());
+    let broadcaster = EditorBroadcaster::new(hub.clone(), backend.clone());
+
+    // extensions push custom values -> app_status_update, like the original
+    {
+        let hub = hub.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(deckboard_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
+                let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
+                let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+                hub.broadcast("app_status_update", Some(&payload)).await;
+            }
+        });
+    }
+
+    let state = Arc::new(AppState {
+        hub: hub.clone(),
+        backend: backend.clone() as Arc<dyn Backend>,
+    });
+    tauri::async_runtime::spawn(async move {
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("cannot bind {addr}: {e}");
+                return;
+            }
+        };
+        tracing::info!("legacy server listening on {addr}");
+        // Engine.IO: reap sessions silent longer than pingInterval+pingTimeout
+        let hub_reaper = state.hub.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                hub_reaper.reap(75).await;
+            }
+        });
+        if let Err(e) = axum::serve(listener, deckboard_legacy::router(state)).await {
+            tracing::error!("legacy server stopped: {e}");
+        }
+    });
+
+    DesktopState {
+        backend: Some(backend),
+        broadcaster: Some(broadcaster),
+        hub: Some(hub),
+        port,
+    }
+}
+
+// ---- tray + hotkey ---------------------------------------------------------
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+
+    let show_hide = MenuItem::with_id(app, "show-hide", "Show / Hide", true, None::<&str>)?;
+    let touch = MenuItem::with_id(app, "touch-mode", "Toggle Touch Mode", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Deckboard", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_hide, &touch, &quit])?;
+
+    tauri::tray::TrayIconBuilder::with_id("main-tray")
+        .icon(app.default_window_icon().expect("app icon").clone())
+        .tooltip("Deckboard")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show-hide" => toggle_main_window(app),
+            "touch-mode" => {
+                let _ = app.emit("toggle-touch-mode", ());
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
+                toggle_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+fn toggle_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+/// Ctrl+Alt+D toggles touch mode from anywhere, mirroring the original's
+/// configurable `toggleTouchMode` hotkey (fixed binding for now).
+fn register_touch_mode_hotkey(app: AppHandle) {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+    app.global_shortcut()
+        .on_shortcut(
+            "Ctrl+Alt+D"
+                .parse::<Shortcut>()
+                .expect("valid shortcut"),
+            move |app, _shortcut, event| {
+                if event.state() == ShortcutState::Pressed {
+                    let _ = app.emit("toggle-touch-mode", ());
+                }
+            },
+        )
+        .expect("register global hotkey");
+}
+
+// ---- tauri commands --------------------------------------------------------
+
+#[tauri::command]
+async fn server_status(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let clients = match &state.hub {
+        Some(h) => h.len().await,
+        None => 0,
+    };
+    Ok(serde_json::json!({
+        "dbOk": state.backend.is_some(),
+        "port": state.port,
+        "clients": clients,
+    }))
+}
+
+#[tauri::command]
+async fn list_boards(state: State<'_, DesktopState>) -> Result<Vec<BoardWithButtons>, String> {
+    let backend = state.backend()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let boards = backend.get_boards();
+        Ok(boards
+            .into_iter()
+            .map(|board| {
+                let buttons = backend.get_buttons_by_board(board.id);
+                BoardWithButtons { board, buttons }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn create_board(state: State<'_, DesktopState>, name: String) -> Result<i64, String> {
+    let backend = state.backend()?;
+    let id = backend.create_board(&name).map_err(|e| e.to_string())?;
+    state.broadcaster()?.sync_boards().await;
+    Ok(id)
+}
+
+#[tauri::command]
+async fn update_board(state: State<'_, DesktopState>, board: BoardRow) -> Result<(), String> {
+    let backend = state.backend()?;
+    backend.update_board(&board).map_err(|e| e.to_string())?;
+    state.broadcaster()?.sync_boards().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_board(state: State<'_, DesktopState>, board_id: i64) -> Result<(), String> {
+    let backend = state.backend()?;
+    backend.delete_board(board_id).map_err(|e| e.to_string())?;
+    state.broadcaster()?.sync_boards().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_button(
+    state: State<'_, DesktopState>,
+    board_id: i64,
+    kind: String,
+    mode: String,
+    x: i64,
+    y: i64,
+) -> Result<i64, String> {
+    let backend = state.backend()?;
+    let id = backend
+        .create_button(board_id, &kind, &mode, x, y)
+        .map_err(|e| e.to_string())?;
+    state.broadcaster()?.refresh_board(board_id).await;
+    Ok(id)
+}
+
+#[tauri::command]
+async fn update_button(state: State<'_, DesktopState>, button: ButtonRow) -> Result<(), String> {
+    let backend = state.backend()?;
+    let board_id = button.board_id;
+    backend.update_button(&button).map_err(|e| e.to_string())?;
+    state.broadcaster()?.refresh_board(board_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn move_button(
+    state: State<'_, DesktopState>,
+    id: i64,
+    board_id: i64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+) -> Result<(), String> {
+    let backend = state.backend()?;
+    backend.move_button(id, x, y, w, h).map_err(|e| e.to_string())?;
+    state.broadcaster()?.refresh_board(board_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_button(
+    state: State<'_, DesktopState>,
+    id: i64,
+    board_id: i64,
+) -> Result<(), String> {
+    let backend = state.backend()?;
+    backend.delete_button(id).map_err(|e| e.to_string())?;
+    state.broadcaster()?.refresh_board(board_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_board(state: State<'_, DesktopState>, board_id: i64) -> Result<(), String> {
+    let backend = state.backend()?;
+    backend.clear_board(board_id).map_err(|e| e.to_string())?;
+    state.broadcaster()?.refresh_board(board_id).await;
+    Ok(())
+}
+
+/// Touch mode: run the tile locally like the original editor does. A
+/// multiaction `board` step switches the editor's own view via a DOM event.
+#[tauri::command]
+async fn exec_button(app: AppHandle, state: State<'_, DesktopState>, id: i64) -> Result<(), String> {
+    use deckboard_actions::EventSink;
+
+    let backend = state.backend()?;
+    let Some(button) = backend.get_button(id) else {
+        return Ok(());
+    };
+    struct UiSink(AppHandle);
+    impl EventSink for UiSink {
+        fn change_board(&mut self, board_id: i64) {
+            let _ = self.0.emit("change-board", board_id);
+        }
+        fn app_value(&mut self, _key: &str, _value: &str) {}
+    }
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        let mut sink = UiSink(app.clone());
+        backend.exec(button, false, &mut sink);
+    })
+    .await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn export_boards(
+    state: State<'_, DesktopState>,
+    ids: Vec<i64>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let backend = state.backend()?;
+    tauri::async_runtime::spawn_blocking(move || backend.export_boards(&ids))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn import_boards(
+    state: State<'_, DesktopState>,
+    boards: Vec<serde_json::Value>,
+) -> Result<Vec<i64>, String> {
+    let backend = state.backend()?;
+    let ids = tauri::async_runtime::spawn_blocking(move || backend.import_boards(&boards))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    state.broadcaster()?.sync_boards().await;
+    Ok(ids)
+}

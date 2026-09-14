@@ -9,3 +9,6 @@ apps/mobile/app/build/
 apps/mobile/local.properties
 apps/mobile/.idea/
 *.apk.idsig
+
+# Desktop editor build output
+apps/desktop/dist/

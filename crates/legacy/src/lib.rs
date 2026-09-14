@@ -6,11 +6,13 @@ pub mod hub;
 pub mod mapping;
 pub mod props;
 pub mod service;
+pub mod editor;
 
 pub use hub::{Hub, Session, ACCESS_KEY_PRO};
 pub use mapping::Mapper;
 pub use props::StyleResolver;
 pub use service::{router, AppState, Backend};
+pub use editor::EditorBroadcaster;
 
 /// The original answers `get_version` with a hardcoded version despite
 /// shipping 3.2.0 - replicated byte for byte (ADR-002).

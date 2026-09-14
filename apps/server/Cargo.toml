@@ -17,6 +17,7 @@ axum = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 deckboard-db = { path = "../../crates/db" }
+deckboard-backend = { path = "../../crates/backend" }
 deckboard-actions = { path = "../../crates/actions" }
 deckboard-legacy = { path = "../../crates/legacy" }
 deckboard-ext = { path = "../../crates/ext" }
