@@ -10,7 +10,10 @@ license = "MIT"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+# feature trim over "full": rt/macros/net/sync/time is everything the
+# workspace uses (spawn_blocking lives behind "rt"); keeps the binary
+# image and its resident pages smaller
+tokio = { version = "1", features = ["rt", "macros", "net", "sync", "time"] }
 axum = { version = "0.7", features = ["ws"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -21,3 +24,11 @@ open = "5"
 rand = "0.8"
 futures-util = "0.3"
 tokio-tungstenite = "0.24"
+
+# smaller image = fewer resident pages; LTO + one CGU deduplicate Boa and
+# the stack of async helpers, strip drops symbols nobody loads at runtime
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

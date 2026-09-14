@@ -12,7 +12,11 @@ use tracing_subscriber::EnvFilter;
 
 use crate::backend::SqlBackend;
 
-#[tokio::main]
+// current_thread: the workload is a couple of tablets doing tiny async IO;
+// everything blocking (exec, sliders, extension JS, Discord, Voicemeeter)
+// already runs on spawn_blocking or dedicated extension threads, so the
+// default worker-per-core fleet only cost threads and memory.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -30,15 +34,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Original Deckboard extensions: same directory and settings.json the
     // original app uses. The manager owns one JS runtime per package.
+    // DECKBOARD_EXT_DIR overrides the location (profiling / hermetic runs).
     let home = dirs::home_dir().context("home directory")?;
     let settings = std::fs::read_to_string(home.join("deckboard/settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
-    let (ext_manager, mut ext_events) = deckboard_ext::ExtManager::load(
-        &home.join("deckboard/extensions"),
-        &settings,
-    );
+    let ext_dir = std::env::var_os("DECKBOARD_EXT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join("deckboard/extensions"));
+    let (ext_manager, mut ext_events) =
+        deckboard_ext::ExtManager::load(&ext_dir, &settings);
     for (package, name, error) in ext_manager.summary() {
         match error {
             Some(e) => tracing::warn!(package, name, error = e, "extension disabled"),

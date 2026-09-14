@@ -18,3 +18,4 @@ deckboard-actions = { path = "../actions" }
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }
 tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread"] }
