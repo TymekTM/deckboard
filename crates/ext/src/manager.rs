@@ -112,7 +112,11 @@ impl ExtManager {
         let Some(list) = std::fs::read_dir(dir).ok() else {
             tracing::info!(dir = %dir.display(), "no extensions directory");
             return (
-                Arc::new(ExtManager { entries, inputs: all_inputs, events_tx }),
+                Arc::new(ExtManager {
+                    entries,
+                    inputs: all_inputs,
+                    events_tx,
+                }),
                 events_rx,
             );
         };
@@ -143,7 +147,13 @@ impl ExtManager {
                 Ok((name, actions, inputs, dispatch)) => {
                     tracing::info!(package = %package, name = %name, actions = ?actions, "extension loaded");
                     all_inputs.extend(inputs);
-                    entries.push(ExtEntry { package, name, actions, dispatch: Some(dispatch), error: None });
+                    entries.push(ExtEntry {
+                        package,
+                        name,
+                        actions,
+                        dispatch: Some(dispatch),
+                        error: None,
+                    });
                 }
                 Err(e) => {
                     warn!(package = %package, error = %e, "extension failed to load - disabled");
@@ -158,7 +168,14 @@ impl ExtManager {
             }
         }
 
-        (Arc::new(ExtManager { entries, inputs: all_inputs, events_tx }), events_rx)
+        (
+            Arc::new(ExtManager {
+                entries,
+                inputs: all_inputs,
+                events_tx,
+            }),
+            events_rx,
+        )
     }
 
     /// Runtime threads are spawned at load time and self-manage their
@@ -171,29 +188,30 @@ impl ExtManager {
                 tracing::debug!(target: "deckboard_ext", value = %v, "setValue event forwarded");
                 let _ = tx.send(ExtEvent::SetValue(v));
             }
-            HostEvent::Log(level, msg) => {
-                match level.as_str() {
-                    "warn" => warn!(target: "deckboard_ext", "{msg}"),
-                    "error" => tracing::error!(target: "deckboard_ext", "{msg}"),
-                    "debug" => tracing::debug!(target: "deckboard_ext", "{msg}"),
-                    _ => tracing::info!(target: "deckboard_ext", "{msg}"),
-                }
-            }
+            HostEvent::Log(level, msg) => match level.as_str() {
+                "warn" => warn!(target: "deckboard_ext", "{msg}"),
+                "error" => tracing::error!(target: "deckboard_ext", "{msg}"),
+                "debug" => tracing::debug!(target: "deckboard_ext", "{msg}"),
+                _ => tracing::info!(target: "deckboard_ext", "{msg}"),
+            },
             HostEvent::IntervalStart(..) | HostEvent::IntervalClear(_) => {}
         }
     }
 
     /// Does any extension handle this action type?
     pub fn has_action(&self, action: &str) -> bool {
-        self.entries.iter().any(|e| e.actions.iter().any(|a| a == action))
+        self.entries
+            .iter()
+            .any(|e| e.actions.iter().any(|a| a == action))
     }
 
     /// Execute an action on whichever extension declared it. Blocks until
     /// the extension thread replies (it runs the JS synchronously).
     pub fn execute(&self, action: &str, command: Option<&str>) -> Result<(), ManagerError> {
         let args: Value = match command {
-            Some(c) if !c.trim().is_empty() => serde_json::from_str(c)
-                .unwrap_or_else(|_| Value::String(c.to_string())),
+            Some(c) if !c.trim().is_empty() => {
+                serde_json::from_str(c).unwrap_or_else(|_| Value::String(c.to_string()))
+            }
             _ => Value::Null,
         };
         for entry in &self.entries {
@@ -274,7 +292,12 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
                                         .collect()
                                 })
                                 .unwrap_or_default();
-                            Some(ExtFieldInfo { kind, label, key, items })
+                            Some(ExtFieldInfo {
+                                kind,
+                                label,
+                                key,
+                                items,
+                            })
                         })
                         .collect()
                 })
@@ -283,7 +306,10 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
                 value,
                 icon: i.get("icon").and_then(Value::as_str).map(str::to_string),
                 color: i.get("color").and_then(Value::as_str).map(str::to_string),
-                font_icon: i.get("fontIcon").and_then(Value::as_str).map(str::to_string),
+                font_icon: i
+                    .get("fontIcon")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 mode: i.get("mode").and_then(Value::as_str).map(str::to_string),
                 command: i.get("command").and_then(Value::as_str).map(str::to_string),
                 label: i.get("label").and_then(Value::as_str).map(str::to_string),
@@ -293,12 +319,21 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
         .collect()
 }
 
+/// What loading one extension produces: package name, action values,
+/// declared inputs, and the request channel to its interpreter thread.
+type LoadedExt = (
+    String,
+    Vec<String>,
+    Vec<ExtInputInfo>,
+    mpsc::Sender<ExtRequest>,
+);
+
 fn load_extension(
     path: &std::path::Path,
     package: &str,
     configs: &Value,
     events_tx: tokio_mpsc::UnboundedSender<ExtEvent>,
-) -> Result<(String, Vec<String>, Vec<ExtInputInfo>, mpsc::Sender<ExtRequest>), crate::host::HostError> {
+) -> Result<LoadedExt, crate::host::HostError> {
     // extract to a temp dir before spawning (plain IO, thread-agnostic)
     let source = crate::source::PackageSource::open(path, package.to_string())
         .map_err(|e| crate::host::HostError::Other(e.to_string()))?;
@@ -349,12 +384,16 @@ fn runtime_loop(
             for ev in rt.tick_due() {
                 ExtManager::forward(&events_tx, ev);
             }
-            next_tick = now + rt
-                .tick_granularity()
-                .clamp(Duration::from_millis(50), Duration::from_secs(1));
+            next_tick = now
+                + rt.tick_granularity()
+                    .clamp(Duration::from_millis(50), Duration::from_secs(1));
         }
         match req_rx.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
-            Ok(ExtRequest::Execute { action, args, reply }) => {
+            Ok(ExtRequest::Execute {
+                action,
+                args,
+                reply,
+            }) => {
                 // execute() drains setValue/interval events itself; the
                 // manager forwards whatever the reply carries
                 let _ = reply.send(rt.execute(&action, &args));

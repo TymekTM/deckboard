@@ -220,6 +220,65 @@ export function findTypeMeta(type) {
   return CATALOG.find((c) => c.value === type) || null;
 }
 
+// State bindings, ported from the original's buttonStyles + TOGGLE_BUTTONS
+// tables: which live value decides whether a tile shows its second state.
+// `watch` keys into customValues (APP_CUSTOM_VALUE pushes), `app`/`key`
+// into per-app state (APP_OBS etc.). Tiles without a binding fall back to
+// the tap flip.
+const STATE_BINDINGS = {
+  "speaker-device": { watch: "speaker-device", key: "speaker" },
+  "obs-studio-mode": { app: "obs", key: "studioMode" },
+  "obs-scene": { app: "obs" },
+  "obs-source": { app: "obs" },
+  "obs-device-audio": { app: "obs" },
+  "obs-filter": { app: "obs" },
+  "twitch-slow": { app: "twitch", key: "slow" },
+  "twitch-follow-only": { app: "twitch", key: "followerOnly" },
+  "twitch-subs-only": { app: "twitch", key: "subscriberOnly" },
+  "twitch-emote-only": { app: "twitch", key: "emoteOnly" },
+  "discord-voice-channel": { app: "discord", key: "channel" },
+  "discord-toggle-mute": { app: "discord", key: "mute" },
+  "discord-toggle-deaf": { app: "discord", key: "deaf" },
+  "vmod-voice": { app: "vmod", key: "voice" },
+  "vmod-hearmyself": { app: "vmod", key: "hearmyself" },
+  "vmod-voicechanger": { app: "vmod", key: "voicechanger" },
+};
+
+// null = the live state is unknown (nothing pushed yet), so the tile keeps
+// its current visual state; otherwise boolean. Mirrors the original
+// ToggleButton isActive(): boolean state wins, arrays/strings compare
+// against the command payload.
+export function stateActive(tile, customValues, appStates, typeMeta) {
+  const binding = STATE_BINDINGS[tile.type];
+  let value;
+  if (tile.type === "vol") {
+    if (tile.command !== "vol_mute") return null;
+    value = customValues["speaker-muted"];
+  } else if (binding?.watch) {
+    value = customValues[binding.watch];
+  } else if (binding?.app) {
+    const state = appStates[binding.app];
+    value = binding.key ? state?.[binding.key] : state;
+  } else if (typeMeta?.[tile.type]?.mode === "custom-value") {
+    // extension tiles declared as custom-value follow their variable,
+    // keyed by the action value (the original's toggle_key fallback)
+    value = customValues[tile.type];
+  } else {
+    return null;
+  }
+  if (typeof value === "boolean") return value;
+  if (value == null || value === false || value === "") return null;
+  let cmd = {};
+  try {
+    cmd = JSON.parse(tile.command) || {};
+  } catch {
+    cmd = {};
+  }
+  if (Array.isArray(value)) return value.includes(cmd[binding.key]);
+  if (typeof value === "string") return value === cmd[binding.key];
+  return Boolean(value);
+}
+
 // Grid geometry of the original editor: 96 px cell, 100 px row.
 export const CELL_W = 96;
 export const ROW_H = 100;

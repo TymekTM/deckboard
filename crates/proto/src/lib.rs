@@ -147,8 +147,7 @@ mod tests {
 
     #[test]
     fn unknown_widget_kind_degrades() {
-        let m: WidgetManifest =
-            serde_json::from_str(r#"{"kind":"party-confetti"}"#).unwrap();
+        let m: WidgetManifest = serde_json::from_str(r#"{"kind":"party-confetti"}"#).unwrap();
         assert_eq!(m.kind, WidgetKind::Other);
     }
 

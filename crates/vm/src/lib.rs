@@ -68,8 +68,7 @@ unsafe fn load_symbols(path: &std::ffi::CStr) -> Result<Symbols> {
         return Err(VmError::Unavailable);
     }
     let resolve = |name: &'static str| -> Result<*mut c_void> {
-        let symbol = std::ffi::CString::new(name)
-            .expect("symbol names contain no NUL");
+        let symbol = std::ffi::CString::new(name).expect("symbol names contain no NUL");
         // SAFETY: symbol is NUL-terminated and module is a live handle
         let sym = unsafe { GetProcAddress(module, symbol.as_ptr() as *const u8) };
         if sym.is_null() {
@@ -84,10 +83,14 @@ unsafe fn load_symbols(path: &std::ffi::CStr) -> Result<Symbols> {
         login: unsafe { std::mem::transmute::<*mut c_void, LoginFn>(resolve("VBVMR_Login")?) },
         logout: unsafe { std::mem::transmute::<*mut c_void, LogoutFn>(resolve("VBVMR_Logout")?) },
         is_parameters_dirty: unsafe {
-            std::mem::transmute::<*mut c_void, IsParametersDirtyFn>(resolve("VBVMR_IsParametersDirty")?)
+            std::mem::transmute::<*mut c_void, IsParametersDirtyFn>(resolve(
+                "VBVMR_IsParametersDirty",
+            )?)
         },
         get_parameter_float: unsafe {
-            std::mem::transmute::<*mut c_void, GetParameterFloatFn>(resolve("VBVMR_GetParameterFloat")?)
+            std::mem::transmute::<*mut c_void, GetParameterFloatFn>(resolve(
+                "VBVMR_GetParameterFloat",
+            )?)
         },
         set_parameters: unsafe {
             std::mem::transmute::<*mut c_void, SetParametersFn>(resolve("VBVMR_SetParameters")?)
@@ -99,8 +102,8 @@ unsafe fn load_symbols(path: &std::ffi::CStr) -> Result<Symbols> {
 /// Candidate DLL locations, mirroring the install layouts Voicemeeter uses.
 pub fn dll_candidates() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    let base = std::env::var("ProgramFiles(x86)")
-        .unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+    let base =
+        std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
     // Potato installs into a versioned subfolder first
     for entry in [
         r"\VB\Voicemeeter\VoicemeeterRemote64.dll",
@@ -224,14 +227,16 @@ impl VoicemeeterState {
             return self.with_remote(|r| r.set_parameters("Command.Restart=1;"));
         }
         let kind: &'static str = match action {
-            "vm-set-strip" | "vm-toggle-strip" | "vm-increase-strip" | "vm-decrease-strip" => "Strip",
+            "vm-set-strip" | "vm-toggle-strip" | "vm-increase-strip" | "vm-decrease-strip" => {
+                "Strip"
+            }
             "vm-set-bus" | "vm-toggle-bus" | "vm-increase-bus" | "vm-decrease-bus" => "Bus",
             "vm-set-output" => return self.set_output(args),
             other => return Err(VmError::BadPayload("action", other.into())),
         };
-        let args = args.as_object().ok_or_else(|| {
-            VmError::BadPayload("args", "expected object".into())
-        })?;
+        let args = args
+            .as_object()
+            .ok_or_else(|| VmError::BadPayload("args", "expected object".into()))?;
         let number = args
             .get("number")
             .and_then(Value::as_i64)
@@ -295,7 +300,9 @@ impl VoicemeeterState {
 /// used parseFloat - numbers and numeric strings both pass.
 fn parse_value(args: &serde_json::Map<String, Value>) -> Result<f64> {
     match args.get("value") {
-        Some(Value::Number(n)) => n.as_f64().ok_or_else(|| VmError::BadPayload("value", "not a number".into())),
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .ok_or_else(|| VmError::BadPayload("value", "not a number".into())),
         Some(Value::String(s)) => s
             .trim()
             .parse::<f64>()
@@ -326,11 +333,21 @@ fn string_param_text(index: &str, value: &str) -> String {
 
 /// Extension input declarations for the style resolver (same colors and
 /// icons as the original voicemeeter-control package declares).
-pub fn input_declarations() -> Vec<(&'static str, Option<&'static str>, &'static str, &'static str)> {
+pub fn input_declarations() -> Vec<(
+    &'static str,
+    Option<&'static str>,
+    &'static str,
+    &'static str,
+)> {
     // (value, icon, fontIcon, color)
     vec![
         ("vm-set-strip", Some("headphones"), "fas", "#171A21"),
-        ("vm-toggle-strip", Some("microphone-slash"), "fas", "#171A21"),
+        (
+            "vm-toggle-strip",
+            Some("microphone-slash"),
+            "fas",
+            "#171A21",
+        ),
         ("vm-increase-strip", Some("volume-up"), "fas", "#171A21"),
         ("vm-decrease-strip", Some("volume-down"), "fas", "#171A21"),
         ("vm-set-bus", Some("headphones"), "fas", "#171A21"),
@@ -406,7 +423,10 @@ mod tests {
         let err = vm.execute("vm-explode", &Value::Null).unwrap_err();
         assert!(matches!(err, VmError::BadPayload("action", _)));
         let err = vm
-            .execute("vm-toggle-something", &json!({"param": "Mute", "number": 0}))
+            .execute(
+                "vm-toggle-something",
+                &json!({"param": "Mute", "number": 0}),
+            )
             .unwrap_err();
         assert!(matches!(err, VmError::BadPayload("action", _)));
     }
@@ -428,9 +448,17 @@ mod tests {
     fn live_toggle_probe() {
         let mut vm = VoicemeeterState::new();
         let v0 = vm.read_strip(2, "A1").unwrap();
-        vm.execute("vm-toggle-strip", &serde_json::json!({"param": "A1", "number": 2})).unwrap();
+        vm.execute(
+            "vm-toggle-strip",
+            &serde_json::json!({"param": "A1", "number": 2}),
+        )
+        .unwrap();
         let v1 = vm.read_strip(2, "A1").unwrap();
-        vm.execute("vm-toggle-strip", &serde_json::json!({"param": "A1", "number": 2})).unwrap();
+        vm.execute(
+            "vm-toggle-strip",
+            &serde_json::json!({"param": "A1", "number": 2}),
+        )
+        .unwrap();
         let v2 = vm.read_strip(2, "A1").unwrap();
         println!("toggle round trip: {v0} -> {v1} -> {v2}");
     }
@@ -453,7 +481,8 @@ mod tests {
     #[test]
     fn dll_candidates_cover_standard_layout() {
         let cands = dll_candidates();
-        assert!(cands.iter().any(|p| p.to_string_lossy().ends_with("Voicemeeter\\VoicemeeterRemote64.dll")));
+        assert!(cands.iter().any(|p| p
+            .to_string_lossy()
+            .ends_with("Voicemeeter\\VoicemeeterRemote64.dll")));
     }
 }
-

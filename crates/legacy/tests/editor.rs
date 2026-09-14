@@ -153,7 +153,7 @@ async fn broadcast_reaches_polling_session() {
     });
 
     // handshake like the Dart client
-    let (mut stream, body) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
+    let (stream, body) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
     let sid: String = {
         let open_json: serde_json::Value = serde_json::from_str(&body[1..]).unwrap();
         open_json["sid"].as_str().unwrap().into()

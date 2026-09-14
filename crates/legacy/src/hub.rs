@@ -163,6 +163,10 @@ impl Hub {
         self.sessions.lock().await.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.sessions.lock().await.is_empty()
+    }
+
     /// Drop sessions silent for longer than Engine.IO allows
     /// (pingInterval + pingTimeout). Returns the number removed.
     pub async fn reap(&self, max_idle_secs: u64) -> usize {

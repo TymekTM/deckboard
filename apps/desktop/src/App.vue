@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { save, open, ask } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
@@ -14,6 +14,57 @@ const status = ref({ dbOk: false, port: 0, clients: 0, version: "" });
 const touchMode = ref(false);
 const touchBoardId = ref(null);
 const knownInputs = ref([]);
+
+// Live state mirrors of the original client: customValues holds pushed
+// values (APP_CUSTOM_VALUE), appStates per-integration status (APP_OBS...).
+const customValues = reactive({});
+const appStates = reactive({});
+
+function applyStatusUpdate(payload) {
+  const data = payload?.data;
+  if (!data || typeof data !== "object") return;
+  switch (payload.app) {
+    case "APP_CUSTOM_VALUE":
+      mergeCustomValues(data);
+      break;
+    case "APP_OBS":
+      mergeAppState("obs", data);
+      break;
+    case "APP_TWITCH":
+      mergeAppState("twitch", data);
+      break;
+    case "APP_VMOD":
+      mergeAppState("vmod", data);
+      break;
+    case "APP_DISCORD":
+      mergeAppState("discord", data);
+      break;
+    default:
+      break;
+  }
+}
+
+function mergeCustomValues(data) {
+  for (const [key, value] of Object.entries(data)) {
+    if (typeof value !== "object" || value === null) {
+      customValues[key] = value;
+    } else if (customValues[key]?.values) {
+      // graph samples keep the last 10 readings, like the original
+      const prev = customValues[key];
+      customValues[key] = {
+        ...prev,
+        values: [...prev.values, value.value ?? 0].slice(-10),
+      };
+    } else {
+      const { value: sample, ...rest } = value;
+      customValues[key] = { ...rest, values: [sample ?? 0] };
+    }
+  }
+}
+
+function mergeAppState(name, data) {
+  appStates[name] = { ...(appStates[name] || {}), ...data };
+}
 
 // type -> {icon, color, mode, dual} fallbacks: static catalog + extensions
 const typeMeta = computed(() => {
@@ -220,7 +271,8 @@ onMounted(async () => {
     await listen("change-board", (e) => {
       touchBoardId.value = e.payload;
       if (!touchMode.value) currentId.value = e.payload;
-    })
+    }),
+    await listen("app-status-update", (e) => applyStatusUpdate(e.payload))
   );
 });
 onUnmounted(() => unlisteners.forEach((f) => f()));
@@ -394,6 +446,8 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
             :board="currentBoard"
             :zoom="zoom"
             :type-meta="typeMeta"
+            :custom-values="customValues"
+            :app-states="appStates"
             @tile-open="editingTile = $event"
             @tile-moved="tileMoved"
             @tile-add="createFlow = { ...$event, boardId: currentId }"
@@ -403,6 +457,8 @@ onUnmounted(() => unlisteners.forEach((f) => f()));
             :board="boards.find((b) => b.id === touchBoardId) || currentBoard"
             touch
             :type-meta="typeMeta"
+            :custom-values="customValues"
+            :app-states="appStates"
             @tile-exec="api.execButton($event.id)"
             @tile-slider="tileSlider"
             @tile-open="editingTile = $event"

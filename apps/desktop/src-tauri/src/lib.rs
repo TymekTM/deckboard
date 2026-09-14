@@ -168,10 +168,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         );
     }
     for (value, icon, font_icon, color) in deckboard_vm::input_declarations() {
-        register_ext_input(&value, icon, Some(&color), &font_icon, None, None);
+        register_ext_input(value, icon, Some(color), font_icon, None, None);
     }
     for (value, icon, color, mode) in deckboard_discord::input_declarations() {
-        register_ext_input(&value, Some(&icon), Some(&color), "fas", mode, None);
+        register_ext_input(value, Some(icon), Some(color), "fas", mode, None);
     }
 
     let backend = Arc::new(
@@ -189,11 +189,12 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // extensions push custom values -> app_status_update, like the original
     {
         let hub = hub.clone();
+        let app = app.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(deckboard_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
-                let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
-                let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
-                hub.broadcast("app_status_update", Some(&payload)).await;
+                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
+                hub.broadcast("app_status_update", Some(&payload.to_string())).await;
+                let _ = app.emit("app-status-update", &payload);
             }
         });
     }
@@ -322,11 +323,13 @@ fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) {
             return;
         }
     };
-    let result = app.global_shortcut().on_shortcut(shortcut, |app, _s, event| {
-        if event.state() == ShortcutState::Pressed {
-            let _ = app.emit("toggle-touch-mode", ());
-        }
-    });
+    let result = app
+        .global_shortcut()
+        .on_shortcut(shortcut, |app, _s, event| {
+            if event.state() == ShortcutState::Pressed {
+                let _ = app.emit("toggle-touch-mode", ());
+            }
+        });
     if let Err(e) = result {
         tracing::warn!("could not register hotkey \"{combo}\": {e}");
     }
@@ -425,11 +428,7 @@ fn set_autostart(app: AppHandle, enable: bool) -> Result<(), String> {
 #[tauri::command]
 fn read_image_data(path: String) -> Result<String, String> {
     use base64::Engine;
-    let ext = path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     let mime = match ext.as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -439,7 +438,10 @@ fn read_image_data(path: String) -> Result<String, String> {
         _ => return Err(format!("unsupported image type \".{ext}\"")),
     };
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 #[tauri::command]

@@ -180,9 +180,15 @@ pub fn run_command(
     match cmd.kind.as_str() {
         "board" => Ok(()), // board switching is client/editor-local
         "key" => run_key(input, cmd, is_tap_start),
-        k if k.starts_with("spotify") || k.starts_with("slobs") || k.starts_with("obs")
-            || k.starts_with("xsplit") || k.contains("twitch") || k.starts_with("vmod")
-            || k == "speaker-device" || k == "speaker-volume" || k == "play"
+        k if k.starts_with("spotify")
+            || k.starts_with("slobs")
+            || k.starts_with("obs")
+            || k.starts_with("xsplit")
+            || k.contains("twitch")
+            || k.starts_with("vmod")
+            || k == "speaker-device"
+            || k == "speaker-volume"
+            || k == "play"
             || k == "screenshot" =>
         {
             // M0 covers the system-level subset; integrations arrive in M7.
@@ -218,7 +224,10 @@ pub fn run_slider_command(_input: &mut dyn Input, cmd: &Command, _value: f64) ->
     match cmd.kind.as_str() {
         "speaker-volume" | "wheels-volume" | "slider-obs-audio" | "slider-slobs-audio"
         | "obs-audio-slider" | "slobs-audio-slider" => {
-            tracing::warn!(kind = cmd.kind.as_str(), "slider backends not implemented yet");
+            tracing::warn!(
+                kind = cmd.kind.as_str(),
+                "slider backends not implemented yet"
+            );
             Ok(())
         }
         other => {
@@ -251,8 +260,14 @@ fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Comman
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            command: step.get("command").and_then(Value::as_str).map(str::to_string),
-            options: step.get("options").and_then(Value::as_str).map(str::to_string),
+            command: step
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            options: step
+                .get("options")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             mode: "button".to_string(),
         };
         match step_cmd.kind.as_str() {
@@ -296,15 +311,16 @@ fn run_advance_key(input: &mut dyn Input, cmd: &Command) -> Result<()> {
     let steps: Vec<Value> = serde_json::from_str(raw)
         .map_err(|e| ActionError::BadPayload("advance-key".into(), e.to_string()))?;
     for step in steps {
-        let action = step.get("action").and_then(Value::as_str).unwrap_or_default();
-        let value = step
-            .get("value")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let action = step
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let value = step.get("value").cloned().unwrap_or(Value::Null);
         match action {
             "down" | "up" => {
-                let key = parse_key_name(value.as_str().unwrap_or_default())
-                    .ok_or_else(|| ActionError::BadPayload("advance-key".into(), "bad key".into()))?;
+                let key = parse_key_name(value.as_str().unwrap_or_default()).ok_or_else(|| {
+                    ActionError::BadPayload("advance-key".into(), "bad key".into())
+                })?;
                 if action == "down" {
                     input.key_down(&[key])?;
                 } else {
@@ -377,9 +393,7 @@ fn run_open_file(input: &mut dyn Input, cmd: &Command) -> Result<()> {
 
 /// Parse `"CTRL + SHIFT + K"` into modifier+key lists (original hotkey format).
 pub fn parse_hotkey(raw: &str) -> Vec<KeyName> {
-    raw.split('+')
-        .filter_map(parse_key_name)
-        .collect()
+    raw.split('+').filter_map(parse_key_name).collect()
 }
 
 /// Real OS backend.
@@ -474,7 +488,11 @@ impl Input for EnigoInput {
     }
 
     fn mouse_click(&mut self, left: bool) -> Result<()> {
-        let button = if left { enigo::Button::Left } else { enigo::Button::Right };
+        let button = if left {
+            enigo::Button::Left
+        } else {
+            enigo::Button::Right
+        };
         self.enigo
             .button(button, enigo::Direction::Click)
             .map_err(|e| ActionError::Input(e.to_string()))
@@ -621,12 +639,14 @@ mod tests {
         let mut sink = MockSink::default();
         let c = cmd(
             "multiaction",
-            Some(r#"[
+            Some(
+                r#"[
                 {"type":"delay","command":"100"},
                 {"type":"board","command":"{\"id\":7}"},
                 {"type":"key","command":"ENTER"},
                 {"type":"url","command":"https://example.com"}
-            ]"#),
+            ]"#,
+            ),
         );
         run_command(&mut input, &mut sink, &c, false).unwrap();
         assert!(input.effects.contains(&Effect::Sleep(100)));
@@ -634,7 +654,9 @@ mod tests {
         assert!(input.effects.contains(&Effect::KeyDown(vec![Return])));
         assert!(input.effects.contains(&Effect::Sleep(150)));
         assert!(input.effects.contains(&Effect::KeyUp(vec![Return])));
-        assert!(input.effects.contains(&Effect::OpenUrl("https://example.com".into())));
+        assert!(input
+            .effects
+            .contains(&Effect::OpenUrl("https://example.com".into())));
         assert_eq!(sink.boards, vec![7]);
     }
 
@@ -686,7 +708,13 @@ mod tests {
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
         run_command(&mut input, &mut sink, &cmd("type", Some("hello")), false).unwrap();
-        run_command(&mut input, &mut sink, &cmd("url", Some("https://x.co")), false).unwrap();
+        run_command(
+            &mut input,
+            &mut sink,
+            &cmd("url", Some("https://x.co")),
+            false,
+        )
+        .unwrap();
         assert_eq!(input.effects[0], Effect::Text("hello".into()));
         assert_eq!(input.effects[1], Effect::OpenUrl("https://x.co".into()));
     }
@@ -697,7 +725,9 @@ mod tests {
         let mut sink = MockSink::default();
         let c = cmd(
             "advance-key",
-            Some(r#"[{"action":"down","value":"SHIFT"},{"action":"delay","value":50},{"action":"up","value":"SHIFT"},{"action":"type","value":"hi"}]"#),
+            Some(
+                r#"[{"action":"down","value":"SHIFT"},{"action":"delay","value":50},{"action":"up","value":"SHIFT"},{"action":"type","value":"hi"}]"#,
+            ),
         );
         run_command(&mut input, &mut sink, &c, false).unwrap();
         assert_eq!(
@@ -726,7 +756,19 @@ mod tests {
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
         run_command(&mut input, &mut sink, &cmd("obs-scene", Some("Cam")), false).unwrap();
-        run_command(&mut input, &mut sink, &cmd("speaker-volume", Some("")), false).unwrap();
-        run_command(&mut input, &mut sink, &cmd("spotify-playback", Some("play")), false).unwrap();
+        run_command(
+            &mut input,
+            &mut sink,
+            &cmd("speaker-volume", Some("")),
+            false,
+        )
+        .unwrap();
+        run_command(
+            &mut input,
+            &mut sink,
+            &cmd("spotify-playback", Some("play")),
+            false,
+        )
+        .unwrap();
     }
 }

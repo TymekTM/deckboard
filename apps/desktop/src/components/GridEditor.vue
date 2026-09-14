@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
-import { CELL_W, ROW_H } from "../catalog";
+import { CELL_W, ROW_H, stateActive } from "../catalog";
 
 // Edit-mode grid: drag to move, corner handle to resize, double-click to
 // edit, empty-cell click to add. Touch mode: tap runs the tile.
@@ -10,19 +10,14 @@ const props = defineProps({
   zoom: { type: Number, default: 1 },
   // type -> {icon, color} fallbacks from the action catalog + extensions
   typeMeta: { type: Object, default: () => ({}) },
+  // live state pushes (APP_CUSTOM_VALUE / APP_*), see applyStatusUpdate
+  customValues: { type: Object, default: () => ({}) },
+  appStates: { type: Object, default: () => ({}) },
 });
 const emit = defineEmits(["tile-open", "tile-moved", "tile-add", "tile-exec", "tile-slider"]);
 
 function metaOf(tile) {
   return props.typeMeta?.[tile.type] || {};
-}
-function tileBg(tile) {
-  const base = tile.color || metaOf(tile).color || "#2c3e50";
-  return props.touch && activeTiles.has(tile.id) ? tile.color2 || base : base;
-}
-function tileIcon(tile) {
-  const base = tile.icon || metaOf(tile).icon || "";
-  return props.touch && activeTiles.has(tile.id) ? tile.icon2 || base : base;
 }
 
 // dual-state tiles flip to their second state when tapped, like the
@@ -32,6 +27,48 @@ function isDual(tile) {
   return Boolean(
     tile.color2 || tile.icon2 || tile.img2 || metaOf(tile).dual
   );
+}
+
+// Whether the tile renders its second state. A known live state wins
+// (original ToggleButton isActive); otherwise the session tap flip.
+function tileActive(tile) {
+  const state = stateActive(tile, props.customValues, props.appStates, props.typeMeta);
+  return state !== null ? state : activeTiles.has(tile.id);
+}
+
+// second-state fields only apply when they are actually set (original:
+// `(isActive ? data.color2 : data.color) || style.color`)
+function pick(tile, first, second) {
+  return tileActive(tile) ? tile[second] || tile[first] : tile[first];
+}
+
+function tileBg(tile) {
+  return pick(tile, "color", "color2") || metaOf(tile).color || "#2c3e50";
+}
+function tileIcon(tile) {
+  return pick(tile, "icon", "icon2") || metaOf(tile).icon || "";
+}
+function tileIconColor(tile) {
+  return pick(tile, "icon_color", "icon_color2") || "#ffffff";
+}
+function tileShape(tile) {
+  const shape = pick(tile, "shape", "shape2");
+  return shape === 1 ? "50%" : "8px";
+}
+function tileBorder(tile) {
+  return pick(tile, "border_color", "border_color2") || "transparent";
+}
+function tileTitlePos(tile) {
+  return pick(tile, "title_position", "title_position2") ?? 0;
+}
+function tileTitleColor(tile) {
+  // color2 only participates when it is set, like the original title style
+  return tile.title_color2 && tileActive(tile) ? tile.title_color2 : tile.title_color;
+}
+function tileTitleBox(tile) {
+  return tile.title_box_color2 && tileActive(tile)
+    ? tile.title_box_color2
+    : tile.title_box_color;
 }
 
 const drag = ref(null); // {tile, mode:'move'|'resize', dx, dy, pointerId}
@@ -221,8 +258,8 @@ function onGridClick(event) {
           :class="{ dragging: drag && drag.tile.id === tile.id }"
           :style="{
             background: tileBg(tile),
-            borderColor: tile.border_color || 'transparent',
-            borderRadius: tile.shape === 1 ? '50%' : '8px',
+            borderColor: tileBorder(tile),
+            borderRadius: tileShape(tile),
           }"
           @dblclick="!touch && $emit('tile-open', tile)"
           @contextmenu.prevent="onTileContext(tile)"
@@ -230,7 +267,7 @@ function onGridClick(event) {
           @click.stop="onTileTap(tile)"
         >
           <img
-            v-if="touch && activeTiles.has(tile.id) && tile.img2"
+            v-if="tileActive(tile) && tile.img2"
             class="tile-img"
             :src="tile.img2"
             alt=""
@@ -240,15 +277,15 @@ function onGridClick(event) {
             v-if="tileIcon(tile)"
             class="tile-icon"
             :class="'fas fa-' + tileIcon(tile)"
-            :style="{ color: tile.icon_color || '#ffffff' }"
+            :style="{ color: tileIconColor(tile) }"
           ></i>
           <span
             v-if="tile.title"
             class="tile-title"
-            :class="`pos-${tile.title_position ?? 0}`"
+            :class="`pos-${tileTitlePos(tile)}`"
             :style="{
-              color: tile.title_color || '#ffffff',
-              background: tile.title_box_color || 'transparent',
+              color: tileTitleColor(tile) || '#ffffff',
+              background: tileTitleBox(tile) || 'transparent',
             }"
             >{{ tile.title }}</span
           >
@@ -293,6 +330,7 @@ function onGridClick(event) {
 }
 .tile-slot { position: absolute; padding: 5px; }
 .tile-slot:has(> .empty-cell) { cursor: pointer; }
+.touch .empty-cell { display: none; }
 .touch .tile-slot { cursor: default; }
 .empty-cell {
   width: 100%;

@@ -38,7 +38,11 @@ impl AsarArchive {
         }
         let u32_at = |off: usize| -> Result<u32, AsarError> {
             Ok(u32::from_le_bytes(
-                bytes.get(off..off + 4).ok_or(AsarError::Invalid("truncated"))?.try_into().unwrap(),
+                bytes
+                    .get(off..off + 4)
+                    .ok_or(AsarError::Invalid("truncated"))?
+                    .try_into()
+                    .unwrap(),
             ))
         };
         if u32_at(0)? != 4 {
@@ -51,14 +55,18 @@ impl AsarArchive {
             return Err(AsarError::Invalid("header out of bounds"));
         }
         let json = String::from_utf8_lossy(&bytes[json_start..json_start + json_len]);
-        let header: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|_| AsarError::Invalid("header json"))?;
+        let header: serde_json::Value =
+            serde_json::from_str(&json).map_err(|_| AsarError::Invalid("header json"))?;
         let content_offset = 8 + header_size;
 
         let mut files = HashMap::new();
         collect_files(header.get("files"), String::new(), &mut files);
 
-        Ok(AsarArchive { bytes, content_offset, files })
+        Ok(AsarArchive {
+            bytes,
+            content_offset,
+            files,
+        })
     }
 
     /// Read one file from the archive by relative path (`index.js`,
@@ -136,7 +144,7 @@ mod tests {
         out.extend_from_slice(&4u32.to_le_bytes());
         out.extend_from_slice(&(json_len as u32).to_le_bytes());
         out.extend_from_slice(json_bytes);
-        out.extend(std::iter::repeat(0).take(pad(json_len)));
+        out.extend(std::iter::repeat_n(0, pad(json_len)));
         out.extend_from_slice(b"hello world");
         out.extend_from_slice(b"chunk");
         return out;
@@ -153,9 +161,6 @@ mod tests {
         assert_eq!(arch.read("lib/a.js").unwrap(), b"chunk");
         assert!(arch.exists("lib/a.js"));
         assert!(!arch.exists("nope.js"));
-        assert!(matches!(
-            arch.read("nope.js"),
-            Err(AsarError::NotFound(_))
-        ));
+        assert!(matches!(arch.read("nope.js"), Err(AsarError::NotFound(_))));
     }
 }

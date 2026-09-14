@@ -5,7 +5,7 @@
 //! here): connect to `\\?\pipe\discord-ipc-N`, send a handshake frame
 //! (opcode 0) with the OAuth2 client id, authenticate with the access
 //! token the user saved in the original app, then talk commands (opcode 1)
-//! - GET/SET_VOICE_SETTINGS and SELECT_VOICE_CHANNEL. Frames are
+//! GET/SET_VOICE_SETTINGS and SELECT_VOICE_CHANNEL. Frames are
 //! `[i32 LE opcode][i32 LE length][json]`.
 //!
 //! A connection is opened per action and closed after it: cheap, and it
@@ -142,7 +142,8 @@ fn post_form(url: &str, body: &str) -> Result<Value> {
         .into_body()
         .read_to_string()
         .map_err(|_| DiscordError::Call("oauth body"))?;
-    let parsed: Value = serde_json::from_str(&text).map_err(|_| DiscordError::Call("oauth json"))?;
+    let parsed: Value =
+        serde_json::from_str(&text).map_err(|_| DiscordError::Call("oauth json"))?;
     if parsed.get("access_token").is_none() {
         // {"error": "invalid_client", ...}
         return Err(DiscordError::Call("oauth error response"));
@@ -181,12 +182,10 @@ pub fn authorize(config: &DiscordConfig, deadline: Instant) -> Result<AuthTokens
 
     // step 2: AUTHORIZE over the pipe - Discord shows the consent popup
     let mut pipe = Pipe::open()?;
-    pipe.write_all(
-        &encode_frame(
-            OP_HANDSHAKE,
-            &json!({ "v": 1, "client_id": config.client_id }).to_string(),
-        ),
-    )?;
+    pipe.write_all(&encode_frame(
+        OP_HANDSHAKE,
+        &json!({ "v": 1, "client_id": config.client_id }).to_string(),
+    ))?;
     let mut session = Session { pipe, nonce: 0 };
     session.wait_for_ready(deadline)?;
     let mut args = json!({
@@ -277,16 +276,14 @@ pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Resu
         .or_insert_with(|| Value::Object(Default::default()));
     let package = package.as_object_mut().expect("package object");
     let mut field = |name: &str, value: &str| {
-        let entry = package
-            .entry(name.to_string())
-            .or_insert_with(|| {
-                json!({
-                    "descriptions": "Discord OAuth token (managed by deckboard-server)",
-                    "name": name,
-                    "type": "text",
-                    "value": "",
-                })
-            });
+        let entry = package.entry(name.to_string()).or_insert_with(|| {
+            json!({
+                "descriptions": "Discord OAuth token (managed by deckboard-server)",
+                "name": name,
+                "type": "text",
+                "value": "",
+            })
+        });
         if let Some(f) = entry.as_object_mut() {
             f.insert("value".into(), json!(value));
         }
@@ -295,7 +292,10 @@ pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Resu
     if let Some(r) = &tokens.refresh_token {
         field("discordRefreshToken", r);
     }
-    std::fs::write(path, serde_json::to_string_pretty(&settings).unwrap_or_default())
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&settings).unwrap_or_default(),
+    )
 }
 
 /// Is this action one of ours?
@@ -313,10 +313,25 @@ pub fn is_discord_action(kind: &str) -> bool {
 }
 
 /// Input declarations for the style resolver: (value, icon, color, mode).
-pub fn input_declarations() -> Vec<(&'static str, &'static str, &'static str, Option<&'static str>)> {
+pub fn input_declarations() -> Vec<(
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+)> {
     vec![
-        ("toggle-microphone", "microphone", "#5865F2", Some("custom-value")),
-        ("toggle-headphone", "headphones", "#5865F2", Some("custom-value")),
+        (
+            "toggle-microphone",
+            "microphone",
+            "#5865F2",
+            Some("custom-value"),
+        ),
+        (
+            "toggle-headphone",
+            "headphones",
+            "#5865F2",
+            Some("custom-value"),
+        ),
         ("microphone", "microphone", "#5865F2", None),
         ("headphone", "headphones", "#5865F2", None),
         ("disconnect-voice", "phone-slash", "#5865F2", None),
@@ -354,9 +369,6 @@ pub fn decode_frame(buf: &[u8]) -> Option<(u32, &[u8])> {
 }
 
 // ------------------------------------------------------------- pipe client
-
-#[repr(C)]
-struct OverlappedPlaceholder;
 
 #[cfg(windows)]
 mod pipe {
@@ -534,12 +546,10 @@ impl Session {
         }
         let mut pipe = Pipe::open()?;
         let deadline = Instant::now() + Duration::from_secs(8);
-        pipe.write_all(
-            &encode_frame(
-                OP_HANDSHAKE,
-                &json!({ "v": 1, "client_id": config.client_id }).to_string(),
-            ),
-        )?;
+        pipe.write_all(&encode_frame(
+            OP_HANDSHAKE,
+            &json!({ "v": 1, "client_id": config.client_id }).to_string(),
+        ))?;
         let mut session = Session { pipe, nonce: 0 };
         // Discord ignores commands sent before READY was consumed, so read
         // the dispatch first
@@ -606,15 +616,11 @@ impl Session {
         }
     }
 
-    fn request_until(
-        &mut self,
-        deadline: Instant,
-        cmd: &str,
-        args: Value,
-    ) -> Result<Value> {
+    fn request_until(&mut self, deadline: Instant, cmd: &str, args: Value) -> Result<Value> {
         let nonce = self.next_nonce();
         let frame = json!({ "cmd": cmd, "args": args, "nonce": nonce });
-        self.pipe.write_all(&encode_frame(OP_FRAME, &frame.to_string()))?;
+        self.pipe
+            .write_all(&encode_frame(OP_FRAME, &frame.to_string()))?;
         loop {
             let (op, v) = self.read_frame(deadline)?;
             if op == OP_FRAME && v.get("nonce").and_then(Value::as_str) == Some(nonce.as_str()) {
@@ -727,15 +733,27 @@ pub fn apply_flip(current: &Value, what: &Plan) -> Result<Option<FlipOutcome>> {
             .ok_or(DiscordError::Call("GET_VOICE_SETTINGS"))
     };
     Ok(match what {
-        Plan::SetMic(mute) => Some(FlipOutcome { label: label(*mute), patch: json!({ "mute": mute }) }),
-        Plan::SetDeaf(deaf) => Some(FlipOutcome { label: label(*deaf), patch: json!({ "deaf": deaf }) }),
+        Plan::SetMic(mute) => Some(FlipOutcome {
+            label: label(*mute),
+            patch: json!({ "mute": mute }),
+        }),
+        Plan::SetDeaf(deaf) => Some(FlipOutcome {
+            label: label(*deaf),
+            patch: json!({ "deaf": deaf }),
+        }),
         Plan::FlipMic => {
             let now = get("mute")?;
-            Some(FlipOutcome { label: label(!now), patch: json!({ "mute": !now }) })
+            Some(FlipOutcome {
+                label: label(!now),
+                patch: json!({ "mute": !now }),
+            })
         }
         Plan::FlipDeaf => {
             let now = get("deaf")?;
-            Some(FlipOutcome { label: label(!now), patch: json!({ "deaf": !now }) })
+            Some(FlipOutcome {
+                label: label(!now),
+                patch: json!({ "deaf": !now }),
+            })
         }
         Plan::SetInputMode(mode) => {
             let next = if mode == "toggle" {
@@ -751,7 +769,10 @@ pub fn apply_flip(current: &Value, what: &Plan) -> Result<Option<FlipOutcome>> {
             } else {
                 mode.as_str()
             };
-            Some(FlipOutcome { label: "", patch: json!({ "mode": { "type": next } }) })
+            Some(FlipOutcome {
+                label: "",
+                patch: json!({ "mode": { "type": next } }),
+            })
         }
         Plan::ConnectChannel(_) | Plan::Disconnect => None,
     })
@@ -841,9 +862,16 @@ mod tests {
             plan("headphone", &json!({ "action": "toggle_headphone" })).unwrap(),
             Plan::FlipDeaf
         );
-        assert_eq!(plan("disconnect-voice", &json!({})).unwrap(), Plan::Disconnect);
         assert_eq!(
-            plan("connect-voice", &json!({ "channel_id": "1348374896685875295" })).unwrap(),
+            plan("disconnect-voice", &json!({})).unwrap(),
+            Plan::Disconnect
+        );
+        assert_eq!(
+            plan(
+                "connect-voice",
+                &json!({ "channel_id": "1348374896685875295" })
+            )
+            .unwrap(),
             Plan::ConnectChannel("1348374896685875295".into())
         );
         assert!(plan("microphone", &json!({ "action": "nonsense" })).is_err());
@@ -939,12 +967,10 @@ mod tests {
         );
         let mut pipe = Pipe::open().unwrap();
         let deadline = Instant::now() + Duration::from_secs(4);
-        pipe.write_all(
-            &encode_frame(
-                OP_HANDSHAKE,
-                &json!({ "v": 1, "client_id": config.client_id }).to_string(),
-            ),
-        )
+        pipe.write_all(&encode_frame(
+            OP_HANDSHAKE,
+            &json!({ "v": 1, "client_id": config.client_id }).to_string(),
+        ))
         .unwrap();
         let mut header = vec![0u8; 8];
         match pipe.read_exact(&mut header, deadline) {
@@ -958,23 +984,20 @@ mod tests {
                     v["evt"].as_str().unwrap_or("?").to_string()
                 });
                 // now try AUTHENTICATE on the same connection
-                pipe.write_all(
-                    &encode_frame(
-                        OP_FRAME,
-                        &json!({
-                            "cmd": "AUTHENTICATE",
-                            "args": { "access_token": config.access_token },
-                            "nonce": "probe-1",
-                        })
-                        .to_string(),
-                    ),
-                )
+                pipe.write_all(&encode_frame(
+                    OP_FRAME,
+                    &json!({
+                        "cmd": "AUTHENTICATE",
+                        "args": { "access_token": config.access_token },
+                        "nonce": "probe-1",
+                    })
+                    .to_string(),
+                ))
                 .unwrap();
                 let mut header2 = vec![0u8; 8];
                 match pipe.read_exact(&mut header2, deadline) {
                     Ok(()) => {
-                        let len2 =
-                            i32::from_le_bytes(header2[4..8].try_into().unwrap()) as usize;
+                        let len2 = i32::from_le_bytes(header2[4..8].try_into().unwrap()) as usize;
                         let mut rest2 = vec![0u8; len2];
                         pipe.read_exact(&mut rest2, deadline).unwrap();
                         let text = String::from_utf8_lossy(&rest2);

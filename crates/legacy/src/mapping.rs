@@ -92,10 +92,10 @@ impl Mapper {
                     // basic variant crops oversized buttons to the 4x3 grid
                     let w = v["w"].as_i64().unwrap_or(1);
                     let h = v["h"].as_i64().unwrap_or(1);
-                    if x + w - 1 >= 4 {
+                    if x + w > 4 {
                         v["w"] = json!(4 - x);
                     }
-                    if y + h - 1 >= 3 {
+                    if y + h > 3 {
                         v["h"] = json!(3 - y);
                     }
                     Some(v)

@@ -28,8 +28,10 @@ through a legacy compatibility layer until the new client ships.
       import/export, touch mode with local execution, tray, autostart
       toggle, configurable touch-mode hotkey (validated, persisted to
       `~/deckboard/editor.json`, re-registered at runtime), slider drag
-      interaction in touch mode. Still open for the checkbox: live
-      second-state preview.
+      interaction in touch mode, visible empty grid slots in the editor,
+      live second-state preview (extension/custom-value pushes broadcast
+      as `app_status_update` and forwarded to the editor, which mirrors
+      the original ToggleButton `isActive` over `customValues`/app state).
 - [ ] **M4 - Kotlin/Compose client MVP**: boards/buttons/sliders/toggles,
       live state, offline cache, QR/USB pairing. Includes Android plumbing:
       foreground service + battery-optimization exemption prompt (WS dies

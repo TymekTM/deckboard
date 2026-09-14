@@ -6,7 +6,7 @@ license.workspace = true
 description = "Deckboard desktop editor"
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = "1"

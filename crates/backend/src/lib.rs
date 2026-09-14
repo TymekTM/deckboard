@@ -409,7 +409,6 @@ impl SqlBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deckboard_db::ButtonRow;
 
     fn test_backend() -> SqlBackend {
         SqlBackend::new(Db::open_or_create(std::path::Path::new(":memory:")).unwrap())

@@ -781,4 +781,30 @@ mod tests {
         let err = Db::open_read_write(Some(Path::new("Z:/nope/deckboard.db"))).unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
+
+    #[test]
+    fn lenient_int_columns_accept_legacy_text_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+        let board = db.insert_board("Legacy", "#2c3e50", 4, 3).unwrap();
+
+        // legacy databases carry '' and text in int-affinity columns; a
+        // strict read blanks the whole board, so reads must fall back
+        db.conn
+            .execute(
+                "INSERT INTO Shortcuts (board_id, type, command, title, title_position, shape,
+                     position, position2, x, y, w, h)
+                 VALUES (?1, 'url', 'https://example.com', 'Junk', '3', '', '', '2', '', '1', '2', '1')",
+                rusqlite::params![board],
+            )
+            .unwrap();
+        let buttons = db.get_buttons_by_board(board).unwrap();
+        assert_eq!(buttons.len(), 1);
+        let b = &buttons[0];
+        assert_eq!(b.title_position, 3);
+        assert_eq!((b.shape, b.w, b.h), (0, 2, 1));
+        assert_eq!((b.x, b.y), (None, Some(1)));
+        assert_eq!(b.position, None);
+        assert_eq!(b.position2, 2);
+    }
 }
