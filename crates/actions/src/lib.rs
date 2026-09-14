@@ -12,6 +12,8 @@ use thiserror::Error;
 use enigo::{Keyboard as _, Mouse as _};
 
 pub mod audio;
+pub mod clipboard;
+pub mod screenshot;
 
 #[derive(Error, Debug)]
 pub enum ActionError {
@@ -124,6 +126,12 @@ pub trait Input {
     fn key_up(&mut self, keys: &[KeyName]) -> Result<()>;
     fn key_tap(&mut self, keys: &[KeyName]) -> Result<()>;
     fn text(&mut self, text: &str) -> Result<()>;
+    /// Paste text through the clipboard like the original `typeString`:
+    /// save clipboard, write text, Ctrl+V, restore. The default falls back
+    /// to plain typing for backends without clipboard support.
+    fn paste_text(&mut self, text: &str) -> Result<()> {
+        self.text(text)
+    }
     fn mouse_move(&mut self, x: i32, y: i32) -> Result<()>;
     fn mouse_click(&mut self, left: bool) -> Result<()>;
     fn media(&mut self, key: MediaKey) -> Result<()>;
@@ -201,10 +209,20 @@ pub fn run_command(
         "advance-key" => run_advance_key(input, cmd),
         "type" => {
             let text = cmd.command.as_deref().unwrap_or_default();
-            input.text(text)
+            input.paste_text(text)
         }
         "mouse-ctrl" => run_mouse(input, cmd),
         "vol" => run_vol(input, cmd),
+        "screenshot" => {
+            let dir = cmd.command.as_deref().unwrap_or_default();
+            match screenshot::take_screenshot(dir) {
+                Ok(path) => {
+                    tracing::info!(path = %path.display(), "screenshot saved");
+                    Ok(())
+                }
+                Err(e) => Err(ActionError::BadPayload("screenshot".into(), e)),
+            }
+        }
         "url" | "dir" => {
             let target = cmd.command.as_deref().unwrap_or_default();
             if target.is_empty() {
@@ -483,6 +501,20 @@ impl Input for EnigoInput {
         self.enigo
             .text(text)
             .map_err(|e| ActionError::Input(e.to_string()))
+    }
+
+    fn paste_text(&mut self, text: &str) -> Result<()> {
+        // original typeString: save clipboard, write the text, tap Ctrl+V
+        // (50 ms delays), restore the previous clipboard when non-empty
+        let previous = clipboard::get_text();
+        clipboard::set_text(text).map_err(ActionError::Input)?;
+        self.sleep(50)?;
+        self.key_tap(&[KeyName::Control, KeyName::Char('v')])?;
+        self.sleep(50)?;
+        if let Some(previous) = previous.filter(|p| !p.is_empty()) {
+            clipboard::set_text(&previous).map_err(ActionError::Input)?;
+        }
+        Ok(())
     }
 
     fn mouse_move(&mut self, x: i32, y: i32) -> Result<()> {

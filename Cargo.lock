@@ -933,7 +933,9 @@ version = "0.1.0"
 dependencies = [
  "enigo",
  "open",
+ "png 0.18.1",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tracing",
  "windows 0.61.3",
