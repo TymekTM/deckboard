@@ -19,6 +19,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -90,6 +91,7 @@ private fun BoardChip(vm: DeckboardViewModel) {
 private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) {
     val liveValues by vm.values.collectAsState()
     val series by vm.series.collectAsState()
+    val bitmaps by vm.bitmaps.collectAsState()
     // toggles without a state channel keep client-side position state
     val positions = remember(board.id) { mutableStateMapOf<Long, Boolean>() }
 
@@ -108,6 +110,7 @@ private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) 
         board.tiles.forEach { t ->
             val watchChannel = t.state?.channel
             val live = liveValues[watchChannel]
+            t.assetHash?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
             val active = when {
                 watchChannel != null -> isActiveValue(live)
                 else -> positions[t.id] ?: false
@@ -125,6 +128,7 @@ private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) 
                     liveText = displayText(live),
                     series = series[watchChannel] ?: emptyList(),
                     items = listItems(t, live),
+                    image = t.assetHash?.let { bitmaps[it] },
                     onPressStart = { vm.pressStart(board.id, t) },
                     onPressEnd = { vm.pressEnd(board.id, t) },
                     onSlider = { v -> vm.slider(board.id, t, v) },

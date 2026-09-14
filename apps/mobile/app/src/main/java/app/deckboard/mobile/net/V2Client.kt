@@ -28,6 +28,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -84,14 +85,7 @@ class V2Client(
     private var webSocket: WebSocket? = null
     private var requestCounter = 0
 
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        // Liveness: OkHttp pings every KEEPALIVE_SECONDS and fails the
-        // socket when a pong is missing (keepalive is protocol-level,
-        // docs/protocol-v2.md §7 - no app frames).
-        .pingInterval(KEEPALIVE_SECONDS, TimeUnit.SECONDS)
-        .build()
+    private val http: OkHttpClient = Companion.http
 
     fun connect() {
         val auth = when {
@@ -198,39 +192,39 @@ class V2Client(
         // Dispatch on the frame type first: acks ECHO the request's type
         // (the welcome that confirms the hello and interaction acks carry
         // `ack` too), so matching on `ack` alone would swallow them.
-        val payload = frame.payload
+        val payload = frame.payload ?: return
         when (frame.type) {
             V2.TYPE_WELCOME -> {
-                val welcome = json.decodeFromString(Welcome.serializer(), payload.toString())
+                val welcome = json.decodeFromJsonElement(Welcome.serializer(), payload)
                 _state.value = ConnState.Connected(host, port)
                 _events.trySend(V2Event.WelcomeReady(welcome, welcome.token))
             }
             V2.TYPE_BOARDS_SYNC -> {
-                val sync = json.decodeFromString(BoardsSync.serializer(), payload.toString())
+                val sync = json.decodeFromJsonElement(BoardsSync.serializer(), payload)
                 _events.trySend(V2Event.Boards(sync.generation, sync.boards))
             }
             V2.TYPE_BOARDS_DELTA -> {
-                val delta = json.decodeFromString(BoardsDelta.serializer(), payload.toString())
+                val delta = json.decodeFromJsonElement(BoardsDelta.serializer(), payload)
                 val ops = delta.ops.mapNotNull { BoardOp.from(it, json) }
                 _events.trySend(V2Event.Delta(delta.generation, ops))
             }
             V2.TYPE_BOARD_OPEN -> {
-                val open = json.decodeFromString(BoardOpen.serializer(), payload.toString())
+                val open = json.decodeFromJsonElement(BoardOpen.serializer(), payload)
                 _events.trySend(V2Event.SwitchBoard(open.board))
             }
             V2.TYPE_STATE_SYNC -> {
-                val sync = json.decodeFromString(StateSync.serializer(), payload.toString())
+                val sync = json.decodeFromJsonElement(StateSync.serializer(), payload)
                 _events.trySend(V2Event.State(sync.values, sync.series))
             }
             V2.TYPE_STATE_PATCH -> {
-                val patch = json.decodeFromString(
+                val patch = json.decodeFromJsonElement(
                     app.deckboard.mobile.proto.StatePatch.serializer(),
-                    payload.toString(),
+                    payload,
                 )
                 _events.trySend(V2Event.Patch(patch.changes))
             }
             V2.TYPE_ERROR -> {
-                val error = json.decodeFromString(ErrorPayload.serializer(), payload.toString())
+                val error = json.decodeFromJsonElement(ErrorPayload.serializer(), payload)
                 Log.w(TAG, "server error: ${error.code} ${error.message.orEmpty()}")
                 _events.trySend(V2Event.ServerError(error.code, error.message))
                 if (FATAL_CODES.contains(error.code)) {
@@ -250,6 +244,18 @@ class V2Client(
 
     companion object {
         private const val TAG = "V2Client"
+
+        /** One client per process. OkHttp keeps its own thread pools and
+         *  connection pool; building an instance per reconnect would leak
+         *  them until GC on a device that reconnects for a living. */
+        val http: OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            // Liveness: OkHttp pings every KEEPALIVE_SECONDS and fails the
+            // socket when a pong is missing (keepalive is protocol-level,
+            // docs/protocol-v2.md §7 - no app frames).
+            .pingInterval(KEEPALIVE_SECONDS, TimeUnit.SECONDS)
+            .build()
         const val CLIENT = "deckboard-mobile"
         const val VERSION = "0.2.0"
         /** OkHttp ping interval; a missing pong fails the socket. */

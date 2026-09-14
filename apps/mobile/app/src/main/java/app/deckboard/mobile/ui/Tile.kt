@@ -9,6 +9,7 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -34,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -41,6 +43,7 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.times
@@ -85,6 +88,7 @@ fun Tile(
     liveText: String?,
     series: List<Double>,
     items: List<String>,
+    image: ImageBitmap? = null,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
     onSlider: (Float) -> Unit,
@@ -186,6 +190,7 @@ fun Tile(
                     iconFamily = iconFamily,
                     iconColor = iconColor,
                     titleColor = titleColor,
+                    image = image,
                     liveText = if (template == "toggle") liveText else null,
                     onPressStart = {
                         pressed = true
@@ -209,6 +214,7 @@ private fun ButtonTile(
     iconFamily: FontFamily,
     iconColor: Color,
     titleColor: Color,
+    image: ImageBitmap?,
     liveText: String?,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
@@ -235,8 +241,18 @@ private fun ButtonTile(
             },
         contentAlignment = Alignment.Center,
     ) {
+            // an attached image replaces the glyph as the face; the title
+            // stays so the key still reads at a glance
+            if (image != null) {
+                Image(
+                    bitmap = image,
+                    contentDescription = tile.style?.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize(),
+                )
+            }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            if (unicode.isNotEmpty()) {
+            if (image == null && unicode.isNotEmpty()) {
                 Text(
                     text = faChar(unicode),
                     fontFamily = iconFamily,

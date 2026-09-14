@@ -12,6 +12,7 @@
 
 package app.deckboard.mobile.proto
 
+import androidx.compose.runtime.Immutable
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -105,6 +106,7 @@ data class ErrorPayload(
     val message: String? = null,
 )
 
+@Immutable
 @Serializable
 data class Board(
     val id: Long,
@@ -119,6 +121,7 @@ data class Board(
 /** Board background: `{"kind":"color","color":..}` or
  *  `{"kind":"asset","hash":..}` - one flat class, the kind picks the
  *  meaningful field. */
+@Immutable
 @Serializable
 data class Background(
     val kind: String,
@@ -134,6 +137,7 @@ internal fun JsonElement.contentOrNull(): String? =
     (this as? JsonPrimitive)?.let { runCatching { it.content }.getOrNull() }
 
 /** One tile: placement + widget manifest flattened into one object. */
+@Immutable
 @Serializable
 data class Tile(
     val id: Long,
@@ -159,12 +163,14 @@ data class Tile(
         (params as? JsonObject)?.get(name)?.contentOrNull()
 }
 
+@Immutable
 @Serializable
 data class StateRef(
     val channel: String,
     val shape: String = V2.SHAPE_SCALAR,
 )
 
+@Immutable
 @Serializable
 data class Style(
     val color: String? = null,

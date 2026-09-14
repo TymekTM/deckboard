@@ -8,7 +8,10 @@ package app.deckboard.mobile.state
 
 import android.app.Application
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.util.Log
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import app.deckboard.mobile.net.ConnState
 import app.deckboard.mobile.net.V2Client
@@ -18,12 +21,18 @@ import app.deckboard.mobile.proto.BoardOp
 import app.deckboard.mobile.proto.Tile
 import app.deckboard.mobile.proto.V2
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 
 data class ServerConfig(
     val host: String,
@@ -69,6 +78,15 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     private val _series = MutableStateFlow<Map<String, List<Double>>>(emptyMap())
     val series: StateFlow<Map<String, List<Double>>> = _series
 
+    /** Decoded tile/board images by asset hash (content-addressed, so the
+     *  map is safe across reconnects to any server). */
+    private val _bitmaps = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
+    val bitmaps: StateFlow<Map<String, ImageBitmap>> = _bitmaps
+
+    /** Hashes with a fetch in flight or failed this process; failures are
+     *  not retried - a 404 stays a 404 until the app restarts. */
+    private val assetFetches = mutableSetOf<String>()
+
     private var client: V2Client? = null
     private var eventJob: Job? = null
     private var reconnectAttempts = 0
@@ -81,6 +99,32 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         // to enter a fresh code.
         if (!_config.value.token.isNullOrBlank()) {
             connect()
+        }
+    }
+
+    override fun onCleared() {
+        disconnect()
+        scope.cancel()
+    }
+
+    /** Kick off a fetch for [hash] once. Reads [ServerConfig.token], so
+     *  nothing loads before the device is authenticated. */
+    fun ensureAsset(hash: String) {
+        if (_bitmaps.value.containsKey(hash) || !assetFetches.add(hash)) return
+        val cfg = _config.value
+        val token = cfg.token ?: return
+        scope.launch {
+            val bitmap = withContext(Dispatchers.IO) {
+                runCatching {
+                    val url = "http://${cfg.host}:${cfg.port}/assets/$hash?token=$token"
+                    sharedHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                        if (resp.isSuccessful) BitmapFactory.decodeStream(resp.body?.byteStream()) else null
+                    }
+                }.getOrNull()
+            }
+            if (bitmap != null) {
+                _bitmaps.value = _bitmaps.value + (hash to bitmap.asImageBitmap())
+            }
         }
     }
 
@@ -273,7 +317,6 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun scheduleReconnect() {
-        if (reconnectAttempts >= MAX_RECONNECT) return
         // Pairing codes are one-time: a dropped pairing socket cannot be
         // retried with the same code, so only paired devices reconnect.
         val token = _config.value.token
@@ -329,6 +372,10 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val TAG = "DeckboardViewModel"
-        private const val MAX_RECONNECT = 10
+
+        /** Shared by reconnects and asset fetches - see V2Client.http. */
+        private val sharedHttp = OkHttpClient.Builder()
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .build()
     }
 }
