@@ -21,9 +21,11 @@ class MainActivity : ComponentActivity() {
             DeckboardTheme {
                 val vm: DeckboardViewModel = viewModel()
                 val conn by vm.connState.collectAsState()
-                // Only a completed hello/welcome means the board screen has
-                // data; Connecting stays on the connect screen (spinner).
-                if (conn is app.deckboard.mobile.net.ConnState.Connected) {
+                val boards by vm.boards.collectAsState()
+                // With a snapshot on screen the deck stays up while the link
+                // is down (BoardScreen shows the retrying banner); the
+                // connect screen only owns the no-data states.
+                if (conn is app.deckboard.mobile.net.ConnState.Connected || boards.isNotEmpty()) {
                     BoardScreen(vm)
                 } else {
                     ConnectScreen(vm, onConnected = {})

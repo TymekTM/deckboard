@@ -5,10 +5,21 @@
 
 package app.deckboard.mobile.ui
 
+import android.os.Build
+
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -16,6 +27,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
@@ -29,12 +43,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.deckboard.mobile.net.ConnState
 import app.deckboard.mobile.net.displayText
 import app.deckboard.mobile.net.isActiveValue
 import app.deckboard.mobile.proto.Board
@@ -44,8 +62,21 @@ import app.deckboard.mobile.state.DeckboardViewModel
 @Composable
 fun BoardScreen(vm: DeckboardViewModel) {
     val board by vm.currentBoard.collectAsState()
+    val conn by vm.connState.collectAsState()
+    val boards by vm.boards.collectAsState()
+    val attempt by vm.reconnectAttempt.collectAsState()
 
-    Box(Modifier.fillMaxSize().background(DeckColors.background)) {
+    val status = statusFor(conn, boards.isNotEmpty(), attempt)
+
+    // the deck content sits in its own layer so a link overlay can blur it
+    // where the platform supports it (RenderEffect needs API 31; older
+    // devices get a deeper dim instead)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(DeckColors.background)
+            .then(if (status != null) Modifier.blur(16.dp) else Modifier),
+    ) {
         board?.let { b ->
             BoardGrid(vm, b, Modifier.fillMaxSize())
         }
@@ -53,6 +84,58 @@ fun BoardScreen(vm: DeckboardViewModel) {
             BoardChip(vm)
         }
     }
+
+    if (status != null) {
+        Box(Modifier.fillMaxSize()) {
+            // full-screen dim; it also eats taps so a half-live deck cannot
+            // accept gestures for frames that will never reach the server
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .background(Color.Black.copy(alpha = if (Build.VERSION.SDK_INT >= 31) 0.45f else 0.72f))
+                    .pointerInput(Unit) { detectTapGestures { } },
+            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.align(Alignment.Center).fillMaxWidth(),
+            ) {
+                RingSpinner()
+                Text(
+                    text = status,
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+        }
+    }
+}
+
+/** Static busy ring: deck tablets often run with animator scales off,
+ *  which freezes an indeterminate spinner into an invisible dot. A fixed
+ *  300-degree arc reads as "busy" on every device. */
+@Composable
+private fun RingSpinner(modifier: Modifier = Modifier) {
+    Canvas(modifier.size(34.dp)) {
+        drawArc(
+            color = Color.White,
+            startAngle = -90f,
+            sweepAngle = 300f,
+            useCenter = false,
+            style = Stroke(width = 6f, cap = StrokeCap.Round),
+        )
+    }
+}
+
+/** Center status for the link overlay, or null when the link is healthy. */
+private fun statusFor(conn: ConnState, hasBoards: Boolean, attempt: Int): String? = when {
+    conn is ConnState.Connected && !hasBoards -> "Syncing boards..."
+    conn is ConnState.Connected -> null
+    conn is ConnState.Connecting ->
+        if (attempt > 0) "Reconnecting (attempt $attempt)..." else "Connecting..."
+    else ->
+        if (attempt > 0) "Disconnected - retrying (attempt $attempt)..."
+        else "Disconnected - retrying..."
 }
 
 /** Small translucent board switcher in the corner - replaces the top bar. */

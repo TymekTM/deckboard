@@ -111,7 +111,18 @@ fun ConnectScreen(vm: DeckboardViewModel, onConnected: () -> Unit) {
 
         when (conn) {
             is ConnState.Connecting -> {
-                CircularProgressIndicator(Modifier.padding(16.dp))
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(16.dp),
+                ) {
+                    CircularProgressIndicator()
+                    Text(
+                        text = "Connecting to ${cfg.host}:${cfg.port}...",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                }
             }
             is ConnState.Failed -> {
                 Text(

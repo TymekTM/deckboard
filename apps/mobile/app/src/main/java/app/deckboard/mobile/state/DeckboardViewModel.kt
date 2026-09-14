@@ -60,6 +60,11 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     private val _connState = MutableStateFlow<ConnState>(ConnState.Disconnected)
     val connState: StateFlow<ConnState> = _connState
 
+    /** Reconnect attempts since the last successful session; the banner
+     *  shows it so the retry loop is visible instead of mysterious. */
+    private val _reconnectAttempt = MutableStateFlow(0)
+    val reconnectAttempt: StateFlow<Int> = _reconnectAttempt
+
     private val _boards = MutableStateFlow<List<Board>>(emptyList())
     val boards: StateFlow<List<Board>> = _boards
 
@@ -190,15 +195,19 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         client = null
         pendingPairCode = null
         _connState.value = ConnState.Disconnected
-        _boards.value = emptyList()
-        _currentBoard.value = null
-        _values.value = emptyMap()
-        _series.value = emptyMap()
+        // The last board stays on screen (dimmed by the status banner):
+        // every reconnect resyncs from scratch, so the snapshot cannot go
+        // stale in any way the protocol does not overwrite immediately.
     }
 
     fun forgetPairing() {
         saveConfig(_config.value.copy(token = null))
         disconnect()
+        _boards.value = emptyList()
+        _currentBoard.value = null
+        _values.value = emptyMap()
+        _series.value = emptyMap()
+        _bitmaps.value = emptyMap()
     }
 
     private fun observeEvents(client: V2Client) {
@@ -207,7 +216,10 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
                 client.state.collect { st ->
                     _connState.value = st
                     when (st) {
-                        is ConnState.Connected -> reconnectAttempts = 0
+                        is ConnState.Connected -> {
+                            reconnectAttempts = 0
+                            _reconnectAttempt.value = 0
+                        }
                         is ConnState.Failed, is ConnState.Disconnected -> scheduleReconnect()
                         else -> {}
                     }
@@ -308,6 +320,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         reconnectAttempts++
+        _reconnectAttempt.value = reconnectAttempts
         scope.launch {
             delay(reconnectAttempts.coerceAtMost(6) * 2_000L)
             val st = _connState.value
