@@ -236,13 +236,20 @@ async fn handle_event(
                 return;
             };
             let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
-            struct Sink(tokio::sync::mpsc::UnboundedSender<i64>);
+            let (val_tx, mut val_rx) = mpsc::unbounded_channel::<(String, String)>();
+            struct Sink(
+                tokio::sync::mpsc::UnboundedSender<i64>,
+                tokio::sync::mpsc::UnboundedSender<(String, String)>,
+            );
             impl deckboard_actions::EventSink for Sink {
                 fn change_board(&mut self, board_id: i64) {
                     let _ = self.0.send(board_id);
                 }
+                fn app_value(&mut self, key: &str, value: &str) {
+                    let _ = self.1.send((key.to_string(), value.to_string()));
+                }
             }
-            let mut sink = Sink(tx);
+            let mut sink = Sink(tx, val_tx);
             // actions may sleep (multiaction delays): keep them off the
             // async workers
             let backend = state.backend.clone();
@@ -255,6 +262,11 @@ async fn handle_event(
                     .hub
                     .broadcast("change_board", Some(&format!(r#"{{"boardId":{board_id}}}"#)))
                     .await;
+            }
+            while let Ok((key, value)) = val_rx.try_recv() {
+                let data = serde_json::json!({ key: value }).to_string();
+                let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+                state.hub.broadcast("app_status_update", Some(&payload)).await;
             }
         }
         "exec_slider" => {

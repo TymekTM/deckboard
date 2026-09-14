@@ -70,7 +70,24 @@ async fn main() -> anyhow::Result<()> {
             command: None,
         });
     }
-    let backend = Arc::new(SqlBackend::new(db).with_extensions(ext_manager.clone()));
+    // Same for the native Discord RPC (colors/icons/modes from the
+    // discord-deckboard package; the custom-value mode is what makes the
+    // mute/deaf tiles watch their pushed ON/OFF label).
+    for (value, icon, color, mode) in deckboard_discord::input_declarations() {
+        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+            value: value.to_string(),
+            icon: Some(icon.to_string()),
+            color: Some(color.to_string()),
+            font_icon: Some("fas".to_string()),
+            mode: mode.map(str::to_string),
+            command: None,
+        });
+    }
+    let backend = Arc::new(
+        SqlBackend::new(db)
+            .with_extensions(ext_manager.clone())
+            .with_discord(deckboard_discord::DiscordConfig::from_settings(&settings)),
+    );
 
     let state = Arc::new(AppState {
         hub: Arc::new(Hub::new()),

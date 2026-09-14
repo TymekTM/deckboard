@@ -133,6 +133,9 @@ pub trait Input {
 /// Events pushed back to connected clients (e.g. multiaction board switch).
 pub trait EventSink {
     fn change_board(&mut self, board_id: i64);
+    /// Push a custom-value label (e.g. `toggle-microphone` -> "OFF") to
+    /// clients as APP_CUSTOM_VALUE. Default no-op: not every action pushes.
+    fn app_value(&mut self, _key: &str, _value: &str) {}
 }
 
 /// No-op sink for tests that don't care about broadcasts.

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use deckboard_actions::{Command, EnigoInput, EventSink};
 use deckboard_db::{ButtonRow, Db};
+use deckboard_discord::DiscordConfig;
 use deckboard_ext::ExtManager;
 use deckboard_legacy::service::Backend;
 use deckboard_vm::VoicemeeterState;
@@ -21,6 +22,8 @@ pub struct SqlBackend {
     /// Native Voicemeeter remote (replaces the ffi-napi based extension,
     /// which cannot load in our JS host).
     voicemeeter: Mutex<VoicemeeterState>,
+    /// Discord local-RPC credentials (the original app's saved OAuth token).
+    discord: Mutex<Option<DiscordConfig>>,
 }
 
 impl SqlBackend {
@@ -30,7 +33,13 @@ impl SqlBackend {
             input: Mutex::new(None),
             extensions: None,
             voicemeeter: Mutex::new(VoicemeeterState::new()),
+            discord: Mutex::new(None),
         }
+    }
+
+    pub fn with_discord(mut self, config: Option<DiscordConfig>) -> Self {
+        self.discord = Mutex::new(config);
+        self
     }
 
     pub fn with_extensions(mut self, extensions: Arc<ExtManager>) -> Self {
@@ -78,6 +87,35 @@ impl SqlBackend {
             .execute(&cmd.kind, &args);
         if let Err(e) = &result {
             tracing::warn!(kind = %cmd.kind, error = %e, "voicemeeter action failed");
+        }
+        true
+    }
+
+    /// Run one Discord action over the local RPC pipe. Returns true when
+    /// the action kind belongs to Discord (even on error - logged).
+    fn exec_discord(
+        &self,
+        cmd: &Command,
+        sink: &mut dyn EventSink,
+    ) -> bool {
+        if !deckboard_discord::is_discord_action(&cmd.kind) {
+            return false;
+        }
+        let config = self.discord.lock().unwrap().clone();
+        let Some(config) = config else {
+            tracing::warn!(kind = %cmd.kind, "discord not configured (no client id / access token in settings)");
+            return true;
+        };
+        let args = cmd
+            .command
+            .as_deref()
+            .and_then(|c| serde_json::from_str(c).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let result = deckboard_discord::execute(&config, &cmd.kind, &args, |key, value| {
+            sink.app_value(&key, &value);
+        });
+        if let Err(e) = result {
+            tracing::warn!(kind = %cmd.kind, error = %e, "discord action failed");
         }
         true
     }
@@ -137,7 +175,7 @@ impl Backend for SqlBackend {
             button.options.as_deref(),
             &button.mode,
         );
-        if self.exec_extension(&cmd, None) || self.exec_voicemeeter(&cmd) {
+        if self.exec_extension(&cmd, None) || self.exec_voicemeeter(&cmd) || self.exec_discord(&cmd, sink) {
             return;
         }
         self.with_input(|input| {

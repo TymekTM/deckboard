@@ -567,6 +567,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "deckboard-discord"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "deckboard-ext"
 version = "0.1.0"
 dependencies = [
@@ -615,6 +623,7 @@ dependencies = [
  "axum",
  "deckboard-actions",
  "deckboard-db",
+ "deckboard-discord",
  "deckboard-ext",
  "deckboard-legacy",
  "deckboard-vm",
