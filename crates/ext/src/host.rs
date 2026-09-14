@@ -233,6 +233,12 @@ impl ExtRuntime {
         Duration::from_millis(min.clamp(100, 60_000))
     }
 
+    /// Whether any timers are registered, i.e. the runtime must stay
+    /// resident for host-driven ticking.
+    pub fn has_timers(&self) -> bool {
+        !self.intervals.is_empty()
+    }
+
     #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root

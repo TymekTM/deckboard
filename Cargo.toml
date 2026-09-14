@@ -21,3 +21,10 @@ open = "5"
 rand = "0.8"
 futures-util = "0.3"
 tokio-tungstenite = "0.24"
+
+# Desktop app: smaller mapped code image and fewer resident pages matter
+# more than peak throughput here.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

@@ -55,6 +55,21 @@ pub fn run() {
         )
         .init();
 
+    // Cap the async worker pool: the tokio default is one worker per logical
+    // core (28 threads on a big desktop), each costing stack plus runtime
+    // bookkeeping. Four keep the editor and the embedded legacy server
+    // responsive; blocking work (SQLite, extensions, COM) runs on the
+    // separate spawn_blocking pool either way.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    tauri::async_runtime::set(runtime.handle().clone());
+    // The global handle needs a live runtime behind it for the whole process
+    // lifetime, so the owner is intentionally never dropped.
+    std::mem::forget(runtime);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
@@ -67,6 +82,7 @@ pub fn run() {
             app.manage(state);
 
             build_tray(app.handle())?;
+            create_main_window(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -278,6 +294,26 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
 }
 
 // ---- tray + hotkey ---------------------------------------------------------
+
+/// The main window is built here instead of `tauri.conf.json` because the
+/// WebView2 argument list is only reachable through the builder API, and a
+/// custom list replaces the default one - so the stock feature disables are
+/// repeated alongside the memory-oriented flags (no background networking,
+/// no component updates, capped HTTP disk cache).
+fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
+    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+        .title("Deckboard")
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(900.0, 600.0)
+        .theme(Some(tauri::Theme::Dark))
+        .additional_browser_args(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+             --disable-background-networking --disable-component-update \
+             --disk-cache-size=33554432",
+        )
+        .build()?;
+    Ok(())
+}
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{CheckMenuItem, Menu, MenuItem};

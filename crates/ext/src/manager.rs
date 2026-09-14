@@ -5,10 +5,19 @@
 //! extension runtime is owned by a dedicated OS thread that answers
 //! requests over an `std::sync::mpsc` channel. This mirrors the original
 //! Electron design where every extension ran in its own hidden window.
+//!
+//! Memory model: a runtime is loaded eagerly once to read its metadata
+//! (name, actions, inputs) and immediately released again unless it
+//! registered timers. From then on an interpreter exists only while an
+//! action runs on it, so stateless extensions cost no resident memory
+//! between actions. Extensions that keep state must persist it themselves
+//! (e.g. to a file) - re-executing the entry module on the next action
+//! restores it, which is the contract the bundled extensions already
+//! follow (the variables extension writes JSON on every change).
 
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -328,6 +337,21 @@ type LoadedExt = (
     mpsc::Sender<ExtRequest>,
 );
 
+/// Everything an extension thread needs to (re)create its interpreter.
+struct ExtSpec {
+    root: PathBuf,
+    package: String,
+    configs: Value,
+}
+
+/// An extension thread's runtime slot. The interpreter is held only while
+/// registered timers make it "live"; between actions stateless extensions
+/// release their Boa heap and the thread parks on an empty channel.
+struct ExtSlot {
+    spec: ExtSpec,
+    live: Option<ExtRuntime>,
+}
+
 fn load_extension(
     path: &std::path::Path,
     package: &str,
@@ -337,9 +361,11 @@ fn load_extension(
     // extract to a temp dir before spawning (plain IO, thread-agnostic)
     let source = crate::source::PackageSource::open(path, package.to_string())
         .map_err(|e| crate::host::HostError::Other(e.to_string()))?;
-    let root = source.root.clone();
-    let package = package.to_string();
-    let configs = configs.clone();
+    let spec = ExtSpec {
+        root: source.root.clone(),
+        package: package.to_string(),
+        configs: configs.clone(),
+    };
 
     // The interpreter is created inside the thread and never crosses a
     // thread boundary afterwards (Boa is !Send).
@@ -350,13 +376,17 @@ fn load_extension(
         .name(format!("ext-{package}"))
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            let result = ExtRuntime::load(&root, &package, &configs);
+            let result = ExtRuntime::load(&spec.root, &spec.package, &spec.configs);
             match result {
                 Ok(rt) => {
                     let inputs = parse_inputs(&rt.inputs);
                     let ready = Ok((rt.name.clone(), rt.actions.clone(), inputs));
                     if res_tx.send(ready).is_ok() {
-                        runtime_loop(rt, req_rx, events_tx);
+                        // Hold the interpreter only when load-time timers
+                        // make it live (e.g. clock faces); otherwise drop
+                        // the heap until the first action needs it.
+                        let live = if rt.has_timers() { Some(rt) } else { None };
+                        runtime_loop(ExtSlot { spec, live }, req_rx, events_tx);
                     }
                 }
                 Err(e) => {
@@ -373,22 +403,30 @@ fn load_extension(
 }
 
 fn runtime_loop(
-    mut rt: ExtRuntime,
+    mut slot: ExtSlot,
     req_rx: mpsc::Receiver<ExtRequest>,
     events_tx: tokio_mpsc::UnboundedSender<ExtEvent>,
 ) {
-    let mut next_tick = Instant::now();
     loop {
-        let now = Instant::now();
-        if next_tick <= now {
+        // Timers only run while a live interpreter is held; without one the
+        // thread blocks on recv() with no wakeups at all.
+        let wait = if let Some(rt) = slot.live.as_mut() {
             for ev in rt.tick_due() {
                 ExtManager::forward(&events_tx, ev);
             }
-            next_tick = now
-                + rt.tick_granularity()
-                    .clamp(Duration::from_millis(50), Duration::from_secs(1));
-        }
-        match req_rx.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
+            rt.tick_granularity()
+                .clamp(Duration::from_millis(50), Duration::from_secs(1))
+        } else {
+            Duration::ZERO
+        };
+        let request = if wait.is_zero() {
+            req_rx
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+        } else {
+            req_rx.recv_timeout(wait)
+        };
+        match request {
             Ok(ExtRequest::Execute {
                 action,
                 args,
@@ -396,10 +434,35 @@ fn runtime_loop(
             }) => {
                 // execute() drains setValue/interval events itself; the
                 // manager forwards whatever the reply carries
-                let _ = reply.send(rt.execute(&action, &args));
+                let _ = reply.send(run_action(&mut slot, &action, &args));
             }
             Ok(ExtRequest::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
+}
+
+/// Execute an action on the slot's interpreter, (re)creating it on demand.
+/// The interpreter is released right after the run unless the action
+/// registered timers, so resident cost between actions is zero. Re-running
+/// the entry module is safe because extensions keep their own state on
+/// disk (see the module docs).
+fn run_action(
+    slot: &mut ExtSlot,
+    action: &str,
+    args: &Value,
+) -> Result<Vec<HostEvent>, crate::host::HostError> {
+    if slot.live.is_none() {
+        slot.live = Some(ExtRuntime::load(
+            &slot.spec.root,
+            &slot.spec.package,
+            &slot.spec.configs,
+        )?);
+    }
+    let rt = slot.live.as_mut().expect("runtime loaded above");
+    let events = rt.execute(action, args)?;
+    if !rt.has_timers() {
+        slot.live = None;
+    }
+    Ok(events)
 }
