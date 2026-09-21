@@ -33,8 +33,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import app.deckboard.mobile.proto.Board
 import app.deckboard.mobile.state.DeckboardViewModel
 
@@ -100,6 +98,7 @@ private fun BoardChip(vm: DeckboardViewModel) {
 @Composable
 private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) {
     val liveValues by vm.customValues.collectAsState()
+    val liveScalars by vm.liveScalars.collectAsState()
     val histories by vm.valueHistory.collectAsState()
     // toggle positions are client-side state like in the stock app
     val positions = remember(board.id) { mutableStateMapOf<Long, Int>() }
@@ -124,21 +123,15 @@ private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) 
                 // command, then the type itself
                 val watchKey = s.extra.ifEmpty { s.command }.ifEmpty { s.type }
                 val live = liveValues[watchKey]
-                // payloads are scalars ("14:33") or objects ({value, suffix});
-                // custom-value tiles show value + suffix, graph tiles read
-                // the series from histories
-                val liveObj = live as? JsonObject
-                val liveText = live?.let { el ->
-                    (liveObj?.get("value") ?: el).let { runCatching { it.jsonPrimitive.content }.getOrNull() }
-                }
-                val liveSuffix = liveObj?.get("suffix")?.let {
-                    runCatching { it.jsonPrimitive.content }.getOrNull()
-                }
+                // text + suffix arrive pre-parsed from the ViewModel (once
+                // per push, not per recomposition); graph tiles read the
+                // series from histories
+                val scalar = liveScalars[watchKey]
                 Tile(
                     shortcut = s,
                     tileSize = tile,
-                    customValue = liveText,
-                    suffix = liveSuffix,
+                    customValue = scalar?.text,
+                    suffix = scalar?.suffix,
                     history = histories[watchKey] ?: emptyList(),
                     listItems = listItems(s, live),
                     position = pos,

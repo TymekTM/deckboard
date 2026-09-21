@@ -27,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -343,10 +344,22 @@ private fun SliderTile(
     onSlider: (Float) -> Unit,
 ) {
     var value by remember(shortcut.id) { mutableFloatStateOf(0.5f) }
+    // Drag events fire hundreds of times per gesture and every send is a
+    // websocket round-trip the server executes - ship at most one value
+    // per 30 ms plus the final one on release.
+    var lastSentAt by remember(shortcut.id) { mutableLongStateOf(0L) }
     val fill = if (shortcut.color2.isNotEmpty()) {
         hex(shortcut.color2, baseColor.copy(alpha = 0.6f))
     } else {
         baseColor.copy(alpha = 0.55f)
+    }
+
+    fun pushThrottled(v: Float, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (force || now - lastSentAt >= 30L) {
+            lastSentAt = now
+            onSlider(v)
+        }
     }
 
     Box(
@@ -356,12 +369,17 @@ private fun SliderTile(
                 detectDragGestures(
                     onDragStart = { offset ->
                         value = (1f - offset.y / size.height).coerceIn(0f, 1f)
-                        onSlider(value)
+                        pushThrottled(value, force = true)
                     },
                     onDrag = { change, _ ->
                         change.consume()
                         value = (1f - change.position.y / size.height).coerceIn(0f, 1f)
-                        onSlider(value)
+                        pushThrottled(value)
+                    },
+                    onDragEnd = {
+                        // converge: the last sampled value always reaches
+                        // the server, throttling only smooths the path
+                        pushThrottled(value, force = true)
                     },
                 )
             },

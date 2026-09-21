@@ -8,12 +8,12 @@ import android.app.Application
 import android.content.Context
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import app.deckboard.mobile.net.ConnState
 import app.deckboard.mobile.net.DeckEvent
 import app.deckboard.mobile.net.DeckboardClient
 import app.deckboard.mobile.proto.Board
 import app.deckboard.mobile.proto.Shortcut
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,8 +28,6 @@ import kotlinx.serialization.json.jsonPrimitive
 data class ServerConfig(val host: String, val port: Int, val accessKey: String)
 
 class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
-
-    private val scope = CoroutineScope(Job())
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -57,9 +55,16 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     private val _customValues = MutableStateFlow<Map<String, JsonElement>>(emptyMap())
     val customValues: StateFlow<Map<String, JsonElement>> = _customValues
 
+    /** One parsed `value`/`suffix` label per watch key, computed once per
+     * push so tiles render without re-parsing JSON on recomposition. */
+    data class LiveScalar(val text: String?, val suffix: String?)
+
+    private val _liveScalars = MutableStateFlow<Map<String, LiveScalar>>(emptyMap())
+    val liveScalars: StateFlow<Map<String, LiveScalar>> = _liveScalars
+
     /** Value series per key, mirroring the original `setCustomValues`:
-     *  object payloads with a `value` field append to a history capped at
-     *  10 entries; scalars replace in place. */
+     * object payloads with a `value` field append to a history capped at
+     * 10 entries; scalars replace in place. */
     private val _valueHistory = MutableStateFlow<Map<String, List<Float>>>(emptyMap())
     val valueHistory: StateFlow<Map<String, List<Float>>> = _valueHistory
 
@@ -69,6 +74,10 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     private var client: DeckboardClient? = null
     private var eventJob: Job? = null
     private var reconnectAttempts = 0
+
+    /** Bumped by every connect(); a pending reconnect from an older cycle
+     * no-ops instead of racing the fresh connection. */
+    private var connectGeneration = 0
 
     fun saveConfig(cfg: ServerConfig) {
         prefs.edit()
@@ -80,6 +89,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun connect() {
+        connectGeneration++
         disconnect()
         val cfg = _config.value
         val c = DeckboardClient(cfg.host, cfg.port, cfg.accessKey)
@@ -98,8 +108,14 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         _customValues.value = emptyMap()
     }
 
+    override fun onCleared() {
+        // Release the socket and the client's ping executor thread; the
+        // scope itself is already being cancelled.
+        disconnect()
+    }
+
     private fun observeEvents(client: DeckboardClient) {
-        eventJob = scope.launch {
+        eventJob = viewModelScope.launch {
             launch {
                 client.state.collect { st ->
                     _connState.value = st
@@ -134,6 +150,8 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
                         is DeckEvent.AppStatus -> {
                             if (ev.app == "APP_CUSTOM_VALUE") {
                                 _customValues.value = _customValues.value + ev.data
+                                _liveScalars.value = _liveScalars.value +
+                                    ev.data.mapValues { (_, el) -> parseScalar(el) }
                                 _valueHistory.value = updateHistory(_valueHistory.value, ev.data)
                             }
                         }
@@ -145,11 +163,25 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Payloads are scalars ("14:33") or objects ({value, suffix}). */
+    private fun parseScalar(el: JsonElement): LiveScalar {
+        val obj = el as? kotlinx.serialization.json.JsonObject
+        val text = (obj?.get("value") ?: el)
+            .let { runCatching { it.jsonPrimitive.content }.getOrNull() }
+        val suffix = obj?.get("suffix")
+            ?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }
+        return LiveScalar(text, suffix)
+    }
+
     private fun scheduleReconnect() {
         if (reconnectAttempts >= MAX_RECONNECT) return
         reconnectAttempts++
-        scope.launch {
+        val generation = connectGeneration
+        viewModelScope.launch {
             delay(reconnectAttempts.coerceAtMost(6) * 2_000L)
+            // A newer connect() cycle (user retry or a scheduled reconnect
+            // that already fired) took over while we waited.
+            if (generation != connectGeneration) return@launch
             val st = _connState.value
             if (st is ConnState.Failed || st is ConnState.Disconnected) {
                 Log.i(TAG, "reconnect attempt $reconnectAttempts")

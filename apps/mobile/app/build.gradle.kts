@@ -35,9 +35,9 @@ android {
     }
     // Golden fixtures shared with the Rust contract tests
     // (crates/proto/tests/fixtures) so both stacks parse the same wire
-    // examples.
+    // examples. Path is relative to this app module (apps/mobile/app).
     sourceSets.getByName("test") {
-        resources.srcDir("../../crates/proto/tests/fixtures")
+        resources.srcDir("../../../crates/proto/tests/fixtures")
     }
 }
 

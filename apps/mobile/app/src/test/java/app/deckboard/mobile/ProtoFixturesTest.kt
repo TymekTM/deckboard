@@ -26,7 +26,8 @@ class ProtoFixturesTest {
         return json.decodeFromString(Frame.serializer(), stream.readBytes().decodeToString())
     }
 
-    private fun Frame.payloadObject(): JsonObject = jsonObject
+    private fun Frame.payloadObject(): JsonObject =
+        payload?.jsonObject ?: JsonObject(emptyMap())
 
     @Test
     fun envelopeCarriesProtocolVersion() {
@@ -121,7 +122,8 @@ class ProtoFixturesTest {
         val patch = json.decodeFromString(StatePatch.serializer(), frame.payloadObject().toString())
         assertEquals(3, patch.changes.size)
         assertEquals("ext.si-cpu-usage", patch.changes[1].channel)
-        assertEquals(3, patch.changes[2].value.jsonArray.size) // list channel
+        // list channel: assert the content, not just the shape
+        assertEquals(listOf("a", "b"), patch.changes[2].value.jsonArray.map { it.jsonPrimitive.content })
     }
 
     @Test
