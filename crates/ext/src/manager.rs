@@ -15,9 +15,10 @@
 //! restores it, which is the contract the bundled extensions already
 //! follow (the variables extension writes JSON on every change).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -147,13 +148,41 @@ impl ExtManager {
             .collect();
         packages.sort();
 
+        // Spawn every package first so their load times overlap; the old
+        // sequential wait let one hung bundle (a broken asar, say) block
+        // app startup forever.
+        let (ready_tx, ready_rx) = mpsc::channel::<ReadyReport>();
+        let mut dispatches = Vec::new();
         for (package, path) in packages {
             let configs = settings
                 .get(&package)
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Default::default()));
-            match load_extension(&path, &package, &configs, events_tx.clone()) {
-                Ok((name, actions, inputs, dispatch)) => {
+            let dispatch =
+                spawn_extension(&path, &package, &configs, events_tx.clone(), ready_tx.clone());
+            dispatches.push((package, dispatch));
+        }
+        drop(ready_tx);
+
+        let deadline = Instant::now() + LOAD_DEADLINE;
+        let mut ready: HashMap<String, ReadyResult> = HashMap::new();
+        while ready.len() < dispatches.len() {
+            let Some(wait) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            match ready_rx.recv_timeout(wait) {
+                Ok((package, result)) => {
+                    ready.insert(package, result);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+
+        for (package, dispatch) in dispatches {
+            match ready.remove(&package) {
+                Some(Ok((name, actions, inputs))) => {
                     tracing::info!(package = %package, name = %name, actions = ?actions, "extension loaded");
                     all_inputs.extend(inputs);
                     entries.push(ExtEntry {
@@ -164,7 +193,7 @@ impl ExtManager {
                         error: None,
                     });
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     warn!(package = %package, error = %e, "extension failed to load - disabled");
                     entries.push(ExtEntry {
                         name: package.clone(),
@@ -174,8 +203,19 @@ impl ExtManager {
                         error: Some(e.to_string()),
                     });
                 }
+                None => {
+                    warn!(package = %package, timeout = ?LOAD_DEADLINE, "extension load timed out - disabled");
+                    entries.push(ExtEntry {
+                        name: package.clone(),
+                        package,
+                        actions: Vec::new(),
+                        dispatch: None,
+                        error: Some(format!("load timed out after {:?}", LOAD_DEADLINE)),
+                    });
+                }
             }
         }
+        entries.sort_by(|a, b| a.package.cmp(&b.package));
 
         (
             Arc::new(ExtManager {
@@ -328,15 +368,6 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
         .collect()
 }
 
-/// What loading one extension produces: package name, action values,
-/// declared inputs, and the request channel to its interpreter thread.
-type LoadedExt = (
-    String,
-    Vec<String>,
-    Vec<ExtInputInfo>,
-    mpsc::Sender<ExtRequest>,
-);
-
 /// Everything an extension thread needs to (re)create its interpreter.
 struct ExtSpec {
     root: PathBuf,
@@ -352,15 +383,39 @@ struct ExtSlot {
     live: Option<ExtRuntime>,
 }
 
-fn load_extension(
+/// How long the manager waits for all packages to report readiness. One
+/// wedged extension (a bundle that loops forever inside its Boa parse, say)
+/// must never hold up the whole app: at the deadline it is disabled and the
+/// rest start serving.
+const LOAD_DEADLINE: Duration = Duration::from_secs(30);
+
+/// A loader thread's readiness report: the package it belongs to plus its
+/// metadata or the load error.
+type ReadyResult = Result<(String, Vec<String>, Vec<ExtInputInfo>), crate::host::HostError>;
+type ReadyReport = (String, ReadyResult);
+
+/// Spawn a package's runtime thread without waiting for it. The thread
+/// reports readiness (or failure) on `ready_tx`; the returned channel is
+/// the dispatch handle for later execute requests.
+fn spawn_extension(
     path: &std::path::Path,
     package: &str,
     configs: &Value,
     events_tx: tokio_mpsc::UnboundedSender<ExtEvent>,
-) -> Result<LoadedExt, crate::host::HostError> {
+    ready_tx: mpsc::Sender<ReadyReport>,
+) -> mpsc::Sender<ExtRequest> {
     // extract to a temp dir before spawning (plain IO, thread-agnostic)
-    let source = crate::source::PackageSource::open(path, package.to_string())
-        .map_err(|e| crate::host::HostError::Other(e.to_string()))?;
+    let source = match crate::source::PackageSource::open(path, package.to_string()) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ready_tx.send((
+                package.to_string(),
+                Err(crate::host::HostError::Other(e.to_string())),
+            ));
+            let (tx, _) = mpsc::channel();
+            return tx;
+        }
+    };
     let spec = ExtSpec {
         root: source.root.clone(),
         package: package.to_string(),
@@ -370,9 +425,9 @@ fn load_extension(
     // The interpreter is created inside the thread and never crosses a
     // thread boundary afterwards (Boa is !Send).
     let (req_tx, req_rx) = mpsc::channel::<ExtRequest>();
-    let (res_tx, res_rx) = mpsc::channel();
+    let thread_ready_tx = ready_tx.clone();
     // Boa recurses deeply on big bundles; default thread stacks are too small
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name(format!("ext-{package}"))
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
@@ -381,25 +436,33 @@ fn load_extension(
                 Ok(rt) => {
                     let inputs = parse_inputs(&rt.inputs);
                     let ready = Ok((rt.name.clone(), rt.actions.clone(), inputs));
-                    if res_tx.send(ready).is_ok() {
+                    if thread_ready_tx.send((spec.package.clone(), ready)).is_ok() {
                         // Hold the interpreter only when load-time timers
                         // make it live (e.g. clock faces); otherwise drop
                         // the heap until the first action needs it.
                         let live = if rt.has_timers() { Some(rt) } else { None };
+                        tracing::info!(
+                            package = %spec.package,
+                            resident = live.is_some(),
+                            "extension runtime startup state"
+                        );
                         runtime_loop(ExtSlot { spec, live }, req_rx, events_tx);
                     }
                 }
                 Err(e) => {
-                    let _ = res_tx.send(Err(e));
+                    let _ = thread_ready_tx.send((spec.package, Err(e)));
                 }
             }
-        })
-        .map_err(|e| crate::host::HostError::Other(e.to_string()))?;
-
-    let (name, actions, inputs) = res_rx
-        .recv()
-        .map_err(|_| crate::host::HostError::Other("extension thread died".into()))??;
-    Ok((name, actions, inputs, req_tx))
+        });
+    if let Err(e) = spawned {
+        let _ = ready_tx.send((
+            package.to_string(),
+            Err(crate::host::HostError::Other(e.to_string())),
+        ));
+        let (tx, _) = mpsc::channel();
+        return tx;
+    }
+    req_tx
 }
 
 fn runtime_loop(
@@ -453,6 +516,7 @@ fn run_action(
     args: &Value,
 ) -> Result<Vec<HostEvent>, crate::host::HostError> {
     if slot.live.is_none() {
+        tracing::info!(package = %slot.spec.package, action, "extension runtime loaded on demand");
         slot.live = Some(ExtRuntime::load(
             &slot.spec.root,
             &slot.spec.package,

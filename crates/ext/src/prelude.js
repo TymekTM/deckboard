@@ -445,13 +445,22 @@ var __child_process = {
             if (child.killed) return;
             var res = {};
             try { res = JSON.parse(__host_spawn_capture(full)); } catch (e) { res = { error: String(e), code: -1 }; }
-            try {
-                if (res.error) { if (handlers.error) handlers.error(new Error(res.error)); }
-                if (res.stdout && handlers.out_data) handlers.out_data(res.stdout);
-                if (res.stderr && handlers.err_data) handlers.err_data(res.stderr);
-                if (handlers.close) handlers.close(res.code === undefined ? 0 : res.code);
-            } catch (e) {
-                __host_log("error", "spawn handler: " + (e && e.message || e) + (e && e.stack ? " @ " + e.stack : ""));
+            // deliver each notification on its own: a throwing consumer
+            // handler (a shim gap in a bundled lib) must not swallow the
+            // remaining callbacks, e.g. the close that callers wait on
+            var steps = [
+                function () { if (res.error && handlers.error) handlers.error(new Error(res.error)); },
+                function () { if (res.stdout && handlers.out_data) handlers.out_data(res.stdout); },
+                function () { if (res.stderr && handlers.err_data) handlers.err_data(res.stderr); },
+                function () { if (handlers.close) handlers.close(res.code === undefined ? 0 : res.code); },
+            ];
+            for (var i = 0; i < steps.length; i++) {
+                try { steps[i](); } catch (e) {
+                    // expected for libraries like node-wmi whose error paths
+                    // assume Electron log transports; debug keeps a failing
+                    // extension from flooding the app log at error level
+                    __host_log("debug", "spawn handler: " + (e && e.message || e) + (e && e.stack ? " @ " + e.stack : ""));
+                }
             }
         }, 0);
         return child;
