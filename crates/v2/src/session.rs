@@ -147,11 +147,13 @@ async fn run_session(
         Auth::Device(device) => {
             match hello.name.as_deref().filter(|n| !n.is_empty()) {
                 // hello may rename a paired device; persisted so the next
-                // welcome and the desktop device list agree.
-                Some(name) if name != device.name => state.devices.rename(&device.id, name),
-                _ => state.devices.touch(&device.id),
+                // welcome and the desktop device list agree. The welcome
+                // carries the updated entry, not the pre-auth snapshot.
+                Some(name) if name != device.name => {
+                    state.devices.rename(&device.id, name).unwrap_or(device)
+                }
+                _ => state.devices.touch(&device.id).unwrap_or(device),
             }
-            device
         }
         Auth::Pair(code) => match state.pairing.consume(&code) {
             Ok(()) => {
@@ -172,14 +174,22 @@ async fn run_session(
     session.set_device(device.clone());
     tracing::info!(session = session.id, device = %device.name, client = %hello.client, version = %hello.version, "v2 client authenticated");
 
+    // Broadcast fan-out starts only now that the session is authenticated:
+    // a pre-auth socket must never see pushes. Attaching before the boards
+    // build means no delta published during the build is lost, and the
+    // build loop in `boards_snapshot` keeps the snapshot at least as new
+    // as any delta already queued for this socket.
+    state.hub.attach(session);
+
     // 3) Welcome + full syncs. Boards build first: it registers tile
-    // channels so the catalog in `welcome` is already complete.
-    let boards = crate::boards::build_boards(state.backend.as_ref(), &state.assets, &state.engine);
+    // channels so the catalog in `welcome` is already complete. Both
+    // frames carry the same stable generation.
+    let (boards_sync, generation) = state.boards_snapshot().await;
     let welcome = Welcome {
         protocol: PROTOCOL_VERSION,
         desktop_version: state.config.desktop_version.clone(),
         min_client: state.config.min_client.clone(),
-        generation: state.generation.get(),
+        generation,
         device: Device { id: device.id, name: device.name },
         channels: state.engine.catalog(),
     };
@@ -190,10 +200,7 @@ async fn run_session(
         kind: TYPE_WELCOME.into(),
         payload: Some(serde_json::to_value(&welcome).unwrap_or(Value::Null)),
     });
-    session.send_frame(&Frame::push_typed(
-        TYPE_BOARDS_SYNC,
-        &BoardsSync { generation: state.generation.get(), boards },
-    ));
+    session.send_frame(&boards_sync);
     session.send_frame(&Frame::push_typed(TYPE_STATE_SYNC, &state.engine.snapshot()));
 
     // 4) Live frames until the client goes away.
@@ -210,7 +217,7 @@ async fn run_session(
                 }
                 let parsed: Result<Frame, _> = serde_json::from_str(&text);
                 match parsed {
-                    Ok(frame) => handle_frame(state, session, frame),
+                    Ok(frame) => handle_frame(state, session, frame).await,
                     Err(e) => {
                         tracing::debug!(session = session.id, error = %e, "bad v2 frame");
                         session.send_frame(&Frame::push(
@@ -259,14 +266,14 @@ fn error_ack(request: &Frame, code: &str, message: &str) -> Frame {
     }
 }
 
-fn handle_frame(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Frame) {
+async fn handle_frame(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Frame) {
     if frame.ack.is_some() {
         // Clients never answer server pushes.
         tracing::debug!(session = session.id, type = %frame.kind, "unexpected ack from client");
         return;
     }
     match (frame.kind.as_str(), frame.id.is_some()) {
-        (TYPE_INTERACTION, true) => handle_interaction(state, session, frame),
+        (TYPE_INTERACTION, true) => handle_interaction(state, session, frame).await,
         (_, true) => {
             session.send_frame(&error_ack(&frame, error_code::UNKNOWN_TYPE, "unsupported request type"));
         }
@@ -275,7 +282,7 @@ fn handle_frame(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Frame) {
     }
 }
 
-fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Frame) {
+async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Frame) {
     let payload: InteractionPayload = match serde_json::from_value(frame.payload.clone().unwrap_or(Value::Null)) {
         Ok(p) => p,
         Err(e) => {
@@ -283,10 +290,14 @@ fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, frame: Fra
             return;
         }
     };
-    let Some(button) = (|| {
-        let button = state.backend.get_button(payload.tile)?;
-        (button.board_id == payload.board).then_some(button)
-    })() else {
+    // The lookup is a SQLite read; it must not run on the async workers.
+    let backend = state.backend.clone();
+    let (tile, board) = (payload.tile, payload.board);
+    let button = tokio::task::spawn_blocking(move || backend.get_button(tile).filter(|b| b.board_id == board))
+        .await
+        .ok()
+        .flatten();
+    let Some(button) = button else {
         session.send_frame(&error_ack(&frame, error_code::UNKNOWN_TILE, "no such tile on that board"));
         return;
     };

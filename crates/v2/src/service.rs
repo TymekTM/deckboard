@@ -3,7 +3,7 @@
 //! `GET /assets/:hash` (docs/protocol-v2.md §3, §7).
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::WebSocketUpgrade;
@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
-use deckboard_proto::Frame;
+use deckboard_proto::{Board, BoardsSync, Frame, MAX_FRAME_BYTES, TYPE_BOARDS_SYNC};
 use serde_json::json;
 
 use deckboard_legacy::Backend;
@@ -58,6 +58,9 @@ pub struct V2State {
     pub assets: Arc<AssetStore>,
     pub engine: Arc<StateEngine>,
     pub generation: Generation,
+    /// `boards.sync` frame cached per generation: a reconnect with no board
+    /// writes skips the SQLite scan and data-URL imports entirely.
+    pub boards_cache: Mutex<Option<(u64, Arc<Frame>)>>,
     pub config: V2Config,
 }
 
@@ -103,7 +106,11 @@ async fn ws_connect(
         return (StatusCode::BAD_REQUEST, "websocket required").into_response();
     };
     let auth = auth.expect("auth resolved above");
-    ws.on_upgrade(move |socket| session::run(state, socket, auth))
+    // Cap what tungstenite buffers per message before our own len check
+    // runs: without it a client could park ~64 MiB in the socket buffer
+    // for each connection before hearing `too-large`.
+    ws.max_message_size(MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| session::run(state, socket, auth))
 }
 
 /// Mints a one-time pairing code. Loopback callers only: the server binds
@@ -157,17 +164,21 @@ async fn asset_get(
     let Some(content_type) = state.assets.content_type(&hash) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match state.assets.get(&hash) {
-        Some(bytes) => (
-            [
-                (header::CONTENT_TYPE, content_type.to_string()),
-                (header::CACHE_CONTROL, "immutable, max-age=31536000".to_string()),
-            ],
-            bytes,
-        )
-            .into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    // Asset files are arbitrarily large; the read must not run on the
+    // async workers (the server runtime is single-threaded).
+    let assets = state.assets.clone();
+    let bytes = match tokio::task::spawn_blocking(move || assets.get(&hash)).await {
+        Ok(Some(bytes)) => bytes,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (header::CACHE_CONTROL, "immutable, max-age=31536000".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 impl V2State {
@@ -187,5 +198,51 @@ impl V2State {
         );
         self.hub.broadcast_frame(&frame);
         generation
+    }
+
+    /// The `boards.sync` frame for the current generation, built off the
+    /// async workers. Serves from the per-generation cache when no board
+    /// write happened since the last build (the common reconnect case).
+    ///
+    /// The build repeats while a write lands mid-pass, so the returned
+    /// frame's generation is never older than a `boards.delta` the caller
+    /// may already have queued: sessions attach to the hub before calling
+    /// this, and op replay is idempotent, so a snapshot that already
+    /// contains a pending delta's write is safe to deliver after it.
+    pub async fn boards_snapshot(&self) -> (Arc<Frame>, u64) {
+        let cached = self.boards_cache.lock().expect("boards cache poisoned").clone();
+        if let Some((generation, frame)) = cached {
+            if generation == self.generation.get() {
+                return (frame, generation);
+            }
+        }
+
+        let mut generation = self.generation.get();
+        let mut boards = self.build_boards_blocking().await;
+        for _ in 0..4 {
+            let after = self.generation.get();
+            if after == generation {
+                break;
+            }
+            generation = after;
+            boards = self.build_boards_blocking().await;
+        }
+        let frame = Arc::new(Frame::push_typed(
+            TYPE_BOARDS_SYNC,
+            &BoardsSync { generation, boards },
+        ));
+        *self.boards_cache.lock().expect("boards cache poisoned") = Some((generation, frame.clone()));
+        (frame, generation)
+    }
+
+    async fn build_boards_blocking(&self) -> Vec<Board> {
+        let backend = self.backend.clone();
+        let assets = self.assets.clone();
+        let engine = self.engine.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::boards::build_boards(backend.as_ref(), &assets, &engine)
+        })
+        .await
+        .expect("boards build panicked")
     }
 }

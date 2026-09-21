@@ -148,6 +148,7 @@ fn test_state(
         assets: Arc::new(AssetStore::open(dir.path().join("assets")).unwrap()),
         engine: Arc::new(StateEngine::new(120)),
         generation: Generation::starting_at(1),
+        boards_cache: Default::default(),
         config,
     });
     (state, dir)
@@ -273,6 +274,42 @@ async fn unauthenticated_ws_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pre_auth_session_receives_no_broadcasts() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let addr = spawn_server(state.clone()).await;
+
+    // A pairing-code socket upgrades but stays silent: no hello, so no
+    // auth. Broadcasts made while it lingers in the hello window must not
+    // reach it (state patches, deltas, anything).
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?pair=GARBAGE")).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    state.hub.broadcast_frame(&Frame::push_typed(
+        TYPE_BOARDS_DELTA,
+        &BoardsDelta { generation: 99, ops: vec![BoardOp::TileRemove { board: 3, tile: 21 }] },
+    ));
+    // Protocol-level pings are keepalive and fine; only data frames leak.
+    let leaked = tokio::time::timeout(Duration::from_millis(400), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => break text,
+                Some(Ok(_)) => continue,
+                other => panic!("ws stream ended: {other:?}"),
+            }
+        }
+    })
+    .await;
+    assert!(leaked.is_err(), "unauthenticated session must not receive broadcasts");
+
+    // The same socket still completes the handshake path when it finally
+    // speaks: a bad code yields the typed pair error, proving the session
+    // was alive all along - just outside the fan-out.
+    send_frame(&mut ws, &Frame::request(TYPE_HELLO, "h1", serde_json::json!({"client": "deckboard-mobile", "version": "0.2.0"}))).await;
+    let err = next_frame(&mut ws).await;
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(payload.code, error_code::PAIR_INVALID);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pairing_flow_mints_welcome_and_device() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let addr = spawn_server(state.clone()).await;
@@ -346,6 +383,20 @@ async fn token_connect_delivers_full_snapshot() {
 
     assert_eq!(state_sync.values["ext.speaker-muted"], "OFF");
     assert_eq!(state_sync.series["ext.si-cpu"], vec![0.5]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hello_rename_lands_in_welcome_and_registry() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let device = state.devices.create("Old name");
+    let addr = spawn_server(state.clone()).await;
+
+    // hello.name renames the paired device; the welcome of THIS connection
+    // must already carry the new name, and so must the persisted registry.
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let (welcome, _sync, _state_sync) = handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    assert_eq!(welcome.device.name, "Test tablet", "welcome must carry the renamed entry");
+    assert_eq!(state.devices.list()[0].name, "Test tablet");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -434,6 +485,31 @@ async fn hold_repeat_runs_until_press_end() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let settled = backend.exec_count();
     assert!(settled <= after + 1, "repeat stops after press-end ({after} -> {settled})");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_press_start_does_not_leak_a_repeat_loop() {
+    let backend = sample_backend();
+    let (state, _dir) = test_state(backend.clone(), |_| {});
+    let device = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+
+    // Two press-starts for one tile: the second must replace (not join)
+    // the first loop, so a single press-end stops everything.
+    send_frame(&mut ws, &Frame::request(TYPE_INTERACTION, "d1", serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}))).await;
+    let _ack = next_frame(&mut ws).await;
+    send_frame(&mut ws, &Frame::request(TYPE_INTERACTION, "d2", serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}))).await;
+    let _ack = next_frame(&mut ws).await;
+    send_frame(&mut ws, &Frame::request(TYPE_INTERACTION, "d3", serde_json::json!({"board": 3, "tile": 23, "interaction": "press-end"}))).await;
+    let _ack = next_frame(&mut ws).await;
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let after = backend.exec_count();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let settled = backend.exec_count();
+    assert!(settled <= after + 1, "leaked repeat loop kept firing ({after} -> {settled})");
 }
 
 #[tokio::test(flavor = "multi_thread")]

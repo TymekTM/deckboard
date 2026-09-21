@@ -23,19 +23,25 @@ impl V2Hub {
         V2Hub::default()
     }
 
+    /// Builds the session without hub membership; `attach` adds it once the
+    /// hello/auth handshake succeeded. Until then broadcasts must skip the
+    /// socket entirely - an unauthenticated peer must not receive pushes.
     pub fn create(&self, out: mpsc::UnboundedSender<super::session::WsOut>) -> Arc<V2Session> {
-        let session = Arc::new(V2Session {
+        Arc::new(V2Session {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             out,
             device: Mutex::new(None),
             last_seen: AtomicU64::new(crate::unix_millis()),
             holds: Mutex::new(HashMap::new()),
-        });
+        })
+    }
+
+    /// Adds an authenticated session to the broadcast fan-out.
+    pub fn attach(&self, session: &Arc<V2Session>) {
         self.sessions
             .lock()
             .expect("v2 hub poisoned")
             .insert(session.id, session.clone());
-        session
     }
 
     pub fn remove(&self, id: u64) {
@@ -95,7 +101,17 @@ impl V2Session {
     }
 
     pub fn insert_hold(&self, tile: i64, handle: tokio::task::JoinHandle<()>) {
-        self.holds.lock().expect("session poisoned").insert(tile, handle);
+        // A second press-start for the same tile replaces the first loop;
+        // without the abort it would keep firing (double rate) until the
+        // 120 s cap, invisible to press-end which only sees the newest.
+        if let Some(previous) = self
+            .holds
+            .lock()
+            .expect("session poisoned")
+            .insert(tile, handle)
+        {
+            previous.abort();
+        }
     }
 
     /// Stops the hold loop for a tile, if one is running.
@@ -124,7 +140,12 @@ mod tests {
         let (tx_a, mut rx_a) = mpsc::unbounded_channel();
         let (tx_b, _rx_b) = mpsc::unbounded_channel();
         let a = hub.create(tx_a);
-        hub.create(tx_b);
+        // Unauthenticated sessions (created but not attached) are outside
+        // the fan-out; only attach brings a socket into the broadcast set.
+        hub.broadcast_frame(&Frame::push(deckboard_proto::TYPE_BOARD_OPEN, serde_json::json!({"board": 0})));
+        assert!(rx_a.try_recv().is_err(), "pre-auth session must not receive broadcasts");
+        hub.attach(&a);
+        hub.attach(&hub.create(tx_b));
         assert_eq!(hub.count(), 2);
 
         hub.broadcast_frame(&Frame::push(deckboard_proto::TYPE_BOARD_OPEN, serde_json::json!({"board": 3})));

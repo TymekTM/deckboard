@@ -156,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
         )?),
         engine: Arc::new(deckboard_v2::StateEngine::new(deckboard_proto::SERIES_CAP)),
         generation: deckboard_v2::Generation::starting_at(1),
+        boards_cache: Default::default(),
         config: deckboard_v2::V2Config { public_port: port, ..Default::default() },
     });
 
