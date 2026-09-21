@@ -3,6 +3,21 @@
 
 use crate::{OsError, Result};
 
+/// Current clipboard sequence number; the OS bumps it on every write,
+/// whoever made it. Lets the paste-restore path notice that the user (or
+/// another app) copied something in the meantime.
+pub fn sequence_number() -> u32 {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+        unsafe { GetClipboardSequenceNumber() }
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
 /// Current clipboard text, empty when the clipboard holds non-text data.
 pub fn get_text() -> Result<String> {
     #[cfg(windows)]
@@ -11,7 +26,7 @@ pub fn get_text() -> Result<String> {
         use windows::Win32::System::DataExchange::{
             CloseClipboard, GetClipboardData, OpenClipboard,
         };
-        use windows::Win32::System::Memory::GlobalLock;
+        use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
         unsafe {
             OpenClipboard(HWND::default())
                 .map_err(|e| OsError::Failed(format!("open clipboard: {e}")))?;
@@ -29,7 +44,9 @@ pub fn get_text() -> Result<String> {
                 while *ptr.add(len) != 0 {
                     len += 1;
                 }
-                Ok(String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len)))
+                let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+                let _ = GlobalUnlock(HGLOBAL(handle.0));
+                Ok(text)
             })();
             let _ = CloseClipboard();
             result
@@ -46,7 +63,7 @@ pub fn get_text() -> Result<String> {
 pub fn set_text(text: &str) -> Result<()> {
     #[cfg(windows)]
     {
-        use windows::Win32::Foundation::{HANDLE, HWND};
+        use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
         use windows::Win32::System::DataExchange::{
             CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
         };
@@ -64,13 +81,17 @@ pub fn set_text(text: &str) -> Result<()> {
                     })?;
                 let ptr = GlobalLock(handle);
                 if ptr.is_null() {
+                    let _ = GlobalFree(handle);
                     return Err(OsError::Failed("clipboard lock failed".into()));
                 }
                 std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr.cast::<u16>(), wide.len());
                 let _ = GlobalUnlock(handle);
-                // 13 = CF_UNICODETEXT; the system owns the allocation now
-                SetClipboardData(13, HANDLE(handle.0))
-                    .map_err(|e| OsError::Failed(format!("set clipboard: {e}")))?;
+                // 13 = CF_UNICODETEXT; on success the system owns the
+                // allocation - only a failed handover leaks it back to us.
+                if let Err(e) = SetClipboardData(13, HANDLE(handle.0)) {
+                    let _ = GlobalFree(handle);
+                    return Err(OsError::Failed(format!("set clipboard: {e}")));
+                }
                 Ok(())
             })();
             let _ = CloseClipboard();

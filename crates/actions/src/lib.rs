@@ -192,6 +192,13 @@ pub fn run_command(
     if cmd.mode == "slider" {
         return run_slider_command(input, cmd, 0.0);
     }
+    // Touch-down (`is_tap_start = true`) only drives held `key` buttons;
+    // every other kind fires once on release. The client sends
+    // exec_shortcut on BOTH phases, so without this filter urls would
+    // open twice and multiactions would run twice.
+    if is_tap_start && cmd.kind != "key" {
+        return Ok(());
+    }
     match cmd.kind.as_str() {
         "board" => Ok(()), // board switching is client/editor-local
         "key" => run_key(input, cmd, is_tap_start),
@@ -518,15 +525,24 @@ impl Input for EnigoInput {
     /// `typeString`: save clipboard, write text, Ctrl+V, restore.
     #[cfg(windows)]
     fn paste_text(&mut self, text: &str) -> Result<()> {
+        // Non-text clipboard content (images) cannot be restored by this
+        // text-only path - the original app behaves the same; restore is
+        // text-only and best-effort.
         let previous = deckboard_os::clipboard::get_text().ok().filter(|s| !s.is_empty());
         deckboard_os::clipboard::set_text(text)
             .map_err(|e| ActionError::Input(e.to_string()))?;
+        let seq_after_set = deckboard_os::clipboard::sequence_number();
         let pasted = self.key_tap(&[KeyName::Control, KeyName::Char('v')]);
         if let Some(previous) = previous {
             // give the focused app a beat to read the paste before the
             // user's clipboard content comes back
             self.sleep(80)?;
-            let _ = deckboard_os::clipboard::set_text(&previous);
+            // Restore only if the clipboard still holds OUR paste: when
+            // the user (or any app) copied something meanwhile, that
+            // content wins and must not be clobbered by the restore.
+            if deckboard_os::clipboard::sequence_number() == seq_after_set {
+                let _ = deckboard_os::clipboard::set_text(&previous);
+            }
         }
         pasted
     }
@@ -664,6 +680,27 @@ mod tests {
 
         run_command(&mut input, &mut sink, &c, false).unwrap();
         assert_eq!(input.effects[1], Effect::KeyUp(vec![Control, Char('k')]));
+    }
+
+    #[test]
+    fn tap_start_only_drives_key_buttons() {
+        // The client sends exec_shortcut on touch-down AND touch-up; only
+        // `key` acts on touch-down (held keys). Everything else must fire
+        // exactly once, on release.
+        let mut input = MockInput::default();
+        let mut sink = MockSink::default();
+        let c = cmd("url", Some("https://example.com"));
+        run_command(&mut input, &mut sink, &c, true).unwrap();
+        assert!(input.effects.is_empty(), "tap-start must not fire non-key commands");
+        run_command(&mut input, &mut sink, &c, false).unwrap();
+        assert_eq!(input.effects, vec![Effect::OpenUrl("https://example.com".into())]);
+
+        let multi = cmd(
+            "multiaction",
+            Some(r#"[{"type":"board","command":"{\"id\":7}"}]"#),
+        );
+        run_command(&mut input, &mut sink, &multi, true).unwrap();
+        assert!(sink.boards.is_empty(), "tap-start must not run multiactions");
     }
 
     #[test]

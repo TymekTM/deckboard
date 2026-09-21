@@ -112,22 +112,28 @@ struct PolicyConfigVtbl {
     set_endpoint_visibility: *mut std::ffi::c_void,
 }
 
-#[repr(C)]
+/// Owns the live COM object: `object` holds the reference (dropped =
+/// `Release`), `vtbl` is read once from it and stays valid while the
+/// object lives. Copying the vtable pointer without keeping the object
+/// would leave every call running on freed memory through a dangling
+/// `this`.
 struct PolicyConfig {
+    object: windows::core::IUnknown,
     vtbl: *const PolicyConfigVtbl,
 }
 
 fn policy_config() -> Result<PolicyConfig> {
     ensure_com()?;
-    let unk: windows::core::IUnknown = unsafe {
+    let object: windows::core::IUnknown = unsafe {
         CoCreateInstance(&POLICY_CONFIG_CLIENT, None, CLSCTX_ALL)
             .map_err(|e| OsError::Failed(format!("policy config: {e}")))?
     };
     use windows::core::Interface;
     // the interface pointer's first field IS the vtable pointer
-    let object = unk.as_raw();
+    let raw = object.as_raw();
     Ok(PolicyConfig {
-        vtbl: unsafe { *(object as *const *const PolicyConfigVtbl) },
+        vtbl: unsafe { *(raw as *const *const PolicyConfigVtbl) },
+        object,
     })
 }
 
@@ -192,13 +198,9 @@ impl Speaker for WinSpeaker {
         // three so every consumer follows the switch (what the Settings
         // app and SoundSwitch do)
         for role in 0..3i32 {
-            let hr = HRESULT(unsafe {
-                ((*config.vtbl).set_default_endpoint)(
-                    std::mem::transmute::<&PolicyConfig, *mut std::ffi::c_void>(&config),
-                    PCWSTR(wide.as_ptr()),
-                    role,
-                )
-            });
+            use windows::core::Interface;
+            let this = config.object.as_raw();
+            let hr = HRESULT(unsafe { ((*config.vtbl).set_default_endpoint)(this, PCWSTR(wide.as_ptr()), role) });
             if hr.is_err() {
                 return Err(OsError::Failed(format!("set default endpoint: {hr}")));
             }

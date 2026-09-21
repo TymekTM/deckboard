@@ -12,6 +12,24 @@ pub(crate) fn screenshot_filename(stamp: chrono::DateTime<chrono::Utc>) -> Strin
     format!("Deckboard_{}.png", stamp.format("%Y%m%d%H%M%S"))
 }
 
+/// The stamp has second resolution, so two captures in one second would
+/// silently overwrite; the second file gets a `_2`, `_3`, ... suffix.
+fn unique_screenshot_path(dir: &std::path::Path, stamp: chrono::DateTime<chrono::Utc>) -> PathBuf {
+    let filename = screenshot_filename(stamp);
+    let path = dir.join(&filename);
+    if !path.exists() {
+        return path;
+    }
+    let stem = filename.trim_end_matches(".png");
+    for n in 2u32.. {
+        let candidate = dir.join(format!("{stem}_{n}.png"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("u32 suffix space exhausted")
+}
+
 fn default_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     {
@@ -48,7 +66,7 @@ pub fn screenshot_to_dir(dir: &str) -> Result<PathBuf> {
     };
     std::fs::create_dir_all(&target)
         .map_err(|e| OsError::Failed(format!("screenshot dir {}: {e}", target.display())))?;
-    let path = target.join(screenshot_filename(chrono::Utc::now()));
+    let path = unique_screenshot_path(&target, chrono::Utc::now());
     let rgba = grab_screen_rgba()?;
     image::save_buffer_with_format(
         &path,
@@ -125,6 +143,23 @@ fn grab_screen_rgba() -> Result<image::RgbaImage> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_second_screenshots_do_not_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let stamp = chrono::Utc::now();
+        let first = unique_screenshot_path(dir.path(), stamp);
+        assert_eq!(first, dir.path().join(screenshot_filename(stamp)));
+        std::fs::write(&first, b"png").unwrap();
+        // Same second again: the helper must dodge the existing file
+        // instead of returning the same path (which would overwrite it).
+        let second = unique_screenshot_path(dir.path(), stamp);
+        assert_ne!(first, second);
+        assert!(second.file_name().unwrap().to_str().unwrap().ends_with("_2.png"));
+        std::fs::write(&second, b"png").unwrap();
+        let third = unique_screenshot_path(dir.path(), stamp);
+        assert!(third != second && third != first);
+    }
 
     #[test]
     #[ignore = "live: captures the real screen"]
