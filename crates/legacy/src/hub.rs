@@ -163,6 +163,10 @@ impl Hub {
         self.sessions.lock().await.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.sessions.lock().await.is_empty()
+    }
+
     /// Drop sessions silent for longer than Engine.IO allows
     /// (pingInterval + pingTimeout). Returns the number removed.
     pub async fn reap(&self, max_idle_secs: u64) -> usize {
@@ -221,7 +225,9 @@ pub fn event_packet(event: &str, payload: Option<&str>) -> String {
 fn new_sid() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    (0..20).map(|_| format!("{:x}", rng.gen::<u8>() & 0x0f)).collect()
+    (0..20)
+        .map(|_| format!("{:x}", rng.gen::<u8>() & 0x0f))
+        .collect()
 }
 
 #[cfg(test)]

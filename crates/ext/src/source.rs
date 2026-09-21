@@ -30,12 +30,20 @@ impl PackageSource {
     /// is always a real directory on disk.
     pub fn open(path: &Path, package: String) -> Result<PackageSource, SourceError> {
         if path.is_dir() {
-            Ok(PackageSource { package, root: path.to_path_buf(), _keep_asar: None })
+            Ok(PackageSource {
+                package,
+                root: path.to_path_buf(),
+                _keep_asar: None,
+            })
         } else {
             let arch = AsarArchive::open(path)?;
             let target = temp_ext_dir(&package);
             extract_asar(&arch, &target)?;
-            Ok(PackageSource { package, root: target, _keep_asar: Some(arch) })
+            Ok(PackageSource {
+                package,
+                root: target,
+                _keep_asar: Some(arch),
+            })
         }
     }
 

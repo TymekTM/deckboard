@@ -1,16 +1,14 @@
-//! deckboard-server: M0 spike binary. Serves the legacy socket.io v2
-//! protocol on port 8500 from the existing `~/deckboard/database.db`.
-
-mod backend;
+//! deckboard-server: headless legacy server binary. Serves the legacy
+//! socket.io v2 protocol from the existing `~/deckboard/database.db`
+//! (read-only - the desktop editor app owns writes).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
-use deckboard_legacy::{AppState, Hub};
+use deckboard_backend::SqlBackend;
+use deckboard_legacy::{router, AppState, Hub};
 use tracing_subscriber::EnvFilter;
-
-use crate::backend::SqlBackend;
 
 // current_thread: the workload is a couple of tablets doing tiny async IO;
 // everything blocking (exec, sliders, extension JS, Discord, Voicemeeter)

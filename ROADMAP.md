@@ -33,13 +33,28 @@ through a legacy compatibility layer until the new client ships.
       5 s and the device id every 30 s (the original's real cadence)
       over legacy `app_status_update` and the v2 state engine. Media
       info was dropped: the original app has no such command (zero
-      references in its bundle). Linux support: the `Speaker` trait is
+      references in its bundle). Merge notes (2026-09-21): the desktop
+      editor's watcher pushes the device on every detected change
+      (5 s poll) instead of a fixed 30 s cadence; `play` (local audio
+      file via MCI, restart on press) lives in `deckboard-os` and the
+      shared `SqlBackend`; the switch survives COM-apartment teardown
+      (`CoInitializeEx` S_FALSE means a pre-existing MTA we must not
+      `CoUninitialize`). Linux support: the `Speaker` trait is
       the seam - swap in an ALSA/PipeWire implementation.
 - [ ] **M3 - Desktop editor (MVP gate)**: Tauri 2 + Vue 3 editor: boards,
       buttons, sliders CRUD, drag/resize, dual-state, `.boardjson`
       import/export (format-compatible), touch mode, tray, hotkeys,
       autolaunch. **Definition of MVP: full behavioral parity with the
       original desktop app using the stock Android client.**
+      Status (2026-09-14): editor MVP lives in `apps/desktop` - board/tile
+      CRUD, drag/resize, dual-state styling, format-compatible `.boardjson`
+      import/export, touch mode with local execution, tray, autostart
+      toggle, configurable touch-mode hotkey (validated, persisted to
+      `~/deckboard/editor.json`, re-registered at runtime), slider drag
+      interaction in touch mode, visible empty grid slots in the editor,
+      live second-state preview (extension/custom-value pushes broadcast
+      as `app_status_update` and forwarded to the editor, which mirrors
+      the original ToggleButton `isActive` over `customValues`/app state).
 - [ ] **M4 - Kotlin/Compose client MVP**: boards/buttons/sliders/toggles,
       live state, offline cache, QR/USB pairing. Includes Android plumbing:
       foreground service + battery-optimization exemption prompt (WS dies

@@ -118,23 +118,66 @@ struct PolicyConfigVtbl {
 /// would leave every call running on freed memory through a dangling
 /// `this`.
 struct PolicyConfig {
-    object: windows::core::IUnknown,
+    raw: *mut core::ffi::c_void,
     vtbl: *const PolicyConfigVtbl,
+}
+
+impl Drop for PolicyConfig {
+    fn drop(&mut self) {
+        unsafe { ((*self.vtbl).release)(self.raw) };
+    }
+}
+
+/// The interface pointer must come from a query for `IID_IPolicyConfig`:
+/// the `IUnknown` pointer the typed CoCreateInstance returns carries
+/// whichever vtable the class hands out first, and that layout is not
+/// IPolicyConfig's (the call then hits a benign slot and "succeeds"
+/// without doing anything).
+mod raw_com {
+    use super::*;
+
+    // CLSCTX_ALL as the raw u32 the ABI takes
+    pub(super) const CLSCTX_ALL_U32: u32 = windows::Win32::System::Com::CLSCTX_ALL.0;
+    pub(super) const IID_IPOLICY_CONFIG: GUID =
+        GUID::from_u128(0xf8679f50_850a_41cf_9c72_430f290290c8);
+
+    #[link(name = "ole32")]
+    extern "system" {
+        #[link_name = "CoCreateInstance"]
+        fn co_create_instance(
+            rclsid: *const GUID,
+            punk_outer: *mut core::ffi::c_void,
+            cls_context: u32,
+            riid: *const GUID,
+            ppv: *mut *mut core::ffi::c_void,
+        ) -> HRESULT;
+    }
+
+    pub(super) unsafe fn create_policy_config() -> Result<*mut core::ffi::c_void> {
+        let mut raw: *mut core::ffi::c_void = std::ptr::null_mut();
+        let hr = co_create_instance(
+            &POLICY_CONFIG_CLIENT,
+            std::ptr::null_mut(),
+            CLSCTX_ALL_U32,
+            &IID_IPOLICY_CONFIG,
+            &mut raw,
+        );
+        if hr.is_err() {
+            return Err(OsError::Failed(format!("policy config: {hr}")));
+        }
+        Ok(raw)
+    }
 }
 
 fn policy_config() -> Result<PolicyConfig> {
     ensure_com()?;
-    let object: windows::core::IUnknown = unsafe {
-        CoCreateInstance(&POLICY_CONFIG_CLIENT, None, CLSCTX_ALL)
-            .map_err(|e| OsError::Failed(format!("policy config: {e}")))?
-    };
-    use windows::core::Interface;
-    // the interface pointer's first field IS the vtable pointer
-    let raw = object.as_raw();
-    Ok(PolicyConfig {
-        vtbl: unsafe { *(raw as *const *const PolicyConfigVtbl) },
-        object,
-    })
+    unsafe {
+        let raw = raw_com::create_policy_config()?;
+        Ok(PolicyConfig {
+            vtbl: *(raw as *const *const PolicyConfigVtbl),
+            raw,
+        })
+    }
 }
 
 impl Speaker for WinSpeaker {
@@ -198,9 +241,7 @@ impl Speaker for WinSpeaker {
         // three so every consumer follows the switch (what the Settings
         // app and SoundSwitch do)
         for role in 0..3i32 {
-            use windows::core::Interface;
-            let this = config.object.as_raw();
-            let hr = HRESULT(unsafe { ((*config.vtbl).set_default_endpoint)(this, PCWSTR(wide.as_ptr()), role) });
+            let hr = HRESULT(unsafe { ((*config.vtbl).set_default_endpoint)(config.raw, PCWSTR(wide.as_ptr()), role) });
             if hr.is_err() {
                 return Err(OsError::Failed(format!("set default endpoint: {hr}")));
             }

@@ -1,0 +1,31 @@
+[package]
+name = "deckboard-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deckboard desktop editor"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dirs = "5"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+deckboard-db = { path = "../../../crates/db" }
+deckboard-backend = { path = "../../../crates/backend" }
+deckboard-actions = { path = "../../../crates/actions" }
+deckboard-legacy = { path = "../../../crates/legacy" }
+deckboard-ext = { path = "../../../crates/ext" }
+deckboard-vm = { path = "../../../crates/vm" }
+deckboard-discord = { path = "../../../crates/discord" }

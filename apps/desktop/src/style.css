@@ -1,0 +1,185 @@
+/* Deckboard editor theme, matched to the original app: dark charcoal rail,
+   light sidebar, board-colored canvas, teal accent. */
+@import "@fontsource/roboto/400.css";
+@import "@fontsource/roboto/500.css";
+@import "@fontsource/roboto/700.css";
+
+:root {
+  /* shell */
+  --titlebar: #171c21;
+  --rail: #262e36;
+  --rail-hover: #313a44;
+  --rail-icon: #aab3ba;
+  --sidebar: #ececec;
+  --sidebar-text: #3e454d;
+  --sidebar-muted: #8a8f94;
+
+  /* board canvas fallback + accent */
+  --canvas: #437072;
+  --accent: #1abc9c;
+  --accent-2: #16a085;
+  --danger: #e74c3c;
+
+  /* light modal system */
+  --modal: #ffffff;
+  --modal-text: #212121;
+  --modal-muted: #757575;
+  --modal-line: #e6e6e6;
+  --modal-field: #f4f4f4;
+
+  /* dark-surface controls (canvas overlays, touch UI) */
+  --text: #ecf0f1;
+  --text-muted: #95a5a6;
+  --border: #1d2a36;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: "Roboto", "Segoe UI", system-ui, sans-serif;
+  background: var(--rail);
+  color: var(--modal-text);
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: rgba(26, 188, 156, 0.35); }
+
+/* themed scrollbars (craft floor: no default browser surfaces) */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 136, 144, 0.45);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: rgba(128, 136, 144, 0.7); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.45; cursor: default; }
+
+input, select, textarea {
+  font: inherit;
+  color: var(--modal-text);
+  background: #ffffff;
+  border: 1px solid #d6d6d6;
+  border-radius: 3px;
+  padding: 8px 10px;
+  width: 100%;
+  transition: border-color 120ms ease-out, background 120ms ease-out;
+}
+input:hover, select:hover, textarea:hover { border-color: #bdbdbd; }
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+input::placeholder, textarea::placeholder { color: #9e9e9e; }
+
+/* text fields accept selection even though the shell is selection-free */
+input, textarea { user-select: text; }
+input[type="checkbox"], input[type="color"], select {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ---- light modal system (original "New Button" dialog look) ---- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+}
+
+.modal {
+  background: var(--modal);
+  color: var(--modal-text);
+  border-radius: 4px;
+  width: min(460px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+  box-shadow: 0 10px 44px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+}
+
+/* teal header strip like the original dialog */
+.modal-head {
+  background: color-mix(in srgb, var(--canvas) 92%, black);
+  color: #f4fbfa;
+  font-size: 21px;
+  font-weight: 400;
+  padding: 15px 24px;
+}
+
+.modal-body { padding: 18px 24px 6px; }
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 14px 16px 16px;
+}
+
+/* flat uppercase text buttons, like the original CANCEL / ADD */
+.btn-text {
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--modal-muted);
+  padding: 10px 14px;
+  border-radius: 4px;
+  transition: background 120ms ease-out, color 120ms ease-out;
+}
+.btn-text:hover { background: rgba(0, 0, 0, 0.06); }
+.btn-text.accent { color: var(--accent-2); }
+.btn-text.accent:hover { background: rgba(26, 188, 156, 0.12); }
+.btn-text.danger { color: var(--danger); }
+.btn-text.danger:hover { background: rgba(231, 76, 60, 0.1); }
+.btn-text.left { margin-right: auto; }
+
+label.field {
+  display: block;
+  margin-bottom: 14px;
+  font-size: 13.5px;
+  color: var(--modal-muted);
+}
+label.field > input, label.field > select, label.field > textarea {
+  margin-top: 5px;
+  font-size: 14px;
+}
+
+/* modal enter/exit: soft rise, ease-out both ways */
+.modal-enter-active { transition: opacity 180ms ease-out, transform 180ms cubic-bezier(0.2, 0, 0, 1); }
+.modal-leave-active { transition: opacity 120ms ease-out, transform 120ms ease-out; }
+.modal-enter-from { opacity: 0; transform: translateY(10px) scale(0.985); }
+.modal-leave-to { opacity: 0; transform: translateY(4px); }
+.fade-enter-active, .fade-leave-active { transition: opacity 140ms ease-out; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* numeric readouts never shift layout while updating */
+.tnum { font-variant-numeric: tabular-nums; }

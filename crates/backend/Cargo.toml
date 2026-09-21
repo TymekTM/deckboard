@@ -1,0 +1,23 @@
+[package]
+name = "deckboard-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+deckboard-db = { path = "../db" }
+deckboard-actions = { path = "../actions" }
+deckboard-legacy = { path = "../legacy" }
+deckboard-ext = { path = "../ext" }
+deckboard-vm = { path = "../vm" }
+deckboard-discord = { path = "../discord" }
+deckboard-os = { path = "../os" }
+deckboard-sysinfo = { path = "../sysinfo" }
+ureq = "3"
+
+[dev-dependencies]
+tempfile = "3"

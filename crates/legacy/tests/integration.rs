@@ -35,6 +35,10 @@ impl Backend for MockBackend {
         }]
     }
 
+    fn get_board(&self, board_id: i64) -> Option<BoardRow> {
+        (board_id == 1).then(|| self.get_boards().remove(0))
+    }
+
     fn get_buttons_by_board(&self, _board_id: i64) -> Vec<ButtonRow> {
         vec![url_button(10, 0, 0)]
     }
@@ -133,8 +137,7 @@ async fn polling_full_flow() {
     let (status, open) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
     assert_eq!(status, 200);
     assert!(open.starts_with("0{"), "open packet: {open}");
-    let open_json: serde_json::Value =
-        serde_json::from_str(&open[1..]).unwrap();
+    let open_json: serde_json::Value = serde_json::from_str(&open[1..]).unwrap();
     let sid = open_json["sid"].as_str().unwrap().to_string();
     assert_eq!(open_json["upgrades"], serde_json::json!(["websocket"]));
 
@@ -246,9 +249,8 @@ fn wait_for_execs(backend: &MockBackend, expected: &[(i64, bool)]) {
 #[tokio::test(flavor = "multi_thread")]
 async fn websocket_direct_flow() {
     let (addr, _backend) = spawn_server().await;
-    let url = format!(
-        "ws://{addr}/socket.io/?EIO=3&transport=websocket&access_key=DCKBRD_PRO_1_3_0"
-    );
+    let url =
+        format!("ws://{addr}/socket.io/?EIO=3&transport=websocket&access_key=DCKBRD_PRO_1_3_0");
     let (mut ws, _) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio_tungstenite::connect_async(url),
@@ -326,7 +328,11 @@ async fn health_page_served() {
     assert!(body.contains("Deckboard Server is live"));
 }
 
-async fn recv_text(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> String {
+async fn recv_text(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> String {
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
         .await
         .expect("ws recv timeout")

@@ -20,9 +20,15 @@ use crate::mapping::Mapper;
 /// Storage + execution seam so the transport layer stays testable.
 pub trait Backend: Send + Sync + 'static {
     fn get_boards(&self) -> Vec<deckboard_db::BoardRow>;
+    fn get_board(&self, board_id: i64) -> Option<deckboard_db::BoardRow>;
     fn get_buttons_by_board(&self, board_id: i64) -> Vec<deckboard_db::ButtonRow>;
     fn get_button(&self, id: i64) -> Option<deckboard_db::ButtonRow>;
-    fn exec(&self, button: deckboard_db::ButtonRow, is_tap_start: bool, sink: &mut dyn deckboard_actions::EventSink);
+    fn exec(
+        &self,
+        button: deckboard_db::ButtonRow,
+        is_tap_start: bool,
+        sink: &mut dyn deckboard_actions::EventSink,
+    );
     fn slider(&self, button: deckboard_db::ButtonRow, value: f64);
     /// M2 speaker watcher snapshots: master volume percent, muted flag.
     /// Defaults suit backends without speaker support.
@@ -89,7 +95,10 @@ async fn socket_get(
 async fn polling_get(state: Arc<AppState>, q: SioQuery) -> Response {
     match &q.sid {
         None => {
-            let session = state.hub.create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO)).await;
+            let session = state
+                .hub
+                .create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO))
+                .await;
             // socket.io connect packet, delivered on the next poll
             session.send("40".into()).await;
             let open = json!({
@@ -98,7 +107,11 @@ async fn polling_get(state: Arc<AppState>, q: SioQuery) -> Response {
                 "pingInterval": 25000,
                 "pingTimeout": 60000,
             });
-            ([(header::CONTENT_TYPE, "text/plain; charset=UTF-8")], format!("0{open}")).into_response()
+            (
+                [(header::CONTENT_TYPE, "text/plain; charset=UTF-8")],
+                format!("0{open}"),
+            )
+                .into_response()
         }
         Some(sid) => match state.hub.get(sid).await {
             Some(session) => {
@@ -187,7 +200,12 @@ async fn handle_packet(state: &Arc<AppState>, session: &Arc<Session>, packet: &s
                     let data = &sio[1..];
                     match serde_json::from_str::<serde_json::Value>(data) {
                         Ok(v) => {
-                            let name = v.as_array().and_then(|a| a.first()).and_then(|e| e.as_str()).unwrap_or("").to_string();
+                            let name = v
+                                .as_array()
+                                .and_then(|a| a.first())
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let args: Vec<serde_json::Value> = v
                                 .as_array()
                                 .map(|a| a.iter().skip(1).cloned().collect())
@@ -209,7 +227,8 @@ async fn handle_packet(state: &Arc<AppState>, session: &Arc<Session>, packet: &s
 /// `exec_shortcut`/`exec_slider` accept the id as number or string.
 fn arg_id(arg: &serde_json::Value) -> Option<i64> {
     arg.get("id").and_then(|v| {
-        v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
     })
 }
 
@@ -265,7 +284,9 @@ async fn handle_event(
                 }
             };
             let payload = serde_json::to_string(&boards).unwrap_or_else(|_| "[]".into());
-            session.send(event_packet("get_shortcuts", Some(&payload))).await;
+            session
+                .send(event_packet("get_shortcuts", Some(&payload)))
+                .await;
         }
         "exec_shortcut" => {
             let arg = args.first().cloned().unwrap_or(json!({}));
@@ -363,7 +384,10 @@ async fn ws_loop(state: Arc<AppState>, socket: WebSocket, q: SioQuery) {
         },
         None => {
             // websocket-only session: open packet + connect go over the wire
-            let s = state.hub.create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO)).await;
+            let s = state
+                .hub
+                .create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO))
+                .await;
             s.upgrade_to_ws(out_tx.clone()).await;
             let open = json!({
                 "sid": s.sid,

@@ -12,6 +12,8 @@
 
 pub mod capture;
 pub mod clipboard;
+pub mod play;
+pub use play::play_audio;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OsError {

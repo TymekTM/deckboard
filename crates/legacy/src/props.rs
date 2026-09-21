@@ -69,10 +69,7 @@ fn parse_props(v: &Value) -> Props {
             .or_else(|| v.get("toggleKey"))
             .and_then(Value::as_str)
             .map(str::to_string),
-        json_key: v
-            .get("jsonKey")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        json_key: v.get("jsonKey").and_then(Value::as_str).map(str::to_string),
     }
 }
 
@@ -149,19 +146,18 @@ impl StyleResolver {
             return Props::default();
         };
         let prefix = input.font_icon.clone().unwrap_or_else(|| "fas".to_string());
-        let icon = input.icon.clone().unwrap_or_else(|| "exclamation-circle".to_string());
+        let icon = input
+            .icon
+            .clone()
+            .unwrap_or_else(|| "exclamation-circle".to_string());
         Props {
             unicode: self.icon_unicode(&icon, &prefix),
             color: input.color,
             prefix: Some(prefix),
             app: (input.mode.as_deref() == Some("custom-value"))
                 .then(|| "custom-value".to_string()),
-            toggle_key: (input.mode.as_deref() == Some("custom-value")).then(|| {
-                input
-                    .command
-                    .clone()
-                    .unwrap_or_else(|| kind.to_string())
-            }),
+            toggle_key: (input.mode.as_deref() == Some("custom-value"))
+                .then(|| input.command.clone().unwrap_or_else(|| kind.to_string())),
             json_key: None,
         }
     }
@@ -188,7 +184,11 @@ impl StyleResolver {
 
     /// Port of `getIconUnicode(icon, fontIcon)`: name -> FA codepoint char.
     pub fn icon_unicode(&self, icon: &str, prefix: &str) -> Option<String> {
-        let map = if prefix == "fab" { &self.icons_fab } else { &self.icons_fas };
+        let map = if prefix == "fab" {
+            &self.icons_fab
+        } else {
+            &self.icons_fas
+        };
         map.get(icon).map(|code| {
             // original pads to 4 hex digits then evals "\uXXXX"
             let padded = if code.len() < 4 {
@@ -275,7 +275,10 @@ mod tests {
         let p = r.props_for("my-value", None);
         assert_eq!(p.app.as_deref(), Some("custom-value"));
         assert_eq!(p.toggle_key.as_deref(), Some("my-value"));
-        assert_eq!(p.unicode.map(|u| u.chars().next().unwrap() as u32), Some(0xf06a));
+        assert_eq!(
+            p.unicode.map(|u| u.chars().next().unwrap() as u32),
+            Some(0xf06a)
+        );
     }
 
     #[test]

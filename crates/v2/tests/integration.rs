@@ -41,6 +41,9 @@ impl Backend for MockBackend {
     fn get_boards(&self) -> Vec<BoardRow> {
         self.boards.clone()
     }
+    fn get_board(&self, board_id: i64) -> Option<BoardRow> {
+        self.boards.iter().find(|b| b.id == board_id).cloned()
+    }
     fn get_buttons_by_board(&self, board_id: i64) -> Vec<ButtonRow> {
         self.buttons.iter().filter(|b| b.board_id == board_id).cloned().collect()
     }
