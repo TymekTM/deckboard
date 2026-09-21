@@ -191,14 +191,21 @@ impl Hub {
         self.send_to_room("both", event, payload).await;
     }
 
-    /// Emit to a room: "PRO_ROOM", "BASIC_ROOM" or "both".
+    /// Emit to a room: "PRO_ROOM", "BASIC_ROOM" or "both". Session Arcs
+    /// are snapshotted under the lock and sent after releasing it - one
+    /// slow drain must not stall every other hub operation.
     pub async fn send_to_room(&self, room: &str, event: &str, payload: Option<&str>) {
         let packet = event_packet(event, payload);
-        let sessions = self.sessions.lock().await;
-        for s in sessions.values() {
-            if room == "both" || room == s.room() {
-                s.send(packet.clone()).await;
-            }
+        let targets: Vec<_> = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .values()
+                .filter(|s| room == "both" || room == s.room())
+                .cloned()
+                .collect()
+        };
+        for s in targets {
+            s.send(packet.clone()).await;
         }
     }
 }

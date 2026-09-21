@@ -131,9 +131,14 @@ async fn socket_post(
 }
 
 /// Engine.IO v3 polling POSTs may arrive raw or form-encoded as `d=...`.
+/// Only the `d=`-encoded form is urldecoded: a raw body is already plain
+/// packets, and decoding it would corrupt every `+` and `%XX` it happens
+/// to contain.
 fn decode_post_body(body: &str) -> String {
-    let body = body.strip_prefix("d=").unwrap_or(body);
-    urldecode(body)
+    match body.strip_prefix("d=") {
+        Some(encoded) => urldecode(encoded),
+        None => body.to_string(),
+    }
 }
 
 fn urldecode(s: &str) -> String {
@@ -223,16 +228,23 @@ async fn handle_event(
                 .await;
         }
         "get_shortcuts" => {
-            let mapper = Mapper::new();
-            let boards: Vec<serde_json::Value> = state
-                .backend
-                .get_boards()
-                .iter()
-                .map(|b| {
-                    let buttons = state.backend.get_buttons_by_board(b.id);
-                    mapper.board_payload(b, &buttons, session.is_pro)
-                })
-                .collect();
+            // Board reads hit SQLite; the server runtime is
+            // single-threaded, so they run on the blocking pool.
+            let backend = state.backend.clone();
+            let is_pro = session.is_pro;
+            let boards = tokio::task::spawn_blocking(move || {
+                let mapper = Mapper::new();
+                backend
+                    .get_boards()
+                    .iter()
+                    .map(|b| {
+                        let buttons = backend.get_buttons_by_board(b.id);
+                        mapper.board_payload(b, &buttons, is_pro)
+                    })
+                    .collect::<Vec<serde_json::Value>>()
+            })
+            .await
+            .unwrap_or_default();
             let payload = serde_json::to_string(&boards).unwrap_or_else(|_| "[]".into());
             session.send(event_packet("get_shortcuts", Some(&payload))).await;
         }
@@ -240,7 +252,12 @@ async fn handle_event(
             let arg = args.first().cloned().unwrap_or(json!({}));
             let Some(id) = arg_id(&arg) else { return };
             let is_tap_start = arg.get("isTapStart").and_then(|v| v.as_bool()).unwrap_or(false);
-            let Some(button) = state.backend.get_button(id) else {
+            let backend = state.backend.clone();
+            let button = tokio::task::spawn_blocking(move || backend.get_button(id))
+                .await
+                .ok()
+                .flatten();
+            let Some(button) = button else {
                 tracing::debug!(id, "exec_shortcut: unknown id");
                 return;
             };
@@ -265,35 +282,45 @@ async fn handle_event(
                 }
             }
             let mut sink = Sink(tx, val_tx, third_tx);
-            // actions may sleep (multiaction delays): keep them off the
-            // async workers
+            // The exec runs detached, not awaited: multiaction delays,
+            // url fetches and Discord re-auth can take seconds to minutes,
+            // and the packet loop must keep answering engine pings in the
+            // meantime or the client times out and disconnects.
             let backend = state.backend.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                backend.exec(button, is_tap_start, &mut sink)
-            })
-            .await;
-            while let Ok(board_id) = rx.try_recv() {
-                state
-                    .hub
-                    .broadcast("change_board", Some(&format!(r#"{{"boardId":{board_id}}}"#)))
-                    .await;
-            }
-            while let Ok((key, value)) = val_rx.try_recv() {
-                let data = serde_json::json!({ key: value }).to_string();
-                let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
-                state.hub.broadcast("app_status_update", Some(&payload)).await;
-            }
-            while let Ok((key, value)) = third_rx.try_recv() {
-                let data = serde_json::json!({ key: value }).to_string();
-                let payload = format!(r#"{{"app":"THIRD_PARTY_APP","data":{data}}}"#);
-                state.hub.broadcast("app_status_update", Some(&payload)).await;
-            }
+            let hub = state.hub.clone();
+            tokio::spawn(async move {
+                // actions may sleep (multiaction delays): keep them off the
+                // async workers
+                let _ = tokio::task::spawn_blocking(move || {
+                    backend.exec(button, is_tap_start, &mut sink)
+                })
+                .await;
+                while let Ok(board_id) = rx.try_recv() {
+                    hub.broadcast("change_board", Some(&format!(r#"{{"boardId":{board_id}}}"#)))
+                        .await;
+                }
+                while let Ok((key, value)) = val_rx.try_recv() {
+                    let data = serde_json::json!({ key: value }).to_string();
+                    let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+                    hub.broadcast("app_status_update", Some(&payload)).await;
+                }
+                while let Ok((key, value)) = third_rx.try_recv() {
+                    let data = serde_json::json!({ key: value }).to_string();
+                    let payload = format!(r#"{{"app":"THIRD_PARTY_APP","data":{data}}}"#);
+                    hub.broadcast("app_status_update", Some(&payload)).await;
+                }
+            });
         }
         "exec_slider" => {
             let arg = args.first().cloned().unwrap_or(json!({}));
             let Some(id) = arg_id(&arg) else { return };
             let value = arg.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let Some(button) = state.backend.get_button(id) else {
+            let backend = state.backend.clone();
+            let button = tokio::task::spawn_blocking(move || backend.get_button(id))
+                .await
+                .ok()
+                .flatten();
+            let Some(button) = button else {
                 tracing::debug!(id, "exec_slider: unknown id");
                 return;
             };
@@ -376,4 +403,19 @@ async fn ws_loop(state: Arc<AppState>, socket: WebSocket, q: SioQuery) {
     }
     pump.abort();
     state.hub.remove(&sid).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn post_body_decoding_respects_the_d_prefix() {
+        // Dart client form: urlencoded after `d=`
+        assert_eq!(decode_post_body("d=42%5B%5D"), "42[]");
+        assert_eq!(decode_post_body("d=a+b"), "a b");
+        // Raw bodies pass through untouched: `+` and `%` are literal here.
+        assert_eq!(decode_post_body(r#"42["exec","a+b"]"#), r#"42["exec","a+b"]"#);
+        assert_eq!(decode_post_body("42123%+5"), "42123%+5");
+    }
 }
