@@ -271,11 +271,16 @@ pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Resu
     let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
     let mut settings: Value =
         serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()));
-    let obj = settings.as_object_mut().expect("settings object");
+    // A settings.json that parses but is not an object (or whose
+    // `discord-deckboard` field is not an object) cannot be merged into.
+    // Error instead of panicking: this runs inside a background re-auth
+    // task, where a panic would vanish into a swallowed JoinError and the
+    // tokens would silently never persist.
+    let obj = settings.as_object_mut().ok_or_else(|| not_an_object(&raw))?;
     let package = obj
         .entry("discord-deckboard")
         .or_insert_with(|| Value::Object(Default::default()));
-    let package = package.as_object_mut().expect("package object");
+    let package = package.as_object_mut().ok_or_else(|| not_an_object(&raw))?;
     let mut field = |name: &str, value: &str| {
         let entry = package
             .entry(name.to_string())
@@ -296,6 +301,14 @@ pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Resu
         field("discordRefreshToken", r);
     }
     std::fs::write(path, serde_json::to_string_pretty(&settings).unwrap_or_default())
+}
+
+fn not_an_object(raw: &str) -> std::io::Error {
+    let excerpt: String = raw.chars().take(40).collect();
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("settings.json is not a JSON object: {excerpt}"),
+    )
 }
 
 /// Is this action one of ours?
@@ -828,6 +841,34 @@ mod tests {
         });
         let cfg = DiscordConfig::from_settings(&empty).unwrap();
         assert!(cfg.access_token.is_empty());
+    }
+
+    #[test]
+    fn save_tokens_errors_on_unmergeable_settings() {
+        // save_tokens runs inside a background re-auth task: valid JSON
+        // that is not an object (or a non-object `discord-deckboard`
+        // field) must surface as an error, not as a panic swallowed into
+        // a JoinError.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let tokens = AuthTokens { access_token: "a".into(), refresh_token: None };
+
+        std::fs::write(&path, "[1,2,3]").unwrap();
+        let err = save_tokens(&path, &tokens).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        std::fs::write(&path, r#"{"discord-deckboard": 5}"#).unwrap();
+        assert!(save_tokens(&path, &tokens).is_err());
+
+        // happy shape still persists
+        std::fs::write(&path, "{}").unwrap();
+        save_tokens(&path, &tokens).unwrap();
+        let saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["discord-deckboard"]["discordAccessToken"]["value"],
+            "a"
+        );
     }
 
     #[test]
