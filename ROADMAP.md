@@ -27,7 +27,8 @@ through a legacy compatibility layer until the new client ships.
       and default-device switching via WASAPI + IPolicyConfig (no
       PowerShell dependency, unlike the original), `speaker-device` /
       `speaker-volume` commands live, screenshot as
-      `Deckboard_<UTC stamp>.png`, `type` via clipboard paste with
+      `Deckboard_<UTC stamp>.png` (same-second captures get a `_N`
+      suffix instead of overwriting), `type` via clipboard paste with
       restore (unicode-safe). Status watcher pushes volume + mute every
       5 s and the device id every 30 s (the original's real cadence)
       over legacy `app_status_update` and the v2 state engine. Media

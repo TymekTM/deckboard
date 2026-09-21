@@ -609,6 +609,34 @@ async fn server_pings_idle_clients() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn oversized_frame_gets_typed_error_and_close() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let device = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+
+    // 1 MiB + slack: above the protocol limit but below the wire cap, so
+    // the app-level check (not tungstenite) classifies it - the spec
+    // promises a typed error, then a close.
+    let big = "x".repeat(MAX_FRAME_BYTES + 16);
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(big)).await.unwrap();
+    let err = next_frame(&mut ws).await;
+    assert_eq!(err.kind, TYPE_ERROR);
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(payload.code, error_code::TOO_LARGE);
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_))) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "connection must close after too-large");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn outdated_clients_are_closed_after_hello() {
     let (state, _dir) = test_state(sample_backend(), |cfg| {
         cfg.min_client = "9.9.9".into();

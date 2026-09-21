@@ -79,6 +79,11 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
      * no-ops instead of racing the fresh connection. */
     private var connectGeneration = 0
 
+    /** Cycle that currently has a reconnect delay pending; Failed and
+     * Disconnected often fire for the same failure, and each must not
+     * burn its own attempt. */
+    private var pendingReconnectGeneration = -1
+
     fun saveConfig(cfg: ServerConfig) {
         prefs.edit()
             .putString("host", cfg.host)
@@ -175,10 +180,14 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun scheduleReconnect() {
         if (reconnectAttempts >= MAX_RECONNECT) return
+        if (pendingReconnectGeneration == connectGeneration) return
+        pendingReconnectGeneration = connectGeneration
         reconnectAttempts++
         val generation = connectGeneration
         viewModelScope.launch {
             delay(reconnectAttempts.coerceAtMost(6) * 2_000L)
+            // free the slot: sequential failures may schedule again
+            pendingReconnectGeneration = -1
             // A newer connect() cycle (user retry or a scheduled reconnect
             // that already fired) took over while we waited.
             if (generation != connectGeneration) return@launch

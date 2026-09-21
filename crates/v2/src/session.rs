@@ -293,10 +293,18 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
     // The lookup is a SQLite read; it must not run on the async workers.
     let backend = state.backend.clone();
     let (tile, board) = (payload.tile, payload.board);
-    let button = tokio::task::spawn_blocking(move || backend.get_button(tile).filter(|b| b.board_id == board))
-        .await
-        .ok()
-        .flatten();
+    let button = match tokio::task::spawn_blocking(move || {
+        backend.get_button(tile).filter(|b| b.board_id == board)
+    })
+    .await
+    {
+        Ok(button) => button,
+        Err(join) => {
+            tracing::error!(session = session.id, tile, error = %join, "tile lookup panicked");
+            session.send_frame(&error_ack(&frame, error_code::UNKNOWN_TILE, "no such tile on that board"));
+            return;
+        }
+    };
     let Some(button) = button else {
         session.send_frame(&error_ack(&frame, error_code::UNKNOWN_TILE, "no such tile on that board"));
         return;

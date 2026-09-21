@@ -106,10 +106,13 @@ async fn ws_connect(
         return (StatusCode::BAD_REQUEST, "websocket required").into_response();
     };
     let auth = auth.expect("auth resolved above");
-    // Cap what tungstenite buffers per message before our own len check
-    // runs: without it a client could park ~64 MiB in the socket buffer
-    // for each connection before hearing `too-large`.
-    ws.max_message_size(MAX_FRAME_BYTES)
+    // Cap what tungstenite buffers per message, with headroom above
+    // MAX_FRAME_BYTES so frames between the protocol limit and the cap
+    // still reach the app-level check that answers `error too-large`
+    // (protocol-v2.md §2); beyond the cap the socket dies at the wire
+    // level. Without any cap a client could park ~64 MiB per connection
+    // before hearing `too-large`.
+    ws.max_message_size(MAX_FRAME_BYTES + 64 * 1024)
         .on_upgrade(move |socket| session::run(state, socket, auth))
 }
 
@@ -219,6 +222,10 @@ impl V2State {
 
         let mut generation = self.generation.get();
         let mut boards = self.build_boards_blocking().await;
+        // Rebuild while a write lands mid-pass. Four retries bound the
+        // work under sustained editing (the M3 editor publishing batches
+        // back to back); past the bound we serve the freshest build and
+        // the next delta or boards.sync heals the client (§4 recovery).
         for _ in 0..4 {
             let after = self.generation.get();
             if after == generation {

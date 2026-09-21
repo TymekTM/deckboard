@@ -213,6 +213,19 @@ fn arg_id(arg: &serde_json::Value) -> Option<i64> {
     })
 }
 
+/// SQLite tile lookup off the async workers; a panic in the read logs
+/// instead of vanishing into a swallowed JoinError.
+async fn get_button_blocking(state: &Arc<AppState>, id: i64) -> Option<deckboard_db::ButtonRow> {
+    let backend = state.backend.clone();
+    match tokio::task::spawn_blocking(move || backend.get_button(id)).await {
+        Ok(button) => button,
+        Err(e) => {
+            tracing::error!(id, error = %e, "button lookup panicked");
+            None
+        }
+    }
+}
+
 async fn handle_event(
     state: &Arc<AppState>,
     session: &Arc<Session>,
@@ -232,7 +245,7 @@ async fn handle_event(
             // single-threaded, so they run on the blocking pool.
             let backend = state.backend.clone();
             let is_pro = session.is_pro;
-            let boards = tokio::task::spawn_blocking(move || {
+            let boards = match tokio::task::spawn_blocking(move || {
                 let mapper = Mapper::new();
                 backend
                     .get_boards()
@@ -244,7 +257,13 @@ async fn handle_event(
                     .collect::<Vec<serde_json::Value>>()
             })
             .await
-            .unwrap_or_default();
+            {
+                Ok(boards) => boards,
+                Err(e) => {
+                    tracing::error!(error = %e, "boards read panicked");
+                    Vec::new()
+                }
+            };
             let payload = serde_json::to_string(&boards).unwrap_or_else(|_| "[]".into());
             session.send(event_packet("get_shortcuts", Some(&payload))).await;
         }
@@ -252,12 +271,7 @@ async fn handle_event(
             let arg = args.first().cloned().unwrap_or(json!({}));
             let Some(id) = arg_id(&arg) else { return };
             let is_tap_start = arg.get("isTapStart").and_then(|v| v.as_bool()).unwrap_or(false);
-            let backend = state.backend.clone();
-            let button = tokio::task::spawn_blocking(move || backend.get_button(id))
-                .await
-                .ok()
-                .flatten();
-            let Some(button) = button else {
+            let Some(button) = get_button_blocking(&state, id).await else {
                 tracing::debug!(id, "exec_shortcut: unknown id");
                 return;
             };
@@ -315,12 +329,7 @@ async fn handle_event(
             let arg = args.first().cloned().unwrap_or(json!({}));
             let Some(id) = arg_id(&arg) else { return };
             let value = arg.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let backend = state.backend.clone();
-            let button = tokio::task::spawn_blocking(move || backend.get_button(id))
-                .await
-                .ok()
-                .flatten();
-            let Some(button) = button else {
+            let Some(button) = get_button_blocking(&state, id).await else {
                 tracing::debug!(id, "exec_slider: unknown id");
                 return;
             };
