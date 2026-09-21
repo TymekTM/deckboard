@@ -97,6 +97,7 @@ pub fn run() {
             delete_button,
             clear_board,
             exec_button,
+            list_audio_devices,
             exec_slider,
             get_settings,
             set_touch_mode_hotkey,
@@ -218,13 +219,16 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     }
 
     // master audio status watcher: the original polls every 5 s and pushes
-    // speaker-volume/speaker-muted; that is what flips mute tiles live
+    // speaker-volume/speaker-muted; that is what flips mute tiles live.
+    // The active output device rides along (THIRD_PARTY_APP, like the
+    // original) but only when it changed, so tablets are not spammed.
     {
         let hub = hub.clone();
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_device: Option<String> = None;
             loop {
                 interval.tick().await;
                 // COM calls block; keep them off the runtime workers
@@ -233,16 +237,33 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                         .await
                         .ok()
                         .flatten();
-                let Some((volume, muted)) = status else {
-                    continue;
-                };
-                let payload = serde_json::json!({
-                    "app": "APP_CUSTOM_VALUE",
-                    "data": {"speaker-volume": volume, "speaker-muted": muted},
-                });
-                hub.broadcast("app_status_update", Some(&payload.to_string()))
-                    .await;
-                let _ = app.emit("app-status-update", &payload);
+                if let Some((volume, muted)) = status {
+                    let payload = serde_json::json!({
+                        "app": "APP_CUSTOM_VALUE",
+                        "data": {"speaker-volume": volume, "speaker-muted": muted},
+                    });
+                    hub.broadcast("app_status_update", Some(&payload.to_string()))
+                        .await;
+                    let _ = app.emit("app-status-update", &payload);
+                }
+                let device = tauri::async_runtime::spawn_blocking(
+                    deckboard_actions::audio::default_output_device_id,
+                )
+                .await
+                .ok()
+                .flatten();
+                if let Some(id) = device {
+                    if last_device.as_deref() != Some(id.as_str()) {
+                        last_device = Some(id.clone());
+                        let payload = serde_json::json!({
+                            "app": "THIRD_PARTY_APP",
+                            "data": {"speaker-device": id},
+                        });
+                        hub.broadcast("app_status_update", Some(&payload.to_string()))
+                            .await;
+                        let _ = app.emit("app-status-update", &payload);
+                    }
+                }
             }
         });
     }
@@ -665,6 +686,18 @@ async fn exec_slider(state: State<'_, DesktopState>, id: i64, value: f64) -> Res
     };
     let _ = tauri::async_runtime::spawn_blocking(move || backend.slider(button, value)).await;
     Ok(())
+}
+
+/// Active audio output endpoints for the Set Audio Device dialog.
+#[tauri::command]
+async fn list_audio_devices() -> Result<Vec<serde_json::Value>, String> {
+    let devices = tauri::async_runtime::spawn_blocking(deckboard_actions::audio::output_devices)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(devices
+        .into_iter()
+        .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
+        .collect())
 }
 
 /// Editor-local settings (currently just the touch-mode hotkey).

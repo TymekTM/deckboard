@@ -144,7 +144,7 @@ export const CATALOG = [
     icon: "volume-up",
     color: "#27ae60",
     dual: true,
-    fields: [{ key: "speaker", label: "Device id" }],
+    fields: [{ key: "speaker", label: "Device", devices: "audio" }],
   },
   { value: "speaker-volume", label: "Volume Control", mode: "slider", icon: "sliders-h", color: "#27ae60" },
   {

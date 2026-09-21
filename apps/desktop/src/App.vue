@@ -14,6 +14,7 @@ const status = ref({ dbOk: false, port: 0, clients: 0, version: "" });
 const touchMode = ref(false);
 const touchBoardId = ref(null);
 const knownInputs = ref([]);
+const audioDevices = ref([]);
 
 // Live state mirrors of the original client: customValues holds pushed
 // values (APP_CUSTOM_VALUE), appStates per-integration status (APP_OBS...).
@@ -38,6 +39,11 @@ function applyStatusUpdate(payload) {
       break;
     case "APP_DISCORD":
       mergeAppState("discord", data);
+      break;
+    case "THIRD_PARTY_APP":
+      // device id strings; keep them in customValues so the existing
+      // speaker-device watch binding (stateActive) picks them up
+      mergeCustomValues(data);
       break;
     default:
       break;
@@ -206,6 +212,7 @@ async function load() {
   status.value = await api.serverStatus();
   hotkey.value = (await api.getSettings()).hotkey;
   knownInputs.value = await api.listKnownInputs();
+  audioDevices.value = await api.listAudioDevices().catch(() => []);
   if (status.value.dbOk) {
     boards.value = await api.listBoards();
     if (!boards.value.some((b) => b.id === currentId.value)) {
@@ -620,6 +627,7 @@ function onKeydown(event) {
         :boards="boards"
         :board-background="boardBg"
         :known-inputs="knownInputs"
+        :audio-devices="audioDevices"
         @save="tileEdited"
         @delete="tileDeleted"
         @close="editingTile = null"
@@ -631,6 +639,7 @@ function onKeydown(event) {
         :boards="boards"
         :board-background="boardBg"
         :known-inputs="knownInputs"
+        :audio-devices="audioDevices"
         @create="tileCreated"
         @close="createFlow = null"
       />

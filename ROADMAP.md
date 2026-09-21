@@ -23,8 +23,19 @@ through a legacy compatibility layer until the new client ships.
       `app_status_update` (tablets flip live; the editor mirrors it via
       the customValues store). `screenshot` saves a PNG of the primary
       screen and `type` pastes through the clipboard (unicode-safe),
-      both ported from the original. Still open: speaker-device
-      switching, media info, device watcher.
+      both ported from the original. Status (2026-09-21):
+      speaker-device switching landed - `set_default_output_device`
+      flips the Windows default for all three roles via IPolicyConfig
+      (hand-declared 12-method vtable; the common 9-method layout calls
+      SetPropertyValue and still returns success), tiles select a real
+      endpoint in the editor dialog, and a 5 s watcher broadcasts
+      `THIRD_PARTY_APP {"speaker-device": id}` on every change -
+      including switches made outside the app (verified against a
+      PowerShell ground-truth probe). `play` runs local audio files
+      through MCI. A COM init fix (`CoUninitialize` only when we own
+      the apartment - S_FALSE means a pre-existing MTA) un-froze the
+      in-process audio view that used to miss later device changes.
+      Media info dropped from scope: not present in the original app.
 - [ ] **M3 - Desktop editor (MVP gate)**: Tauri 2 + Vue 3 editor: boards,
       buttons, sliders CRUD, drag/resize, dual-state, `.boardjson`
       import/export (format-compatible), touch mode, tray, hotkeys,

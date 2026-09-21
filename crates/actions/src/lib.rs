@@ -13,6 +13,7 @@ use enigo::{Keyboard as _, Mouse as _};
 
 pub mod audio;
 pub mod clipboard;
+pub mod media;
 pub mod screenshot;
 
 #[derive(Error, Debug)]
@@ -196,9 +197,7 @@ pub fn run_command(
             || k.starts_with("xsplit")
             || k.contains("twitch")
             || k.starts_with("vmod")
-            || k == "speaker-device"
             || k == "speaker-volume"
-            || k == "play"
             || k == "screenshot" =>
         {
             // M0 covers the system-level subset; integrations arrive in M7.
@@ -213,6 +212,26 @@ pub fn run_command(
         }
         "mouse-ctrl" => run_mouse(input, cmd),
         "vol" => run_vol(input, cmd),
+        "play" => {
+            let path = cmd.command.as_deref().unwrap_or_default();
+            media::play_audio(path).map_err(|e| ActionError::BadPayload("play".into(), e))
+        }
+        "speaker-device" => {
+            // command payload: {"speaker": "<endpoint id>"}
+            let id = cmd
+                .command
+                .as_deref()
+                .and_then(|c| serde_json::from_str::<Value>(c).ok())
+                .and_then(|v| {
+                    v.get("speaker").and_then(Value::as_str).map(str::to_string)
+                })
+                .unwrap_or_default();
+            if id.is_empty() {
+                return Ok(());
+            }
+            audio::set_default_output_device(&id)
+                .map_err(|e| ActionError::BadPayload("speaker-device".into(), e))
+        }
         "screenshot" => {
             let dir = cmd.command.as_deref().unwrap_or_default();
             match screenshot::take_screenshot(dir) {

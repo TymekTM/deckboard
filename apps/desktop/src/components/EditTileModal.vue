@@ -10,6 +10,8 @@ const props = defineProps({
   boards: { type: Array, required: true },
   boardBackground: { type: String, default: "#437072" },
   knownInputs: { type: Array, default: () => [] },
+  // active audio endpoints ({id, name}) for the Set Audio Device select
+  audioDevices: { type: Array, default: () => [] },
 });
 const emit = defineEmits(["save", "create", "delete", "close"]);
 
@@ -111,6 +113,23 @@ const actionGroups = computed(() => {
   return groups;
 });
 
+// catalog fields may declare a dynamic option source; currently the only
+// one is the audio endpoint list for speaker-device tiles
+function catalogFieldShape(f) {
+  if (f.devices === "audio") {
+    return {
+      key: f.key,
+      label: f.label,
+      kind: "select",
+      options: props.audioDevices.map((d) => ({ value: d.id, label: d.name })),
+    };
+  }
+  return f;
+}
+const catalogFields = computed(() =>
+  (catalogEntry.value?.fields || []).map(catalogFieldShape)
+);
+
 const catalogEntry = computed(
   () =>
     CATALOG.find((c) => c.value === form.type) ||
@@ -134,21 +153,21 @@ const stepConfig = computed(() => catalogEntry.value?.stepEditor || null);
 const fields = reactive({});
 function loadFields() {
   for (const k of Object.keys(fields)) delete fields[k];
-  const entry = catalogEntry.value;
-  if (!entry || !entry.fields) return;
+  const shaped = catalogFields.value;
+  if (!shaped.length) return;
   let obj = {};
-  if (entry.fields.some((f) => f.key !== "")) {
+  if (shaped.some((f) => f.key !== "")) {
     try {
       obj = JSON.parse(form.command || "{}") || {};
     } catch {
       obj = {};
     }
   }
-  for (const f of entry.fields) {
+  for (const f of shaped) {
     fields[f.key] = f.key === "" ? form.command || "" : obj[f.key] ?? "";
   }
   // sensible defaults for selects
-  for (const f of entry.fields) {
+  for (const f of shaped) {
     if (f.kind === "select" && fields[f.key] === "" && f.options.length) {
       fields[f.key] = f.options[0].value;
     }
@@ -158,9 +177,9 @@ function fieldVisible(f) {
   return !f.showIf || fields[f.showIf.key] === f.showIf.value;
 }
 function applyFields() {
-  const entry = catalogEntry.value;
-  if (!entry || !entry.fields) return;
-  if (entry.fields.every((f) => f.key === "")) {
+  const shaped = catalogFields.value;
+  if (!shaped.length) return;
+  if (shaped.every((f) => f.key === "")) {
     form.command = fields[""] ?? "";
     return;
   }
@@ -172,7 +191,7 @@ function applyFields() {
   } catch {
     obj = {};
   }
-  for (const f of entry.fields) {
+  for (const f of shaped) {
     const raw = fields[f.key];
     if (f.kind === "number") {
       if (raw !== "" && raw !== null && !Number.isNaN(Number(raw))) {
@@ -569,9 +588,9 @@ function colorOr(val, fallback) {
           </template>
 
           <!-- structured / generic fields (catalog + extension-declared) -->
-          <template v-else-if="catalogEntry?.fields?.length">
+          <template v-else-if="catalogFields.length">
             <label
-              v-for="f in catalogEntry.fields.filter(fieldVisible)"
+              v-for="f in catalogFields.filter(fieldVisible)"
               :key="f.key"
               class="field"
             >
