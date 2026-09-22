@@ -14,6 +14,19 @@ pub fn ext_channel(key: &str) -> String {
     format!("ext.{key}")
 }
 
+/// The numeric point a series push carries: a bare number, or the original
+/// app's custom-value object (`{"value": "12.3", "suffix": "%", ..}`) with
+/// the number extracted. `None` when the push carries no usable number.
+fn series_point(value: &serde_json::Value) -> Option<f64> {
+    value.as_f64().or_else(|| {
+        value.get("value").and_then(|inner| {
+            inner
+                .as_f64()
+                .or_else(|| inner.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+        })
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ChannelMeta {
     pub shape: StateShape,
@@ -84,8 +97,11 @@ impl StateEngine {
 
     /// Producer push. Unregistered channels auto-register as scalar, so
     /// pushes are visible before any tile references them. Series channels
-    /// accumulate numeric points in their ring buffer; non-numeric values
-    /// for series channels are dropped.
+    /// accumulate numeric points in their ring buffer; producers may push a
+    /// bare number or the original app's custom-value object (`{"value":
+    /// "12.3", "suffix": "%", ..}`) - the number is extracted either way,
+    /// matching the client's own `numericValue()` tolerance. Anything else
+    /// non-numeric is dropped.
     pub fn set(&self, channel: &str, value: serde_json::Value) {
         let mut inner = self.inner.lock().expect("state engine poisoned");
         let meta = *inner
@@ -97,7 +113,7 @@ impl StateEngine {
             });
         match meta.shape {
             StateShape::Series => {
-                let Some(point) = value.as_f64() else {
+                let Some(point) = series_point(&value) else {
                     tracing::warn!(channel, "non-numeric value for series channel dropped");
                     return;
                 };
@@ -223,6 +239,26 @@ mod tests {
     }
 
     #[test]
+    fn series_accepts_the_original_custom_value_object() {
+        let engine = StateEngine::new(120);
+        engine.register("ext.si-load-cpu", StateShape::Series, None);
+        engine.register("ext.si-load-gb-ram", StateShape::Series, None);
+        // The native system-info push (JS-extension parity): object form
+        // with the number inside, as the stock client consumes it too.
+        engine.set(
+            "ext.si-load-cpu",
+            serde_json::json!({"title": "CPU Load", "description": "Ryzen", "value": "5.3", "suffix": "%"}),
+        );
+        engine.set(
+            "ext.si-load-gb-ram",
+            serde_json::json!({"title": "RAM Usage", "value": 18.7, "suffix": "GB"}),
+        );
+        let sync = engine.snapshot();
+        assert_eq!(sync.series["ext.si-load-cpu"], vec![5.3]);
+        assert_eq!(sync.series["ext.si-load-gb-ram"], vec![18.7]);
+    }
+
+    #[test]
     fn shape_change_migrates_the_value() {
         let engine = StateEngine::new(120);
         // Producer pushed before any tile declared the channel: scalar.
@@ -231,7 +267,7 @@ mod tests {
         engine.register("ext.cpu", StateShape::Series, None);
         let sync = engine.snapshot();
         assert_eq!(sync.series["ext.cpu"], vec![0.5]);
-        assert!(sync.values.get("ext.cpu").is_none());
+        assert!(!sync.values.contains_key("ext.cpu"));
         // And back: newest point becomes the scalar value.
         engine.register("ext.cpu", StateShape::Scalar, None);
         let sync = engine.snapshot();
