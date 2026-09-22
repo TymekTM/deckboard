@@ -35,7 +35,7 @@ fn default_dir() -> Result<PathBuf> {
     {
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::UI::Shell::{
-            SHGetKnownFolderPath, FOLDERID_Pictures, KNOWN_FOLDER_FLAG,
+            FOLDERID_Pictures, SHGetKnownFolderPath, KNOWN_FOLDER_FLAG,
         };
         // returns a CoTask-allocated wide string
         let path = unsafe {
@@ -43,7 +43,7 @@ fn default_dir() -> Result<PathBuf> {
                 .map_err(|e| OsError::Failed(format!("pictures folder: {e}")))?
         };
         let s = unsafe { crate::win::take_pwstr(path) };
-        return Ok(PathBuf::from(s));
+        Ok(PathBuf::from(s))
     }
     #[cfg(not(windows))]
     {
@@ -76,7 +76,7 @@ pub fn screenshot_to_dir(dir: &str) -> Result<PathBuf> {
         image::ColorType::Rgba8,
         image::ImageFormat::Png,
     )
-        .map_err(|e| OsError::Failed(format!("png write {}: {e}", path.display())))?;
+    .map_err(|e| OsError::Failed(format!("png write {}: {e}", path.display())))?;
     Ok(path)
 }
 
@@ -84,8 +84,8 @@ pub fn screenshot_to_dir(dir: &str) -> Result<PathBuf> {
 fn grab_screen_rgba() -> Result<image::RgbaImage> {
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
-        SRCCOPY, CAPTUREBLT,
+        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, CAPTUREBLT,
+        DIB_RGB_COLORS, SRCCOPY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
@@ -97,9 +97,7 @@ fn grab_screen_rgba() -> Result<image::RgbaImage> {
         let bmp = CreateCompatibleBitmap(screen, width, height);
         let old = SelectObject(mem, bmp);
         // CAPTUREBLT includes layered windows like the original capture did
-        let blit = BitBlt(
-            mem, 0, 0, width, height, screen, 0, 0, SRCCOPY | CAPTUREBLT,
-        );
+        let blit = BitBlt(mem, 0, 0, width, height, screen, 0, 0, SRCCOPY | CAPTUREBLT);
         let mut bmi = BITMAPINFO::default();
         bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
         // negative height: rows top-down, matching the PNG layout
@@ -155,7 +153,12 @@ mod tests {
         // instead of returning the same path (which would overwrite it).
         let second = unique_screenshot_path(dir.path(), stamp);
         assert_ne!(first, second);
-        assert!(second.file_name().unwrap().to_str().unwrap().ends_with("_2.png"));
+        assert!(second
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .ends_with("_2.png"));
         std::fs::write(&second, b"png").unwrap();
         let third = unique_screenshot_path(dir.path(), stamp);
         assert!(third != second && third != first);

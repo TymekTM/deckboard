@@ -31,6 +31,13 @@ pub fn get_text() -> Result<String> {
             OpenClipboard(HWND::default())
                 .map_err(|e| OsError::Failed(format!("open clipboard: {e}")))?;
             let result = (|| {
+                use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+                // Non-text clipboard content (an image, a delayed-render
+                // payload) is "no text", not an error: GetClipboardData
+                // would fail with ERROR_ELEMENT_NOT_FOUND.
+                if IsClipboardFormatAvailable(13 /* CF_UNICODETEXT */).is_err() {
+                    return Ok(String::new());
+                }
                 let handle = GetClipboardData(13 /* CF_UNICODETEXT */)
                     .map_err(|e| OsError::Failed(format!("get clipboard: {e}")))?;
                 if handle.0.is_null() {
@@ -67,7 +74,9 @@ pub fn set_text(text: &str) -> Result<()> {
         use windows::Win32::System::DataExchange::{
             CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
         };
-        use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+        use windows::Win32::System::Memory::{
+            GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+        };
         unsafe {
             OpenClipboard(HWND::default())
                 .map_err(|e| OsError::Failed(format!("open clipboard: {e}")))?;
@@ -75,10 +84,8 @@ pub fn set_text(text: &str) -> Result<()> {
                 EmptyClipboard().map_err(|e| OsError::Failed(format!("empty clipboard: {e}")))?;
                 let mut wide: Vec<u16> = text.encode_utf16().collect();
                 wide.push(0);
-                let handle =
-                    GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).map_err(|e| {
-                        OsError::Failed(format!("clipboard alloc: {e}"))
-                    })?;
+                let handle = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2)
+                    .map_err(|e| OsError::Failed(format!("clipboard alloc: {e}")))?;
                 let ptr = GlobalLock(handle);
                 if ptr.is_null() {
                     let _ = GlobalFree(handle);

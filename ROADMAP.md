@@ -55,6 +55,9 @@ through a legacy compatibility layer until the new client ships.
       live second-state preview (extension/custom-value pushes broadcast
       as `app_status_update` and forwarded to the editor, which mirrors
       the original ToggleButton `isActive` over `customValues`/app state).
+      Cutover (2026-09-22): the editor replaced the original app for daily
+      use on this machine - installed from the NSIS bundle, HKCU Run
+      autostart on, original autostart bat disabled.
 - [ ] **M4 - Kotlin/Compose client MVP**: boards/buttons/sliders/toggles,
       live state, offline cache, QR/USB pairing. Includes Android plumbing:
       foreground service + battery-optimization exemption prompt (WS dies
@@ -80,12 +83,12 @@ through a legacy compatibility layer until the new client ships.
   come after MVP ships.
 - **Twitter removed** everywhere (commands, services, OAuth route).
 - **Single port 8500** for both protocols: legacy lives at
-  `/socket.io/?EIO=3...`, protocol v2 at `/v2/ws` (plain WebSocket, JSON
-  frames, see `deckboard-proto`). **Temporary:** the server binary defaults
-  to **8501** while the original desktop app is still in use (it owns 8500
-  and the DB); note the stock Android client hardcodes 8500, so real-tablet
-  testing means closing the original app and running with
-  `DECKBOARD_PORT=8500` (or after the default is flipped back).
+      `/socket.io/?EIO=3...`, protocol v2 at `/v2/ws` (plain WebSocket, JSON
+      frames, see `deckboard-proto`). The temporary 8501 split ended on
+      2026-09-22: the original desktop app was retired from daily use (its
+      `deckboard.bat` autostart removed), 8500 is the default again, and the
+      desktop editor is the daily driver (single instance, logs in
+      `~/deckboard/logs/`, close-to-tray).
 - **ffmpeg optional**: transcoding/normalization happens only when a
   `ffmpeg` binary is found in PATH; otherwise assets are served as-is and
   the client decodes natively (H.264/VP9 in WebView/Media3).

@@ -8,6 +8,7 @@
 //! - [`clipboard`]: text get/set + the paste round-trip the original app
 //!   used for unicode text. Linux would use the X11/Wayland clipboard.
 //! - [`capture`]: primary-screen PNG grab. Linux would use XShm/pipewire.
+//!
 //! Non-Windows builds compile with stubs returning `Unsupported`.
 
 pub mod capture;
@@ -79,10 +80,11 @@ mod tests {
     fn screenshot_filename_matches_original_shape() {
         // original: UTC ISO stamp with separators stripped, e.g.
         // Deckboard_20260914142233.png
-        let name = capture::screenshot_filename(chrono::DateTime::parse_from_rfc3339(
-            "2026-09-14T14:22:33Z",
-        )
-        .unwrap().into());
+        let name = capture::screenshot_filename(
+            chrono::DateTime::parse_from_rfc3339("2026-09-14T14:22:33Z")
+                .unwrap()
+                .into(),
+        );
         assert_eq!(name, "Deckboard_20260914142233.png");
     }
 }

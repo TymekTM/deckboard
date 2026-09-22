@@ -38,6 +38,9 @@ cd apps/desktop && npx vite build
 | `DECKBOARD_DB`      | `~/deckboard/database.db`  | Database location (profiling/hermetic runs) |
 | `DECKBOARD_EXT_DIR` | `~/deckboard/extensions`   | Extension directory                       |
 
+The release build writes a daily-rotated log to `~/deckboard/logs/`
+(`deckboard-desktop.log.YYYY-MM-DD`); `RUST_LOG=debug` raises the level.
+
 The original Deckboard app must be closed while this one runs on the real
 database (ADR-001: single writer). To evaluate side by side with the
 original, point `DECKBOARD_DB` at a copy and pick a free port:

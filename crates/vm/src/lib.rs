@@ -431,11 +431,21 @@ mod tests {
         assert!(matches!(err, VmError::BadPayload("action", _)));
     }
 
+    /// The remote API is single-client: parallel live tests in one process
+    /// would race their logins and crash the harness (0xc0000005). In the
+    /// app the shared `Mutex<VoicemeeterState>` in the backend plays this
+    /// role - the tests must not run the FFI concurrently either.
+    fn live_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LIVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LIVE_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Live check: reads the real Strip[2].A1 routing state. Run explicitly:
     /// `cargo test -p deckboard-vm -- --ignored live_get`
     #[test]
     #[ignore = "reads the live Voicemeeter state"]
     fn live_get_strip2_a1() {
+        let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
         let v = vm.read_strip(2, "A1").expect("read Strip[2].A1");
         println!("Strip[2].A1 = {v}");
@@ -446,6 +456,7 @@ mod tests {
     #[test]
     #[ignore = "flips live audio routing twice"]
     fn live_toggle_probe() {
+        let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
         let v0 = vm.read_strip(2, "A1").unwrap();
         vm.execute(
@@ -468,6 +479,7 @@ mod tests {
     #[test]
     #[ignore = "fires Command.Restart on the live audio engine"]
     fn live_restart() {
+        let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
         vm.execute("vm-restart", &Value::Null).unwrap();
     }

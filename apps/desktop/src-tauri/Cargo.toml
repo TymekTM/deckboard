@@ -17,11 +17,13 @@ tokio = { workspace = true }
 axum = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = "0.2"
 dirs = "5"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 deckboard-db = { path = "../../../crates/db" }
 deckboard-backend = { path = "../../../crates/backend" }
 deckboard-actions = { path = "../../../crates/actions" }

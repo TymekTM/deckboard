@@ -192,15 +192,18 @@ impl Speaker for WinSpeaker {
     fn muted(&mut self) -> Result<bool> {
         let enumr = enumerator()?;
         let vol = endpoint_volume(&default_device(&enumr)?)?;
-        let mute = unsafe { vol.GetMute() }.map_err(|e| OsError::Failed(format!("get mute: {e}")))?;
+        let mute =
+            unsafe { vol.GetMute() }.map_err(|e| OsError::Failed(format!("get mute: {e}")))?;
         Ok(mute.as_bool())
     }
 
     fn set_volume(&mut self, percent: f32) -> Result<()> {
         let enumr = enumerator()?;
         let vol = endpoint_volume(&default_device(&enumr)?)?;
-        unsafe { vol.SetMasterVolumeLevelScalar(percent.clamp(0.0, 100.0) / 100.0, std::ptr::null()) }
-            .map_err(|e| OsError::Failed(format!("set volume: {e}")))
+        unsafe {
+            vol.SetMasterVolumeLevelScalar(percent.clamp(0.0, 100.0) / 100.0, std::ptr::null())
+        }
+        .map_err(|e| OsError::Failed(format!("set volume: {e}")))
     }
 
     fn devices(&mut self) -> Result<Vec<AudioDevice>> {
@@ -241,7 +244,9 @@ impl Speaker for WinSpeaker {
         // three so every consumer follows the switch (what the Settings
         // app and SoundSwitch do)
         for role in 0..3i32 {
-            let hr = HRESULT(unsafe { ((*config.vtbl).set_default_endpoint)(config.raw, PCWSTR(wide.as_ptr()), role) });
+            let hr = HRESULT(unsafe {
+                ((*config.vtbl).set_default_endpoint)(config.raw, PCWSTR(wide.as_ptr()), role)
+            });
             if hr.is_err() {
                 return Err(OsError::Failed(format!("set default endpoint: {hr}")));
             }

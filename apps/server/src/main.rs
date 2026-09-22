@@ -130,10 +130,12 @@ async fn main() -> anyhow::Result<()> {
         backend: backend as Arc<dyn deckboard_legacy::Backend>,
     });
 
+    // Port 8500 is what the stock Android client hardcodes (and the original
+    // app's default); `DECKBOARD_PORT` overrides it for side-by-side runs.
     let port: u16 = std::env::var("DECKBOARD_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8501);
+        .unwrap_or(8500);
 
     // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
     // /v2/pair. Devices/assets live next to the DB; DECKBOARD_DEVICES and
@@ -155,7 +157,10 @@ async fn main() -> anyhow::Result<()> {
         engine: Arc::new(deckboard_v2::StateEngine::new(deckboard_proto::SERIES_CAP)),
         generation: deckboard_v2::Generation::starting_at(1),
         boards_cache: Default::default(),
-        config: deckboard_v2::V2Config { public_port: port, ..Default::default() },
+        config: deckboard_v2::V2Config {
+            public_port: port,
+            ..Default::default()
+        },
     });
 
     // Extension pushes feed both protocols: the legacy app_status_update
@@ -177,7 +182,9 @@ async fn main() -> anyhow::Result<()> {
             feed(data.clone());
             let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
             let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
-            hub_legacy.broadcast("app_status_update", Some(&payload)).await;
+            hub_legacy
+                .broadcast("app_status_update", Some(&payload))
+                .await;
         }
     });
 
@@ -191,7 +198,9 @@ async fn main() -> anyhow::Result<()> {
             feed(data.clone());
             let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
             let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
-            hub_legacy.broadcast("app_status_update", Some(&payload)).await;
+            hub_legacy
+                .broadcast("app_status_update", Some(&payload))
+                .await;
         }
     });
 
@@ -213,8 +222,11 @@ async fn main() -> anyhow::Result<()> {
                 let with_device = cycle == 1;
                 let snapshot = tokio::task::spawn_blocking(move || {
                     let (volume, muted) = backend.speaker_status();
-                    let device =
-                        if with_device { backend.speaker_device_id() } else { None };
+                    let device = if with_device {
+                        backend.speaker_device_id()
+                    } else {
+                        None
+                    };
                     (volume, muted, device)
                 })
                 .await
@@ -251,11 +263,6 @@ async fn main() -> anyhow::Result<()> {
         v2.config.patch_interval,
     ));
 
-    // TEMPORARY default 8501: the original desktop app still owns 8500 and
-    // the DB. Note the stock Android client hardcodes port 8500 - testing
-    // with the real tablet requires closing the old app so we can bind 8500
-    // (set DECKBOARD_PORT=8500), or waiting for protocol v2 (our client).
-    // Flip the default back to 8500 when the original app is retired.
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("deckboard server listening on {addr} (legacy /socket.io/ + v2 /v2/ws)");
@@ -272,6 +279,10 @@ async fn main() -> anyhow::Result<()> {
 
     // ConnectInfo is needed by the loopback guard on POST /v2/pair.
     let app = deckboard_legacy::router(state).merge(deckboard_v2::router(v2));
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

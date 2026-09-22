@@ -49,11 +49,30 @@ struct BoardWithButtons {
 }
 
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // The release build is a windowed binary with no console, so logs go to
+    // a daily-rotated file next to the rest of the deckboard data (only
+    // `RUST_LOG` needs stderr for development). A missing home directory
+    // keeps the stdout fallback rather than blocking startup.
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    if let Some(home) = dirs::home_dir() {
+        let log_dir = home.join("deckboard/logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
+            log_dir,
+            "deckboard-desktop.log",
+        ));
+        // The guard owns the flush-worker thread; dropping it would lose the
+        // tail of the log, and the writer must outlive `run()` anyway.
+        std::mem::forget(guard);
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(writer)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     // Cap the async worker pool: the tokio default is one worker per logical
     // core (28 threads on a big desktop), each costing stack plus runtime
@@ -71,12 +90,29 @@ pub fn run() {
     std::mem::forget(runtime);
 
     tauri::Builder::default()
+        // Must be the first plugin: a second launch would fight this instance
+        // for port 8500 and the SQLite file, so it only surfaces the window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .on_window_event(|window, event| {
+            // The embedded server keeps the tablets connected; closing the
+            // window only hides it. The tray (Show / Hide, Quit Deckboard)
+            // stays in charge of the real exit.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             let state = setup_core(app.handle().clone());
             app.manage(state);
@@ -136,10 +172,12 @@ fn register_ext_input(
 /// ADR-001), load extensions and start the embedded legacy server. A failure
 /// keeps the UI alive with `backend: None` so the window can explain why.
 fn setup_core(app: tauri::AppHandle) -> DesktopState {
+    // Port 8500 is what the stock Android client hardcodes (and the original
+    // app's default); `DECKBOARD_PORT` overrides it for side-by-side runs.
     let port: u16 = std::env::var("DECKBOARD_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8501);
+        .unwrap_or(8500);
 
     // DECKBOARD_DB overrides the database location (profiling / hermetic runs)
     let db_path = std::env::var_os("DECKBOARD_DB").map(std::path::PathBuf::from);
@@ -283,11 +321,15 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     });
     tauri::async_runtime::spawn(async move {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-        let listener = match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("cannot bind {addr}: {e}");
-                return;
+        // A busy port must not cost the whole session: a leftover instance
+        // releasing 8500 (or the old app finishing its shutdown) self-heals.
+        let listener = loop {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => break l,
+                Err(e) => {
+                    tracing::error!("cannot bind {addr}: {e} - retrying in 5 s");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
             }
         };
         tracing::info!("legacy server listening on {addr}");
@@ -703,10 +745,9 @@ async fn list_audio_devices(
     state: State<'_, DesktopState>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let backend = state.backend()?;
-    let devices =
-        tauri::async_runtime::spawn_blocking(move || backend.speaker_devices())
-            .await
-            .map_err(|e| e.to_string())?;
+    let devices = tauri::async_runtime::spawn_blocking(move || backend.speaker_devices())
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(devices
         .into_iter()
         .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))

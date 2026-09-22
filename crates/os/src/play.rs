@@ -25,7 +25,14 @@ pub fn play_audio(path: &str) -> Result<(), String> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
     fn mci(s: &str) -> u32 {
-        unsafe { mciSendStringW(PCWSTR(wide(s).as_ptr()), std::ptr::null_mut(), 0, std::ptr::null_mut()) }
+        unsafe {
+            mciSendStringW(
+                PCWSTR(wide(s).as_ptr()),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        }
     }
 
     if path.trim().is_empty() {
@@ -35,7 +42,9 @@ pub fn play_audio(path: &str) -> Result<(), String> {
     let _ = mci("close deckboard_play");
     // mpegvideo covers mp3/wma; plain open handles wav if that fails
     let quoted = path.replace('"', "'");
-    let ok = mci(&format!("open \"{quoted}\" type mpegvideo alias deckboard_play")) == 0
+    let ok = mci(&format!(
+        "open \"{quoted}\" type mpegvideo alias deckboard_play"
+    )) == 0
         || mci(&format!("open \"{quoted}\" alias deckboard_play")) == 0;
     if !ok {
         let _ = mci("close deckboard_play");
