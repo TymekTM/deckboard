@@ -27,6 +27,11 @@ use tracing::warn;
 use crate::host::{ExtRuntime, HostError, HostEvent};
 use thiserror::Error;
 
+/// One probe answer: metadata plus the channel to a spawned runtime, or the
+/// load error. A `type` alias keeps the plan enum below readable.
+type ProbeResponseRx =
+    mpsc::Receiver<Result<(ProbeMeta, Option<mpsc::Sender<ExtRequest>>), HostError>>;
+
 #[derive(Debug, Clone)]
 pub enum ExtEvent {
     SetValue(Value),
@@ -115,8 +120,7 @@ pub enum ManagerError {
 }
 
 /// What the metadata cache stores per package (see `load` docs).
-#[derive(Serialize, Deserialize)]
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct CachedMeta {
     package: String,
     signature: u64,
@@ -158,7 +162,11 @@ impl ExtManager {
         let Some(list) = std::fs::read_dir(dir).ok() else {
             tracing::info!(dir = %dir.display(), "no extensions directory");
             return (
-                Arc::new(ExtManager { entries, inputs: all_inputs, events_tx }),
+                Arc::new(ExtManager {
+                    entries,
+                    inputs: all_inputs,
+                    events_tx,
+                }),
                 events_rx,
             );
         };
@@ -191,11 +199,17 @@ impl ExtManager {
             /// Cache hit, no timers: metadata only, runtime spawns lazily.
             Lazy { meta: ProbeMeta },
             /// Cache hit with timers: runtime spawned during planning.
-            Resident { meta: ProbeMeta, dispatch: Option<mpsc::Sender<ExtRequest>> },
-            Failed { meta: Option<ProbeMeta>, error: String },
+            Resident {
+                meta: ProbeMeta,
+                dispatch: Option<mpsc::Sender<ExtRequest>>,
+            },
+            Failed {
+                meta: Option<ProbeMeta>,
+                error: String,
+            },
             /// Cold cache: probe thread still running.
             Pending {
-                rx: mpsc::Receiver<Result<(ProbeMeta, Option<mpsc::Sender<ExtRequest>>), crate::host::HostError>>,
+                rx: ProbeResponseRx,
                 signature: Option<u64>,
             },
         }
@@ -225,10 +239,16 @@ impl ExtManager {
                     // spawn, no JS on this thread)
                     tracing::info!(package = %package, "timer extension from metadata cache - loading runtime");
                     match spawn_runtime(&path, &package, &configs, &events_tx) {
-                        Ok(dispatch) => Plan::Resident { meta, dispatch: Some(dispatch) },
+                        Ok(dispatch) => Plan::Resident {
+                            meta,
+                            dispatch: Some(dispatch),
+                        },
                         Err(e) => {
                             warn!(package = %package, error = %e, "extension failed to load - disabled");
-                            Plan::Failed { meta: Some(meta), error: e.to_string() }
+                            Plan::Failed {
+                                meta: Some(meta),
+                                error: e.to_string(),
+                            }
                         }
                     }
                 } else {
@@ -247,12 +267,19 @@ impl ExtManager {
                         let package = package.clone();
                         let events_tx = events_tx.clone();
                         move || {
-                            let _ = res_tx.send(load_extension(&path, &package, &configs, &events_tx));
+                            let _ =
+                                res_tx.send(load_extension(&path, &package, &configs, &events_tx));
                         }
                     });
                 match spawned {
-                    Ok(_) => Plan::Pending { rx: res_rx, signature },
-                    Err(e) => Plan::Failed { meta: None, error: format!("probe thread spawn: {e}") },
+                    Ok(_) => Plan::Pending {
+                        rx: res_rx,
+                        signature,
+                    },
+                    Err(e) => Plan::Failed {
+                        meta: None,
+                        error: format!("probe thread spawn: {e}"),
+                    },
                 }
             };
             plans.push((package, path, plan));
@@ -265,7 +292,10 @@ impl ExtManager {
                 Plan::Resident { meta, dispatch } => (meta, dispatch),
                 Plan::Failed { meta, error } => {
                     entries.push(ExtEntry {
-                        name: meta.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| package.clone()),
+                        name: meta
+                            .as_ref()
+                            .map(|m| m.name.clone())
+                            .unwrap_or_else(|| package.clone()),
                         package,
                         actions: meta.map(|m| m.actions).unwrap_or_default(),
                         residence: std::sync::Mutex::new(Residence::Failed(error)),
@@ -282,9 +312,9 @@ impl ExtManager {
                                 name: package.clone(),
                                 package,
                                 actions: Vec::new(),
-                                residence: std::sync::Mutex::new(
-                                    Residence::Failed("load timed out after 30s".into()),
-                                ),
+                                residence: std::sync::Mutex::new(Residence::Failed(
+                                    "load timed out after 30s".into(),
+                                )),
                             });
                             continue;
                         }
@@ -330,7 +360,10 @@ impl ExtManager {
                 }
                 None => {
                     tracing::info!(package = %package, name = %meta.name, actions = ?meta.actions, "extension lazy (runtime loads on first execute)");
-                    let configs = settings.get(&package).cloned().unwrap_or_else(|| Value::Object(Default::default()));
+                    let configs = settings
+                        .get(&package)
+                        .cloned()
+                        .unwrap_or_else(|| Value::Object(Default::default()));
                     entries.push(ExtEntry {
                         package,
                         name: meta.name,
@@ -342,7 +375,14 @@ impl ExtManager {
         }
 
         cache.flush();
-        (Arc::new(ExtManager { entries, inputs: all_inputs, events_tx }), events_rx)
+        (
+            Arc::new(ExtManager {
+                entries,
+                inputs: all_inputs,
+                events_tx,
+            }),
+            events_rx,
+        )
     }
 
     /// Runtime threads are spawned at load time and self-manage their
@@ -355,21 +395,21 @@ impl ExtManager {
                 tracing::debug!(target: "deckboard_ext", value = %v, "setValue event forwarded");
                 let _ = tx.send(ExtEvent::SetValue(v));
             }
-            HostEvent::Log(level, msg) => {
-                match level.as_str() {
-                    "warn" => warn!(target: "deckboard_ext", "{msg}"),
-                    "error" => tracing::error!(target: "deckboard_ext", "{msg}"),
-                    "debug" => tracing::debug!(target: "deckboard_ext", "{msg}"),
-                    _ => tracing::info!(target: "deckboard_ext", "{msg}"),
-                }
-            }
+            HostEvent::Log(level, msg) => match level.as_str() {
+                "warn" => warn!(target: "deckboard_ext", "{msg}"),
+                "error" => tracing::error!(target: "deckboard_ext", "{msg}"),
+                "debug" => tracing::debug!(target: "deckboard_ext", "{msg}"),
+                _ => tracing::info!(target: "deckboard_ext", "{msg}"),
+            },
             HostEvent::IntervalStart(..) | HostEvent::IntervalClear(_) => {}
         }
     }
 
     /// Does any extension handle this action type?
     pub fn has_action(&self, action: &str) -> bool {
-        self.entries.iter().any(|e| e.actions.iter().any(|a| a == action))
+        self.entries
+            .iter()
+            .any(|e| e.actions.iter().any(|a| a == action))
     }
 
     /// Execute an action on whichever extension declared it. Blocks until
@@ -377,8 +417,9 @@ impl ExtManager {
     /// extensions pay a one-time runtime spawn here.
     pub fn execute(&self, action: &str, command: Option<&str>) -> Result<(), ManagerError> {
         let args: Value = match command {
-            Some(c) if !c.trim().is_empty() => serde_json::from_str(c)
-                .unwrap_or_else(|_| Value::String(c.to_string())),
+            Some(c) if !c.trim().is_empty() => {
+                serde_json::from_str(c).unwrap_or_else(|_| Value::String(c.to_string()))
+            }
             _ => Value::Null,
         };
         for entry in &self.entries {
@@ -485,7 +526,12 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
                                         .collect()
                                 })
                                 .unwrap_or_default();
-                            Some(ExtFieldInfo { kind, label, key, items })
+                            Some(ExtFieldInfo {
+                                kind,
+                                label,
+                                key,
+                                items,
+                            })
                         })
                         .collect()
                 })
@@ -494,7 +540,10 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
                 value,
                 icon: i.get("icon").and_then(Value::as_str).map(str::to_string),
                 color: i.get("color").and_then(Value::as_str).map(str::to_string),
-                font_icon: i.get("fontIcon").and_then(Value::as_str).map(str::to_string),
+                font_icon: i
+                    .get("fontIcon")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 mode: i.get("mode").and_then(Value::as_str).map(str::to_string),
                 command: i.get("command").and_then(Value::as_str).map(str::to_string),
                 label: i.get("label").and_then(Value::as_str).map(str::to_string),
@@ -545,7 +594,12 @@ fn load_extension(
                     let (req_tx, req_rx) = mpsc::channel();
                     if res_tx.send(Ok((meta, Some(req_tx.clone())))).is_ok() {
                         runtime_loop(
-                            ExtSlot { root, package, configs, live: Some(rt) },
+                            ExtSlot {
+                                root,
+                                package,
+                                configs,
+                                live: Some(rt),
+                            },
                             req_rx,
                             events_tx,
                         );
@@ -592,7 +646,12 @@ fn spawn_runtime(
             Ok(rt) => {
                 if res_tx.send(Ok(())).is_ok() {
                     runtime_loop(
-                        ExtSlot { root, package, configs, live: Some(rt) },
+                        ExtSlot {
+                            root,
+                            package,
+                            configs,
+                            live: Some(rt),
+                        },
                         req_rx,
                         events_tx,
                     );
@@ -641,7 +700,11 @@ fn run_action(
     Ok(events)
 }
 
-fn runtime_loop(mut slot: ExtSlot, req_rx: mpsc::Receiver<ExtRequest>, events_tx: tokio_mpsc::UnboundedSender<ExtEvent>) {
+fn runtime_loop(
+    mut slot: ExtSlot,
+    req_rx: mpsc::Receiver<ExtRequest>,
+    events_tx: tokio_mpsc::UnboundedSender<ExtEvent>,
+) {
     loop {
         // Timers only run while a live interpreter is held; without one
         // the thread blocks on recv() with no wakeups at all.
@@ -655,12 +718,18 @@ fn runtime_loop(mut slot: ExtSlot, req_rx: mpsc::Receiver<ExtRequest>, events_tx
             Duration::ZERO
         };
         let request = if wait.is_zero() {
-            req_rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            req_rx
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
         } else {
             req_rx.recv_timeout(wait)
         };
         match request {
-            Ok(ExtRequest::Execute { action, args, reply }) => {
+            Ok(ExtRequest::Execute {
+                action,
+                args,
+                reply,
+            }) => {
                 // execute() drains setValue/interval events itself; the
                 // manager forwards whatever the reply carries
                 let _ = reply.send(run_action(&mut slot, &action, &args));
@@ -707,7 +776,11 @@ impl MetadataCache {
             .and_then(|bytes| serde_json::from_slice::<Vec<CachedMeta>>(&bytes).ok())
             .map(|list| list.into_iter().map(|m| (m.package.clone(), m)).collect())
             .unwrap_or_default();
-        MetadataCache { path, entries, dirty: false }
+        MetadataCache {
+            path,
+            entries,
+            dirty: false,
+        }
     }
 
     fn valid(&self, package: &str, signature: u64) -> Option<CachedMeta> {

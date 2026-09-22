@@ -15,6 +15,8 @@ const touchMode = ref(false);
 const touchBoardId = ref(null);
 const knownInputs = ref([]);
 const audioDevices = ref([]);
+const lanAddresses = ref([]); // {name, ipv4, qr} - "Connect a tablet" popover
+const activeAddress = ref(0);
 
 // Live state mirrors of the original client: customValues holds pushed
 // values (APP_CUSTOM_VALUE), appStates per-integration status (APP_OBS...).
@@ -222,6 +224,30 @@ async function load() {
   if (touchBoardId.value === null) touchBoardId.value = currentId.value;
 }
 
+// Open (or close) the server-status popover; on open, refresh the LAN
+// addresses so the tablet pairing QR never shows a stale interface.
+function toggleStatusPopover() {
+  const opening = railPopover.value !== "status";
+  railPopover.value = opening ? "status" : null;
+  if (opening) {
+    activeAddress.value = 0;
+    api
+      .listLanAddresses()
+      .then((a) => (lanAddresses.value = a))
+      .catch(() => (lanAddresses.value = []));
+  }
+}
+
+function refreshLanAddresses() {
+  api
+    .listLanAddresses()
+    .then((a) => {
+      lanAddresses.value = a;
+      activeAddress.value = 0;
+    })
+    .catch(() => {});
+}
+
 async function newBoard() {
   railPopover.value = null;
   boardModal.value = { mode: "create" };
@@ -420,7 +446,7 @@ function onKeydown(event) {
           class="rail-btn"
           :class="{ on: railPopover === 'status' }"
           title="Server status"
-          @click="railPopover = railPopover === 'status' ? null : 'status'"
+          @click="toggleStatusPopover"
         >
           <i class="fas fa-wifi"></i>
           <span v-if="!status.dbOk" class="rail-alert"></span>
@@ -433,6 +459,40 @@ function onKeydown(event) {
             </div>
             <div class="pop-row tnum">0.0.0.0:{{ status.port }}</div>
             <div class="pop-row tnum">{{ status.clients }} client(s) connected</div>
+            <template v-if="status.dbOk">
+              <div class="pop-sep"></div>
+              <div class="pop-label">Connect a tablet (same Wi-Fi/LAN)</div>
+              <template v-if="lanAddresses.length">
+                <div class="lan-row">
+                  <img
+                    class="lan-qr"
+                    :src="lanAddresses[activeAddress]?.qr"
+                    alt="QR code with the desktop IP address"
+                  />
+                  <div class="lan-list">
+                    <button
+                      v-for="(a, i) in lanAddresses"
+                      :key="a.ipv4"
+                      class="lan-addr"
+                      :class="{ sel: i === activeAddress }"
+                      @click="activeAddress = i"
+                    >
+                      <span class="lan-ip tnum">{{ a.ipv4 }}:{{ status.port }}</span>
+                      <span class="lan-name">{{ a.name }}</span>
+                    </button>
+                    <button class="mini" @click="refreshLanAddresses">
+                      <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                  </div>
+                </div>
+                <div class="pop-row muted">
+                  Scan the QR in the Deckboard app, or type the address.
+                </div>
+              </template>
+              <div v-else class="pop-row muted">
+                Not connected to any local network.
+              </div>
+            </template>
           </div>
         </Transition>
       </div>
@@ -778,6 +838,35 @@ function onKeydown(event) {
 .pop-row.strong { font-weight: 500; }
 .pop-row.muted { color: var(--modal-muted); font-size: 12.5px; margin-top: 6px; }
 .pop-label { font-size: 12px; color: var(--modal-muted); margin-bottom: 2px; }
+.pop-sep { border-top: 1px solid var(--modal-line); margin: 8px 0; }
+.lan-row { display: flex; gap: 10px; align-items: flex-start; margin-top: 4px; }
+.lan-qr {
+  width: 96px;
+  height: 96px;
+  flex: none;
+  border-radius: 4px;
+  background: #fff;
+}
+.lan-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.lan-addr {
+  text-align: left;
+  padding: 3px 6px;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  transition: background 120ms ease-out;
+}
+.lan-addr:hover { background: var(--modal-field); }
+.lan-addr.sel { background: var(--modal-field); }
+.lan-ip { font-size: 13px; }
+.lan-addr.sel .lan-ip { font-weight: 700; }
+.lan-name {
+  font-size: 11.5px;
+  color: var(--modal-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .pop-error { font-size: 12px; color: var(--danger); padding-top: 4px; overflow-wrap: anywhere; }
 .hotkey-row { justify-content: space-between; }
 .hotkey-input { flex: 1; min-width: 0; padding: 5px 8px; font-size: 13px; }

@@ -31,3 +31,5 @@ deckboard-legacy = { path = "../../../crates/legacy" }
 deckboard-ext = { path = "../../../crates/ext" }
 deckboard-vm = { path = "../../../crates/vm" }
 deckboard-discord = { path = "../../../crates/discord" }
+if-addrs = "0.15.0"
+qrcode = "0.14.1"

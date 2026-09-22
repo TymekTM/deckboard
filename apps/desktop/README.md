@@ -53,6 +53,9 @@ DECKBOARD_DB=/tmp/deckboard-eval.db DECKBOARD_PORT=8520 deckboard-desktop.exe
 
 - Click an empty grid cell to create a tile at that position; double-click
   (or right-click) a tile to edit it; drag/resize with the pointer.
+- The wifi icon in the rail opens server status plus the "Connect a
+  tablet" panel: every LAN IPv4 with its QR (the stock client scans the
+  bare IP and appends port 8500, same payload the original app encoded).
 - Touch mode (play icon in the rail, or the configurable hotkey) turns the
   board into the execution surface: taps run actions, sliders drag, and
   dual-state tiles flip on live state pushes (`app_status_update`) or tap.

@@ -291,8 +291,11 @@ async fn handle_event(
         "exec_shortcut" => {
             let arg = args.first().cloned().unwrap_or(json!({}));
             let Some(id) = arg_id(&arg) else { return };
-            let is_tap_start = arg.get("isTapStart").and_then(|v| v.as_bool()).unwrap_or(false);
-            let Some(button) = get_button_blocking(&state, id).await else {
+            let is_tap_start = arg
+                .get("isTapStart")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let Some(button) = get_button_blocking(state, id).await else {
                 tracing::debug!(id, "exec_shortcut: unknown id");
                 return;
             };
@@ -331,8 +334,11 @@ async fn handle_event(
                 })
                 .await;
                 while let Ok(board_id) = rx.try_recv() {
-                    hub.broadcast("change_board", Some(&format!(r#"{{"boardId":{board_id}}}"#)))
-                        .await;
+                    hub.broadcast(
+                        "change_board",
+                        Some(&format!(r#"{{"boardId":{board_id}}}"#)),
+                    )
+                    .await;
                 }
                 while let Ok((key, value)) = val_rx.try_recv() {
                     let data = serde_json::json!({ key: value }).to_string();
@@ -350,7 +356,7 @@ async fn handle_event(
             let arg = args.first().cloned().unwrap_or(json!({}));
             let Some(id) = arg_id(&arg) else { return };
             let value = arg.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let Some(button) = get_button_blocking(&state, id).await else {
+            let Some(button) = get_button_blocking(state, id).await else {
                 tracing::debug!(id, "exec_slider: unknown id");
                 return;
             };
@@ -448,7 +454,10 @@ mod tests {
         assert_eq!(decode_post_body("d=42%5B%5D"), "42[]");
         assert_eq!(decode_post_body("d=a+b"), "a b");
         // Raw bodies pass through untouched: `+` and `%` are literal here.
-        assert_eq!(decode_post_body(r#"42["exec","a+b"]"#), r#"42["exec","a+b"]"#);
+        assert_eq!(
+            decode_post_body(r#"42["exec","a+b"]"#),
+            r#"42["exec","a+b"]"#
+        );
         assert_eq!(decode_post_body("42123%+5"), "42123%+5");
     }
 }

@@ -141,6 +141,7 @@ pub fn run() {
             set_autostart,
             read_image_data,
             list_known_inputs,
+            list_lan_addresses,
             export_boards,
             import_boards,
         ])
@@ -582,6 +583,94 @@ fn read_image_data(path: String) -> Result<String, String> {
         "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
+}
+
+/// One reachable LAN endpoint shown in the "Connect a tablet" popover.
+#[derive(Serialize)]
+struct LanAddress {
+    /// Interface name ("Ethernet", "Wi-Fi"), like the original's list.
+    name: String,
+    ipv4: String,
+    /// Data URL with the QR the stock client scans - it encodes the bare
+    /// IPv4 (the client appends port 8500 itself), matching the original.
+    qr: String,
+}
+
+/// The QR payload for one address, as an `image/svg+xml` data URL. Pure so
+/// the QR contract is testable without any interface present.
+fn qr_data_url(text: &str) -> Option<String> {
+    use base64::Engine;
+    let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .dark_color(qrcode::render::svg::Color("#242424"))
+        .light_color(qrcode::render::svg::Color("#ffffff"))
+        .build();
+    Some(format!(
+        "data:image/svg+xml;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(svg.as_bytes())
+    ))
+}
+
+/// LAN endpoints a tablet can reach: IPv4, up, non-loopback interfaces,
+/// deduplicated by address. Empty when the machine is offline - the popover
+/// then says so, like the original's wifi_off empty state.
+#[tauri::command]
+fn list_lan_addresses() -> Vec<LanAddress> {
+    let mut out: Vec<LanAddress> = Vec::new();
+    let interfaces = match if_addrs::get_if_addrs() {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!("cannot enumerate network interfaces: {e}");
+            return out;
+        }
+    };
+    for iface in &interfaces {
+        if iface.is_loopback() || !iface.is_oper_up() {
+            continue;
+        }
+        let ip = match iface.addr {
+            if_addrs::IfAddr::V4(ref v4) => v4.ip,
+            if_addrs::IfAddr::V6(_) => continue,
+        };
+        let ipv4 = ip.to_string();
+        if out.iter().any(|a| a.ipv4 == ipv4) {
+            continue;
+        }
+        if let Some(qr) = qr_data_url(&ipv4) {
+            out.push(LanAddress {
+                name: iface.name.clone(),
+                ipv4,
+                qr,
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qr_encodes_the_bare_address_like_the_original() {
+        let url = qr_data_url("192.168.0.97").expect("qr");
+        assert!(url.starts_with("data:image/svg+xml;base64,"));
+        // decode round trip: the payload must be an intact SVG document
+        use base64::Engine;
+        let svg = base64::engine::general_purpose::STANDARD
+            .decode(&url["data:image/svg+xml;base64,".len()..])
+            .expect("base64");
+        let svg = String::from_utf8(svg).expect("utf8");
+        assert!(svg.contains("<svg") && svg.contains("viewBox"));
+    }
+
+    #[test]
+    fn qr_rejects_unusable_payload() {
+        // an oversized payload cannot fit a QR code
+        let huge = "x".repeat(4000);
+        assert!(qr_data_url(&huge).is_none());
+    }
 }
 
 #[tauri::command]

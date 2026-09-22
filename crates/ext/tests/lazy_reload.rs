@@ -49,11 +49,15 @@ fn next_push(events: &mut tokio::sync::mpsc::UnboundedReceiver<deckboard_ext::Ex
     loop {
         match events.try_recv() {
             Ok(deckboard_ext::ExtEvent::SetValue(v)) => {
-                return v.get("calls").and_then(serde_json::Value::as_u64).expect("calls key")
-                    as u32;
+                return v
+                    .get("calls")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("calls key") as u32;
             }
             Ok(_) => continue,
-            Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
             Err(e) => panic!("no event arrived in time: {e}"),
         }
     }
@@ -73,7 +77,11 @@ fn stateless_extension_reloads_between_actions() {
     // the interpreter was released after the run, so the entry module is
     // re-executed and the counter starts over
     manager.execute("lazy-echo", None).expect("second execute");
-    assert_eq!(next_push(&mut events), 1, "module state resets after reload");
+    assert_eq!(
+        next_push(&mut events),
+        1,
+        "module state resets after reload"
+    );
 }
 
 #[test]
@@ -89,5 +97,9 @@ fn timed_extension_keeps_state_between_actions() {
 
     // timers keep the interpreter resident, so module state persists
     manager.execute("live-echo", None).expect("second execute");
-    assert_eq!(next_push(&mut events), 2, "module state persists on live runtime");
+    assert_eq!(
+        next_push(&mut events),
+        2,
+        "module state persists on live runtime"
+    );
 }

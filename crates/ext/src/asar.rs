@@ -56,9 +56,10 @@ impl AsarArchive {
             return Err(AsarError::Invalid("header out of bounds"));
         }
         let json = String::from_utf8_lossy(&bytes[json_start..json_start + json_len]);
-        let header: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|_| AsarError::Invalid("header json"))?;
-        let content_offset = 8usize.checked_add(header_size)
+        let header: serde_json::Value =
+            serde_json::from_str(&json).map_err(|_| AsarError::Invalid("header json"))?;
+        let content_offset = 8usize
+            .checked_add(header_size)
             .ok_or(AsarError::Invalid("header out of bounds"))?;
 
         let mut files = HashMap::new();

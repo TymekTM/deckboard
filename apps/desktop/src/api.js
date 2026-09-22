@@ -22,6 +22,7 @@ export const api = {
   setAutostart: (enable) => invoke("set_autostart", { enable }),
   readImageData: (path) => invoke("read_image_data", { path }),
   listKnownInputs: () => invoke("list_known_inputs"),
+  listLanAddresses: () => invoke("list_lan_addresses"),
   listAudioDevices: () => invoke("list_audio_devices"),
   exportBoards: (ids, path) => invoke("export_boards", { ids, path }),
   importBoards: (path) => invoke("import_boards", { path }),
