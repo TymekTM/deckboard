@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.times
 import app.deckboard.mobile.R
+import app.deckboard.mobile.proto.ChannelInfo
 import app.deckboard.mobile.proto.Tile
 import app.deckboard.mobile.proto.V2
 import kotlinx.serialization.json.JsonElement
@@ -90,6 +91,7 @@ fun Tile(
     active: Boolean,
     liveText: String?,
     series: SeriesWindow,
+    channel: ChannelInfo? = null,
     items: TileItems,
     image: ImageBitmap? = null,
     onPressStart: () -> Unit,
@@ -199,7 +201,7 @@ fun Tile(
             when (template) {
                 "slider" -> SliderTile(tile, color, icon, iconFamily, iconColor, onSlider)
                 "knob" -> KnobTile(tile, titleColor, iconColor, titleColor, onSlider)
-                "graph" -> GraphTile(tile, series, liveText, titleColor)
+                "graph" -> GraphTile(tile, series, liveText, channel, titleColor)
                 "clock" -> ClockTile(tile, icon, iconFamily, titleColor)
                 "list" -> ListTile(tile, items, titleColor, onPress = onPressEnd)
                 else -> ButtonTile(

@@ -283,6 +283,7 @@ private fun BoardChip(vm: DeckboardViewModel) {
 private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) {
     val liveValues by vm.values.collectAsState()
     val series by vm.series.collectAsState()
+    val channelMeta by vm.channelMeta.collectAsState()
     val bitmaps by vm.bitmaps.collectAsState()
     // toggles without a state channel keep client-side position state
     val positions = remember(board.id) { mutableStateMapOf<Long, Boolean>() }
@@ -327,6 +328,7 @@ private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) 
                     active = active,
                     liveText = displayText(live),
                     series = SeriesWindow(series[watchChannel] ?: emptyList()),
+                    channel = watchChannel?.let { channelMeta[it] },
                     items = TileItems(listItems(t, live)),
                     image = t.assetHash?.let { bitmaps[it] },
                     onPressStart = { vm.pressStart(board.id, t) },

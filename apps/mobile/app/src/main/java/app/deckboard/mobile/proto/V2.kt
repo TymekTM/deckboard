@@ -86,6 +86,10 @@ data class Device(
 data class ChannelInfo(
     val shape: String,
     val cap: Int? = null,
+    /** Display title captured from the producer's custom-value object. */
+    val title: String? = null,
+    /** Unit suffix captured alongside the title (e.g. "%", "GB"). */
+    val suffix: String? = null,
 )
 
 @Serializable

@@ -44,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.deckboard.mobile.proto.ChannelInfo
 import app.deckboard.mobile.proto.Tile
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.jsonPrimitive
@@ -193,40 +194,47 @@ fun ClockTile(
     }
 }
 
-/** Line chart of the server-side series window, with current value and title. */
+/** Line chart of the server-side series window. Mirrors the desktop
+ * editor's graph tile: bold title over a big current value (with the
+ * channel's unit suffix) in the top-left, the chart bleeding to the
+ * bottom edges. Title and suffix come from the tile or the welcome
+ * catalog (captured by the server from pushed custom values). */
 @Composable
 fun GraphTile(
     tile: Tile,
     history: SeriesWindow,
     liveText: String?,
+    channel: ChannelInfo?,
     titleColor: Color,
     modifier: Modifier = Modifier,
 ) {
     val lineColor = titleColor.copy(alpha = 0.9f)
+    val title = tile.style?.title ?: channel?.title
+    val suffix = channel?.suffix.orEmpty()
     Column(
-        modifier
-            .fillMaxSize()
-            .padding(6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier.fillMaxSize(),
     ) {
-        Text(
-            text = liveText ?: liveFromSeries(history) ?: "",
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            color = titleColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        if (!tile.style?.title.isNullOrEmpty()) {
+        Column(Modifier.fillMaxWidth().padding(start = 8.dp, top = 6.dp, end = 8.dp)) {
+            if (!title.isNullOrEmpty()) {
+                Text(
+                    text = title,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = titleColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Text(
-                text = tile.style?.title.orEmpty(),
-                fontSize = 10.sp,
-                color = titleColor.copy(alpha = 0.75f),
+                text = (liveText ?: liveFromSeries(history).orEmpty()) + suffix,
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Bold,
+                color = titleColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Canvas(Modifier.fillMaxWidth().fillMaxHeight().padding(top = 2.dp)) {
+        Canvas(Modifier.fillMaxWidth().fillMaxHeight()) {
             // The server keeps a 120-point window; that is denser than a
             // tile can show, so bucket-average down to MAX_DRAWN_POINTS -
             // same shape, calmer line.
@@ -257,7 +265,7 @@ fun GraphTile(
                 lineTo(0f, size.height)
                 close()
             }
-            drawPath(area, lineColor.copy(alpha = 0.22f))
+            drawPath(area, lineColor.copy(alpha = 0.35f))
             drawPath(line, lineColor, style = Stroke(width = 3f, cap = StrokeCap.Round))
         }
     }

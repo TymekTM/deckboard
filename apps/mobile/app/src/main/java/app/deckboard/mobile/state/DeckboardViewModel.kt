@@ -17,6 +17,7 @@ import app.deckboard.mobile.net.ConnState
 import app.deckboard.mobile.net.V2Client
 import app.deckboard.mobile.net.V2Event
 import app.deckboard.mobile.proto.Board
+import app.deckboard.mobile.proto.ChannelInfo
 import app.deckboard.mobile.proto.BoardOp
 import app.deckboard.mobile.proto.Tile
 import app.deckboard.mobile.proto.V2
@@ -103,6 +104,12 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
      *  Patches for these append to the chart window even when the
      *  connect-time snapshot carried no history yet (fresh server). */
     private var seriesChannels: Set<String> = emptySet()
+
+    /** Welcome channel catalog: shape plus the graph tiles' display
+     *  title/suffix captured by the server from pushed values. */
+    private val _channelMeta =
+        MutableStateFlow<Map<String, ChannelInfo>>(emptyMap())
+    val channelMeta: StateFlow<Map<String, ChannelInfo>> = _channelMeta
 
     init {
         // A paired device reconnects on its own; pairing needs the user
@@ -212,6 +219,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         _currentBoard.value = null
         _values.value = emptyMap()
         _series.value = emptyMap()
+        _channelMeta.value = emptyMap()
         _bitmaps.value = emptyMap()
     }
 
@@ -247,6 +255,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
                 seriesChannels = ev.welcome.channels
                     .filterValues { it.shape == V2.SHAPE_SERIES }
                     .keys
+                _channelMeta.value = ev.welcome.channels
                 ev.issuedToken?.let { token ->
                     Log.i(TAG, "paired, storing device token")
                     saveConfig(_config.value.copy(token = token))
