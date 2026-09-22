@@ -45,9 +45,8 @@ impl DeviceStore {
     /// start rather than silently wiping the registry.
     pub fn load(path: PathBuf) -> std::io::Result<DeviceStore> {
         let entries = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-            })?,
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e),
         };
@@ -142,8 +141,11 @@ impl DeviceStore {
     fn save(&self) {
         let entries = self.entries.lock().expect("device store poisoned");
         let tmp = self.path.with_extension("json.tmp");
-        let write = std::fs::write(&tmp, serde_json::to_vec_pretty(&*entries).unwrap_or_default())
-            .and_then(|_| std::fs::rename(&tmp, &self.path));
+        let write = std::fs::write(
+            &tmp,
+            serde_json::to_vec_pretty(&*entries).unwrap_or_default(),
+        )
+        .and_then(|_| std::fs::rename(&tmp, &self.path));
         if let Err(e) = write {
             tracing::warn!(path = %self.path.display(), error = %e, "cannot persist devices.json");
         }

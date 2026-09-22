@@ -16,7 +16,13 @@ use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
 
 /// Tile inputs this source serves: (value, icon, fontIcon, color, mode).
-pub fn input_declarations() -> Vec<(&'static str, &'static str, &'static str, &'static str, &'static str)> {
+pub fn input_declarations() -> Vec<(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+)> {
     vec![
         ("si-cpu", "headphones", "fas", "#8E44AD", "graph"),
         ("si-ram", "headphones", "fas", "#8E44AD", "graph"),
@@ -116,7 +122,11 @@ fn cpu_times() -> (u64, u64, u64) {
     extern "system" {
         fn GetSystemTimes(idle: *mut Filetime, kernel: *mut Filetime, user: *mut Filetime) -> i32;
     }
-    let (mut idle, mut kernel, mut user) = (Filetime::default(), Filetime::default(), Filetime::default());
+    let (mut idle, mut kernel, mut user) = (
+        Filetime::default(),
+        Filetime::default(),
+        Filetime::default(),
+    );
     // SAFETY: three distinct out-parameters of the documented struct size
     let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
     if ok == 0 {

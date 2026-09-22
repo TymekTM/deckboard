@@ -76,17 +76,32 @@ pub struct Frame {
 impl Frame {
     /// Client/server request frame: carries `id`, expects an `ack`.
     pub fn request(kind: &str, id: &str, payload: serde_json::Value) -> Frame {
-        Frame { v: PROTOCOL_VERSION, id: Some(id.to_string()), ack: None, kind: kind.to_string(), payload: Some(payload) }
+        Frame {
+            v: PROTOCOL_VERSION,
+            id: Some(id.to_string()),
+            ack: None,
+            kind: kind.to_string(),
+            payload: Some(payload),
+        }
     }
 
     /// Server push: no `id`/`ack`.
     pub fn push(kind: &str, payload: serde_json::Value) -> Frame {
-        Frame { v: PROTOCOL_VERSION, id: None, ack: None, kind: kind.to_string(), payload: Some(payload) }
+        Frame {
+            v: PROTOCOL_VERSION,
+            id: None,
+            ack: None,
+            kind: kind.to_string(),
+            payload: Some(payload),
+        }
     }
 
     /// Server push with a typed payload, serialized to JSON.
     pub fn push_typed<T: Serialize>(kind: &str, payload: &T) -> Frame {
-        Frame::push(kind, serde_json::to_value(payload).unwrap_or(serde_json::Value::Null))
+        Frame::push(
+            kind,
+            serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+        )
     }
 }
 
@@ -153,7 +168,9 @@ pub enum Background {
 /// Board grid background resolution of the legacy `background` column:
 /// empty string means "no color set".
 pub fn background_from_legacy(raw: &str) -> Option<Background> {
-    (!raw.is_empty()).then(|| Background::Color { color: raw.to_string() })
+    (!raw.is_empty()).then(|| Background::Color {
+        color: raw.to_string(),
+    })
 }
 
 /// Board-level v2 struct: a grid plus free-placement tiles.
@@ -445,8 +462,7 @@ mod tests {
 
     #[test]
     fn unknown_state_shape_degrades() {
-        let r: StateRef =
-            serde_json::from_str(r#"{"channel":"x","shape":"spiral"}"#).unwrap();
+        let r: StateRef = serde_json::from_str(r#"{"channel":"x","shape":"spiral"}"#).unwrap();
         assert_eq!(r.shape, StateShape::Other);
     }
 
@@ -463,7 +479,9 @@ mod tests {
     fn background_from_legacy_column() {
         assert_eq!(
             background_from_legacy("#2c3e50"),
-            Some(Background::Color { color: "#2c3e50".into() })
+            Some(Background::Color {
+                color: "#2c3e50".into()
+            })
         );
         assert_eq!(background_from_legacy(""), None);
     }
@@ -472,7 +490,12 @@ mod tests {
     fn tile_flattens_placement_and_manifest() {
         let tile = Tile {
             id: 17,
-            placement: Placement { x: 0, y: 0, w: 2, h: 1 },
+            placement: Placement {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 1,
+            },
             manifest: WidgetManifest {
                 kind: WidgetKind::Button,
                 params: serde_json::Value::Null,

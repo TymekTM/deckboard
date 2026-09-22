@@ -38,7 +38,10 @@ pub struct StateEngine {
 
 impl StateEngine {
     pub fn new(default_cap: u32) -> StateEngine {
-        StateEngine { inner: Mutex::new(Inner::default()), default_cap }
+        StateEngine {
+            inner: Mutex::new(Inner::default()),
+            default_cap,
+        }
     }
 
     /// Tiles declare their channels while boards are built; the last
@@ -48,7 +51,10 @@ impl StateEngine {
     /// series' newest point becomes the scalar value.
     pub fn register(&self, channel: &str, shape: StateShape, cap: Option<u32>) {
         let mut inner = self.inner.lock().expect("state engine poisoned");
-        let meta = ChannelMeta { shape, cap: cap.unwrap_or(self.default_cap) };
+        let meta = ChannelMeta {
+            shape,
+            cap: cap.unwrap_or(self.default_cap),
+        };
         match inner.channels.get(channel).copied() {
             Some(old) if old.shape == shape => {
                 inner.channels.insert(channel.to_string(), meta);
@@ -58,11 +64,15 @@ impl StateEngine {
                 tracing::debug!(channel, from = ?old.shape, to = ?shape, "channel shape changed, migrating value");
                 if shape == StateShape::Series {
                     if let Some(point) = inner.values.remove(channel).and_then(|v| v.as_f64()) {
-                        inner.series.insert(channel.to_string(), VecDeque::from(vec![point]));
+                        inner
+                            .series
+                            .insert(channel.to_string(), VecDeque::from(vec![point]));
                     }
                 } else if let Some(buffer) = inner.series.remove(channel) {
                     if let Some(newest) = buffer.back().copied() {
-                        inner.values.insert(channel.to_string(), serde_json::Value::from(newest));
+                        inner
+                            .values
+                            .insert(channel.to_string(), serde_json::Value::from(newest));
                     }
                 }
             }
@@ -81,7 +91,10 @@ impl StateEngine {
         let meta = *inner
             .channels
             .entry(channel.to_string())
-            .or_insert(ChannelMeta { shape: StateShape::Scalar, cap: self.default_cap });
+            .or_insert(ChannelMeta {
+                shape: StateShape::Scalar,
+                cap: self.default_cap,
+            });
         match meta.shape {
             StateShape::Series => {
                 let Some(point) = value.as_f64() else {
@@ -154,7 +167,11 @@ impl StateEngine {
                         value: serde_json::Value::from(newest),
                     })
                 } else {
-                    inner.values.get(&channel).cloned().map(|value| ChannelValue { channel, value })
+                    inner
+                        .values
+                        .get(&channel)
+                        .cloned()
+                        .map(|value| ChannelValue { channel, value })
                 }
             })
             .collect()
@@ -238,7 +255,11 @@ mod tests {
         engine.set("ext.cpu", serde_json::json!("oops"));
         // No point ever landed: the channel stays out of the snapshot and
         // nothing is dirty.
-        assert!(engine.snapshot().series.get("ext.cpu").is_none_or(|v| v.is_empty()));
+        assert!(engine
+            .snapshot()
+            .series
+            .get("ext.cpu")
+            .is_none_or(|v| v.is_empty()));
         assert!(engine.drain_dirty().is_empty());
     }
 }

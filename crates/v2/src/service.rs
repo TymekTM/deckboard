@@ -130,7 +130,9 @@ async fn pair_create(
     let code = state.pairing.new_code();
     // M1 has no desktop UI: log the QR-able URL so the operator can relay
     // it to the device by hand.
-    let host = local_lan_ip().await.unwrap_or_else(|| "127.0.0.1".to_string());
+    let host = local_lan_ip()
+        .await
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     tracing::info!(
         url = %format!("deckboard://{}:{}?pair={}", host, state.config.public_port, code),
         "pairing code minted - expires in 5 minutes"
@@ -177,7 +179,10 @@ async fn asset_get(
     (
         [
             (header::CONTENT_TYPE, content_type.to_string()),
-            (header::CACHE_CONTROL, "immutable, max-age=31536000".to_string()),
+            (
+                header::CACHE_CONTROL,
+                "immutable, max-age=31536000".to_string(),
+            ),
         ],
         bytes,
     )
@@ -213,7 +218,11 @@ impl V2State {
     /// this, and op replay is idempotent, so a snapshot that already
     /// contains a pending delta's write is safe to deliver after it.
     pub async fn boards_snapshot(&self) -> (Arc<Frame>, u64) {
-        let cached = self.boards_cache.lock().expect("boards cache poisoned").clone();
+        let cached = self
+            .boards_cache
+            .lock()
+            .expect("boards cache poisoned")
+            .clone();
         if let Some((generation, frame)) = cached {
             if generation == self.generation.get() {
                 return (frame, generation);
@@ -238,7 +247,8 @@ impl V2State {
             TYPE_BOARDS_SYNC,
             &BoardsSync { generation, boards },
         ));
-        *self.boards_cache.lock().expect("boards cache poisoned") = Some((generation, frame.clone()));
+        *self.boards_cache.lock().expect("boards cache poisoned") =
+            Some((generation, frame.clone()));
         (frame, generation)
     }
 

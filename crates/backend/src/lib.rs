@@ -350,7 +350,11 @@ impl SqlBackend {
             .command
             .as_deref()
             .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
-            .and_then(|v| v.get("urlToCall").and_then(|u| u.as_str()).map(str::to_string));
+            .and_then(|v| {
+                v.get("urlToCall")
+                    .and_then(|u| u.as_str())
+                    .map(str::to_string)
+            });
         match url {
             Some(url) => {
                 let agent = ureq::Agent::config_builder()
@@ -390,7 +394,11 @@ impl SqlBackend {
             .command
             .as_deref()
             .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
-            .and_then(|v| v.get("speaker").and_then(|s| s.as_str()).map(str::to_string));
+            .and_then(|v| {
+                v.get("speaker")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string)
+            });
         let Some(id) = id else {
             tracing::warn!(kind = "speaker-device", "tile has no speaker id configured");
             return true;

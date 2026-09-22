@@ -61,11 +61,13 @@ pub async fn run_flusher(engine: Arc<StateEngine>, hub: Arc<V2Hub>, interval: Du
         tick.tick().await;
         let changes = engine.drain_dirty();
         if !changes.is_empty() {
-            hub.broadcast_frame(&Frame::push_typed(TYPE_STATE_PATCH, &StatePatch { changes }));
+            hub.broadcast_frame(&Frame::push_typed(
+                TYPE_STATE_PATCH,
+                &StatePatch { changes },
+            ));
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -17,6 +17,8 @@ const knownInputs = ref([]);
 const audioDevices = ref([]);
 const lanAddresses = ref([]); // {name, ipv4, qr} - "Connect a tablet" popover
 const activeAddress = ref(0);
+const pairMode = ref("legacy"); // 'legacy' (stock client) | 'v2' (new client)
+const pairingOffer = ref(null); // {code, expires_in_secs, addresses} | null
 
 // Live state mirrors of the original client: customValues holds pushed
 // values (APP_CUSTOM_VALUE), appStates per-integration status (APP_OBS...).
@@ -248,6 +250,16 @@ function refreshLanAddresses() {
     .catch(() => {});
 }
 
+// Mint a one-time pairing code for the new (protocol v2) client; codes
+// live 5 minutes and are burned on first use.
+async function generatePairingCode() {
+  try {
+    pairingOffer.value = await api.createPairingCode();
+  } catch (e) {
+    console.error("pairing code", e);
+  }
+}
+
 async function newBoard() {
   railPopover.value = null;
   boardModal.value = { mode: "create" };
@@ -462,36 +474,80 @@ function onKeydown(event) {
             <template v-if="status.dbOk">
               <div class="pop-sep"></div>
               <div class="pop-label">Connect a tablet (same Wi-Fi/LAN)</div>
-              <template v-if="lanAddresses.length">
-                <div class="lan-row">
-                  <img
-                    class="lan-qr"
-                    :src="lanAddresses[activeAddress]?.qr"
-                    alt="QR code with the desktop IP address"
-                  />
-                  <div class="lan-list">
-                    <button
-                      v-for="(a, i) in lanAddresses"
-                      :key="a.ipv4"
-                      class="lan-addr"
-                      :class="{ sel: i === activeAddress }"
-                      @click="activeAddress = i"
-                    >
-                      <span class="lan-ip tnum">{{ a.ipv4 }}:{{ status.port }}</span>
-                      <span class="lan-name">{{ a.name }}</span>
-                    </button>
-                    <button class="mini" @click="refreshLanAddresses">
-                      <i class="fas fa-sync-alt"></i> Refresh
-                    </button>
+              <div class="pair-tabs">
+                <button
+                  class="pair-tab"
+                  :class="{ on: pairMode === 'legacy' }"
+                  @click="pairMode = 'legacy'"
+                >Stock client</button>
+                <button
+                  class="pair-tab"
+                  :class="{ on: pairMode === 'v2' }"
+                  @click="pairMode = 'v2'"
+                >New client (v2)</button>
+              </div>
+
+              <template v-if="pairMode === 'legacy'">
+                <template v-if="lanAddresses.length">
+                  <div class="lan-row">
+                    <img
+                      class="lan-qr"
+                      :src="lanAddresses[activeAddress]?.qr"
+                      alt="QR code with the desktop IP address"
+                    />
+                    <div class="lan-list">
+                      <button
+                        v-for="(a, i) in lanAddresses"
+                        :key="a.ipv4"
+                        class="lan-addr"
+                        :class="{ sel: i === activeAddress }"
+                        @click="activeAddress = i"
+                      >
+                        <span class="lan-ip tnum">{{ a.ipv4 }}:{{ status.port }}</span>
+                        <span class="lan-name">{{ a.name }}</span>
+                      </button>
+                      <button class="mini" @click="refreshLanAddresses">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                      </button>
+                    </div>
                   </div>
-                </div>
-                <div class="pop-row muted">
-                  Scan the QR in the Deckboard app, or type the address.
+                  <div class="pop-row muted">
+                    Scan the QR in the Deckboard app, or type the address.
+                  </div>
+                </template>
+                <div v-else class="pop-row muted">
+                  Not connected to any local network.
                 </div>
               </template>
-              <div v-else class="pop-row muted">
-                Not connected to any local network.
-              </div>
+
+              <template v-else>
+                <div v-if="!pairingOffer" class="pair-empty">
+                  <button class="mini accent" @click="generatePairingCode">
+                    <i class="fas fa-key"></i> Generate pairing code
+                  </button>
+                  <div class="pop-row muted">One-time code, valid 5 minutes.</div>
+                </div>
+                <template v-else>
+                  <div class="lan-row">
+                    <img
+                      class="lan-qr"
+                      :src="pairingOffer.addresses[activeAddress % pairingOffer.addresses.length]?.qr"
+                      alt="QR code with the pairing payload"
+                    />
+                    <div class="lan-list">
+                      <div class="pair-code tnum">{{ pairingOffer.code }}</div>
+                      <div class="lan-name">valid {{ Math.round(pairingOffer.expires_in_secs / 60) }} min, one device</div>
+                      <button class="mini" @click="generatePairingCode">
+                        <i class="fas fa-sync-alt"></i> New code
+                      </button>
+                    </div>
+                  </div>
+                  <div class="pop-row muted">
+                    Scan the QR in the new Deckboard client, or enter the code
+                    with the address {{ pairingOffer.addresses[0]?.ipv4 }}.
+                  </div>
+                </template>
+              </template>
             </template>
           </div>
         </Transition>
@@ -866,6 +922,24 @@ function onKeydown(event) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.pair-tabs { display: flex; gap: 4px; margin: 2px 0 6px; }
+.pair-tab {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--modal-muted);
+  background: transparent;
+  transition: background 120ms ease-out, color 120ms ease-out;
+}
+.pair-tab:hover { background: var(--modal-field); }
+.pair-tab.on { background: var(--modal-field); color: var(--modal-text); font-weight: 500; }
+.pair-empty { display: flex; flex-direction: column; gap: 2px; }
+.pair-code {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  line-height: 1.1;
 }
 .pop-error { font-size: 12px; color: var(--danger); padding-top: 4px; overflow-wrap: anywhere; }
 .hotkey-row { justify-content: space-between; }

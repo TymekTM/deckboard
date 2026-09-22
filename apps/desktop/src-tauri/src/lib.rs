@@ -19,6 +19,9 @@ struct DesktopState {
     port: u16,
     /// Loaded extensions, for the editor's action catalog and tile styling.
     ext: Option<Arc<ExtManager>>,
+    /// Protocol v2 pairing codes; `None` when the v2 stack failed to start
+    /// (bad devices.json or asset store) - the UI then hides pairing.
+    pairing: Option<Arc<deckboard_v2::Pairing>>,
     /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
     hotkey: std::sync::Mutex<String>,
     /// `deckboard/editor.json` - editor-local settings (hotkey), kept
@@ -142,6 +145,7 @@ pub fn run() {
             read_image_data,
             list_known_inputs,
             list_lan_addresses,
+            create_pairing_code,
             export_boards,
             import_boards,
         ])
@@ -191,6 +195,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             hub: None,
             ext: None,
             port,
+            pairing: None,
             hotkey: std::sync::Mutex::new("Ctrl+Alt+D".to_string()),
             settings_path: None,
         };
@@ -249,13 +254,86 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     let hub = Arc::new(Hub::new());
     let broadcaster = EditorBroadcaster::new(hub.clone(), backend.clone());
 
+    // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
+    // /v2/pair. Shares the backend with the legacy layer; a broken devices
+    // list or asset store only disables v2, never the whole editor.
+    let feed_v2 = Arc::new(deckboard_v2::StateEngine::new(deckboard_proto::SERIES_CAP));
+    let v2 = {
+        let devices = deckboard_v2::DeviceStore::load(home.join("deckboard/devices.json"));
+        let assets = deckboard_v2::AssetStore::open(home.join("deckboard/assets"));
+        match (devices, assets) {
+            (Ok(devices), Ok(assets)) => {
+                tracing::info!("protocol v2 ready on the shared port");
+                Some(Arc::new(deckboard_v2::V2State {
+                    hub: Arc::new(deckboard_v2::V2Hub::new()),
+                    backend: backend.clone() as Arc<dyn Backend>,
+                    devices: Arc::new(devices),
+                    pairing: Arc::new(deckboard_v2::Pairing::new()),
+                    assets: Arc::new(assets),
+                    engine: feed_v2.clone(),
+                    generation: deckboard_v2::Generation::starting_at(1),
+                    boards_cache: Default::default(),
+                    config: deckboard_v2::V2Config {
+                        public_port: port,
+                        ..Default::default()
+                    },
+                }))
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::error!("protocol v2 disabled: {e}");
+                None
+            }
+        }
+    };
+    // v2 background task: coalesced state patches.
+    if let Some(v2) = &v2 {
+        tauri::async_runtime::spawn(deckboard_v2::run_flusher(
+            v2.engine.clone(),
+            v2.hub.clone(),
+            v2.config.patch_interval,
+        ));
+    }
+    // Extension pushes feed both protocols: the legacy app_status_update
+    // broadcast (stock client) and one v2 channel per data key.
+    fn feed_ext(engine: &deckboard_v2::StateEngine, data: &serde_json::Value) {
+        if let Some(map) = data.as_object() {
+            for (key, value) in map {
+                engine.set(&format!("ext.{key}"), value.clone());
+            }
+        }
+    }
+
     // extensions push custom values -> app_status_update, like the original
     {
         let hub = hub.clone();
         let app = app.clone();
+        let feed_v2 = feed_v2.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(deckboard_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
                 tracing::debug!(keys = ?data.as_object().map(|o| o.keys().collect::<Vec<_>>()), "extension value push");
+                feed_ext(&feed_v2, &data);
+                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
+                hub.broadcast("app_status_update", Some(&payload.to_string()))
+                    .await;
+                let _ = app.emit("app-status-update", &payload);
+            }
+        });
+    }
+
+    // native system-info: declarations style si-* tiles like the JS package
+    // did, and its push loop feeds CPU/RAM and friends to both protocols on
+    // the original cadence (the JS runtime itself was dropped in M2).
+    for (value, icon, font_icon, color, mode) in deckboard_sysinfo::input_declarations() {
+        register_ext_input(value, Some(icon), Some(color), font_icon, Some(mode), None);
+    }
+    {
+        let mut sysinfo_values = deckboard_sysinfo::spawn_push();
+        let hub = hub.clone();
+        let app = app.clone();
+        let feed_v2 = feed_v2.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(data) = sysinfo_values.recv().await {
+                feed_ext(&feed_v2, &data);
                 let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
                 hub.broadcast("app_status_update", Some(&payload.to_string()))
                     .await;
@@ -272,6 +350,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         let hub = hub.clone();
         let app = app.clone();
         let backend = backend.clone();
+        let feed_v2 = feed_v2.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -292,6 +371,8 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 if let Some((Some(volume), Some(muted), _)) = snapshot {
                     // percent 0..=100 -> fraction like the original n/100
                     let level = (volume / 100.0 * 1000.0).round() / 1000.0;
+                    feed_v2.set("speaker-volume", serde_json::json!(level));
+                    feed_v2.set("speaker-muted", serde_json::json!(muted));
                     let payload = serde_json::json!({
                         "app": "APP_CUSTOM_VALUE",
                         "data": {"speaker-volume": level, "speaker-muted": muted},
@@ -303,6 +384,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 if let Some((_, _, Some(id))) = snapshot {
                     if last_device.as_deref() != Some(id.as_str()) {
                         last_device = Some(id.clone());
+                        feed_v2.set("speaker-device", serde_json::json!(id));
                         let payload = serde_json::json!({
                             "app": "THIRD_PARTY_APP",
                             "data": {"speaker-device": id},
@@ -320,6 +402,12 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         hub: hub.clone(),
         backend: backend.clone() as Arc<dyn Backend>,
     });
+    // one router for both protocols; ConnectInfo is needed by the loopback
+    // guard on POST /v2/pair
+    let app_router = match &v2 {
+        Some(v2) => deckboard_legacy::router(state.clone()).merge(deckboard_v2::router(v2.clone())),
+        None => deckboard_legacy::router(state.clone()),
+    };
     tauri::async_runtime::spawn(async move {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
         // A busy port must not cost the whole session: a leftover instance
@@ -333,7 +421,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 }
             }
         };
-        tracing::info!("legacy server listening on {addr}");
+        tracing::info!("legacy server listening on {addr} (legacy /socket.io/ + v2 /v2/ws)");
         // Engine.IO: reap sessions silent longer than pingInterval+pingTimeout
         let hub_reaper = state.hub.clone();
         tauri::async_runtime::spawn(async move {
@@ -343,7 +431,12 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 hub_reaper.reap(75).await;
             }
         });
-        if let Err(e) = axum::serve(listener, deckboard_legacy::router(state)).await {
+        if let Err(e) = axum::serve(
+            listener,
+            app_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        {
             tracing::error!("legacy server stopped: {e}");
         }
     });
@@ -361,6 +454,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         hub: Some(hub),
         ext: Some(ext_manager),
         port,
+        pairing: v2.map(|v| v.pairing.clone()),
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
     }
@@ -612,19 +706,17 @@ fn qr_data_url(text: &str) -> Option<String> {
     ))
 }
 
-/// LAN endpoints a tablet can reach: IPv4, up, non-loopback interfaces,
-/// deduplicated by address. Empty when the machine is offline - the popover
-/// then says so, like the original's wifi_off empty state.
-#[tauri::command]
-fn list_lan_addresses() -> Vec<LanAddress> {
-    let mut out: Vec<LanAddress> = Vec::new();
+/// Reachable LAN endpoints as (interface name, IPv4) pairs: IPv4, up,
+/// non-loopback, deduplicated by address. Empty when the machine is offline.
+fn lan_ipv4s() -> Vec<(String, String)> {
     let interfaces = match if_addrs::get_if_addrs() {
         Ok(list) => list,
         Err(e) => {
             tracing::warn!("cannot enumerate network interfaces: {e}");
-            return out;
+            return Vec::new();
         }
     };
+    let mut out: Vec<(String, String)> = Vec::new();
     for iface in &interfaces {
         if iface.is_loopback() || !iface.is_oper_up() {
             continue;
@@ -634,18 +726,62 @@ fn list_lan_addresses() -> Vec<LanAddress> {
             if_addrs::IfAddr::V6(_) => continue,
         };
         let ipv4 = ip.to_string();
-        if out.iter().any(|a| a.ipv4 == ipv4) {
+        if out.iter().any(|(_, seen)| seen == &ipv4) {
             continue;
         }
-        if let Some(qr) = qr_data_url(&ipv4) {
-            out.push(LanAddress {
-                name: iface.name.clone(),
-                ipv4,
-                qr,
-            });
-        }
+        out.push((iface.name.clone(), ipv4));
     }
     out
+}
+
+/// LAN endpoints a tablet can reach, each with the QR the stock client
+/// scans (it encodes the bare IP; the client appends port 8500 itself).
+#[tauri::command]
+fn list_lan_addresses() -> Vec<LanAddress> {
+    lan_ipv4s()
+        .into_iter()
+        .filter_map(|(name, ipv4)| {
+            Some(LanAddress {
+                name,
+                ipv4: ipv4.clone(),
+                qr: qr_data_url(&ipv4)?,
+            })
+        })
+        .collect()
+}
+
+/// A minted one-time pairing code plus the per-address QR for the v2
+/// client (`deckboard://<ip>:<port>?pair=<code>`, docs/protocol-v2.md).
+#[derive(Serialize)]
+struct PairingOffer {
+    code: String,
+    expires_in_secs: u64,
+    addresses: Vec<LanAddress>,
+}
+
+#[tauri::command]
+fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, String> {
+    let pairing = state.pairing.as_ref().ok_or_else(|| {
+        "protocol v2 unavailable (devices.json or asset store failed to load)".to_string()
+    })?;
+    let code = pairing.new_code();
+    let addresses = lan_ipv4s()
+        .into_iter()
+        .map(|(name, ipv4)| {
+            let url = pairing_shape(&ipv4, state.port, &code);
+            LanAddress {
+                name,
+                ipv4,
+                qr: qr_data_url(&url).unwrap_or_default(),
+            }
+        })
+        .collect();
+    tracing::info!(%code, "pairing code minted from the editor - expires in 5 minutes");
+    Ok(PairingOffer {
+        code,
+        expires_in_secs: 300,
+        addresses,
+    })
 }
 
 #[cfg(test)]
@@ -671,6 +807,18 @@ mod tests {
         let huge = "x".repeat(4000);
         assert!(qr_data_url(&huge).is_none());
     }
+
+    #[test]
+    fn pairing_url_matches_the_protocol_doc() {
+        let url = pairing_shape("192.168.0.97", 8500, "ABCD2345");
+        assert_eq!(url, "deckboard://192.168.0.97:8500?pair=ABCD2345");
+    }
+}
+
+/// The QR payload for pairing, kept separate so the command body stays
+/// thin and the exact `deckboard://` shape is pinned by a test.
+fn pairing_shape(ip: &str, port: u16, code: &str) -> String {
+    format!("deckboard://{ip}:{port}?pair={code}")
 }
 
 #[tauri::command]

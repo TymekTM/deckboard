@@ -5,7 +5,7 @@
 //! asset store.
 
 use deckboard_db::{BoardRow, ButtonRow};
-use deckboard_legacy::{Mapper, Backend};
+use deckboard_legacy::{Backend, Mapper};
 use deckboard_proto::{
     background_from_legacy, Board, Interaction, Placement, StateRef, StateShape, Style, Tile,
     WidgetKind, WidgetManifest,
@@ -112,7 +112,11 @@ fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>
         _ if app == Some("custom-value") => (WidgetKind::Toggle, vec![Interaction::Tap]),
         _ => (
             WidgetKind::Button,
-            vec![Interaction::Tap, Interaction::PressStart, Interaction::PressEnd],
+            vec![
+                Interaction::Tap,
+                Interaction::PressStart,
+                Interaction::PressEnd,
+            ],
         ),
     }
 }
@@ -124,7 +128,11 @@ fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<St
     if key.is_empty() {
         return None;
     }
-    let shape = if row.mode == "graph" { StateShape::Series } else { StateShape::Scalar };
+    let shape = if row.mode == "graph" {
+        StateShape::Series
+    } else {
+        StateShape::Scalar
+    };
     let channel = ext_channel(key);
     engine.register(&channel, shape, None);
     Some(StateRef { channel, shape })
@@ -145,9 +153,7 @@ fn style(row: &ButtonRow, legacy: &Value) -> Style {
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
-    value
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
+    value.filter(|v| !v.is_empty()).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -196,7 +202,15 @@ mod tests {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
         let tile = build_tile(&row("vol", "button", Some("vol_mute")), &assets, &engine);
-        assert_eq!(tile.placement, Placement { x: 2, y: 1, w: 2, h: 1 });
+        assert_eq!(
+            tile.placement,
+            Placement {
+                x: 2,
+                y: 1,
+                w: 2,
+                h: 1
+            }
+        );
         // The legacy quirk (app=custom-value, extra=speaker-muted) is
         // exactly the v2 Toggle: two states driven by a live channel.
         assert_eq!(tile.manifest.kind, WidgetKind::Toggle);
@@ -208,7 +222,10 @@ mod tests {
         let state = tile.manifest.state.unwrap();
         assert_eq!(state.channel, "ext.speaker-muted");
         assert_eq!(state.shape, StateShape::Scalar);
-        assert_eq!(engine.catalog()["ext.speaker-muted"].shape, StateShape::Scalar);
+        assert_eq!(
+            engine.catalog()["ext.speaker-muted"].shape,
+            StateShape::Scalar
+        );
     }
 
     #[test]
@@ -219,7 +236,11 @@ mod tests {
         assert_eq!(tile.manifest.kind, WidgetKind::Button);
         assert_eq!(
             tile.manifest.interactions,
-            vec![Interaction::Tap, Interaction::PressStart, Interaction::PressEnd]
+            vec![
+                Interaction::Tap,
+                Interaction::PressStart,
+                Interaction::PressEnd
+            ]
         );
         assert!(tile.manifest.state.is_none());
     }
@@ -257,15 +278,14 @@ mod tests {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
         let mut r = row("url", "button", Some("https://x.co"));
-        let png = format!(
-            "data:image/png;base64,{}",
-            use_base64(b"img-bytes")
-        );
+        let png = format!("data:image/png;base64,{}", use_base64(b"img-bytes"));
         r.img = Some(png);
         let tile = build_tile(&r, &assets, &engine);
         assert!(tile.manifest.asset_hash.is_some());
         assert_eq!(
-            assets.get(tile.manifest.asset_hash.as_ref().unwrap()).unwrap(),
+            assets
+                .get(tile.manifest.asset_hash.as_ref().unwrap())
+                .unwrap(),
             b"img-bytes"
         );
     }

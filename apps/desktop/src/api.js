@@ -23,6 +23,7 @@ export const api = {
   readImageData: (path) => invoke("read_image_data", { path }),
   listKnownInputs: () => invoke("list_known_inputs"),
   listLanAddresses: () => invoke("list_lan_addresses"),
+  createPairingCode: () => invoke("create_pairing_code"),
   listAudioDevices: () => invoke("list_audio_devices"),
   exportBoards: (ids, path) => invoke("export_boards", { ids, path }),
   importBoards: (path) => invoke("import_boards", { path }),

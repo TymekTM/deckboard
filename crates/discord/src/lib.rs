@@ -275,7 +275,9 @@ pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Resu
     // Error instead of panicking: this runs inside a background re-auth
     // task, where a panic would vanish into a swallowed JoinError and the
     // tokens would silently never persist.
-    let obj = settings.as_object_mut().ok_or_else(|| not_an_object(&raw))?;
+    let obj = settings
+        .as_object_mut()
+        .ok_or_else(|| not_an_object(&raw))?;
     let package = obj
         .entry("discord-deckboard")
         .or_insert_with(|| Value::Object(Default::default()));
@@ -872,7 +874,10 @@ mod tests {
         // a JoinError.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let tokens = AuthTokens { access_token: "a".into(), refresh_token: None };
+        let tokens = AuthTokens {
+            access_token: "a".into(),
+            refresh_token: None,
+        };
 
         std::fs::write(&path, "[1,2,3]").unwrap();
         let err = save_tokens(&path, &tokens).unwrap_err();
@@ -884,8 +889,7 @@ mod tests {
         // happy shape still persists
         std::fs::write(&path, "{}").unwrap();
         save_tokens(&path, &tokens).unwrap();
-        let saved: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             saved["discord-deckboard"]["discordAccessToken"]["value"],
             "a"

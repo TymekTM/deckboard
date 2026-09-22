@@ -49,7 +49,10 @@ fn hello() {
     assert_eq!(frame.ack, None);
     assert_eq!(hello.client, "deckboard-mobile");
     assert_eq!(hello.name.as_deref(), Some("Tablet salon"));
-    assert_eq!(hello.capabilities, vec!["graph".to_string(), "list".to_string()]);
+    assert_eq!(
+        hello.capabilities,
+        vec!["graph".to_string(), "list".to_string()]
+    );
 }
 
 #[test]
@@ -62,7 +65,10 @@ fn welcome() {
     assert_eq!(w.channels.len(), 2);
     assert_eq!(
         w.channels["ext.si-cpu-usage"],
-        ChannelInfo { shape: StateShape::Series, cap: Some(SERIES_CAP) }
+        ChannelInfo {
+            shape: StateShape::Series,
+            cap: Some(SERIES_CAP)
+        }
     );
     assert_eq!(w.channels["ext.speaker-muted"].shape, StateShape::Scalar);
     assert_eq!(w.channels["ext.speaker-muted"].cap, None);
@@ -79,11 +85,26 @@ fn error_frame() {
 fn boards_sync() {
     let (_, sync) = pinned::<BoardsSync>("boards.sync", TYPE_BOARDS_SYNC);
     assert_eq!(sync.generation, 7);
-    let [board] = &sync.boards[..] else { panic!("one board") };
-    assert_eq!(board.background, Some(Background::Color { color: "#2c3e50".into() }));
+    let [board] = &sync.boards[..] else {
+        panic!("one board")
+    };
+    assert_eq!(
+        board.background,
+        Some(Background::Color {
+            color: "#2c3e50".into()
+        })
+    );
     let button = &board.tiles[0];
     assert_eq!(button.id, 17);
-    assert_eq!(button.placement, Placement { x: 0, y: 0, w: 1, h: 1 });
+    assert_eq!(
+        button.placement,
+        Placement {
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1
+        }
+    );
     assert_eq!(button.manifest.kind, WidgetKind::Button);
     assert_eq!(
         button.manifest.state.as_ref().unwrap().channel,
@@ -105,7 +126,11 @@ fn boards_delta() {
             assert_eq!(tile.id, 17);
             assert_eq!(
                 tile.manifest.interactions,
-                vec![Interaction::Tap, Interaction::PressStart, Interaction::PressEnd]
+                vec![
+                    Interaction::Tap,
+                    Interaction::PressStart,
+                    Interaction::PressEnd
+                ]
             );
         }
         other => panic!("first op is tile-set, got {other:?}"),

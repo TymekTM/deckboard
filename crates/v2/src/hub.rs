@@ -54,11 +54,12 @@ impl V2Hub {
         self.sessions.lock().expect("v2 hub poisoned").len()
     }
 
-
     /// Serializes once and pushes to every live session. Send errors mean a
     /// dying connection; its own loop notices and cleans up.
     pub fn broadcast_frame(&self, frame: &Frame) {
-        let Ok(text) = serde_json::to_string(frame) else { return };
+        let Ok(text) = serde_json::to_string(frame) else {
+            return;
+        };
         for session in self.sessions.lock().expect("v2 hub poisoned").values() {
             let _ = session.out.send(super::session::WsOut::Text(text.clone()));
         }
@@ -88,11 +89,16 @@ impl V2Session {
     }
 
     pub fn device_name(&self) -> Option<String> {
-        self.device.lock().expect("session poisoned").as_ref().map(|d| d.name.clone())
+        self.device
+            .lock()
+            .expect("session poisoned")
+            .as_ref()
+            .map(|d| d.name.clone())
     }
 
     pub fn touch(&self) {
-        self.last_seen.store(crate::unix_millis(), Ordering::Relaxed);
+        self.last_seen
+            .store(crate::unix_millis(), Ordering::Relaxed);
     }
 
     /// Milliseconds since the last inbound frame.
@@ -142,14 +148,25 @@ mod tests {
         let a = hub.create(tx_a);
         // Unauthenticated sessions (created but not attached) are outside
         // the fan-out; only attach brings a socket into the broadcast set.
-        hub.broadcast_frame(&Frame::push(deckboard_proto::TYPE_BOARD_OPEN, serde_json::json!({"board": 0})));
-        assert!(rx_a.try_recv().is_err(), "pre-auth session must not receive broadcasts");
+        hub.broadcast_frame(&Frame::push(
+            deckboard_proto::TYPE_BOARD_OPEN,
+            serde_json::json!({"board": 0}),
+        ));
+        assert!(
+            rx_a.try_recv().is_err(),
+            "pre-auth session must not receive broadcasts"
+        );
         hub.attach(&a);
         hub.attach(&hub.create(tx_b));
         assert_eq!(hub.count(), 2);
 
-        hub.broadcast_frame(&Frame::push(deckboard_proto::TYPE_BOARD_OPEN, serde_json::json!({"board": 3})));
-        let WsOut::Text(text) = rx_a.blocking_recv().unwrap() else { panic!("text") };
+        hub.broadcast_frame(&Frame::push(
+            deckboard_proto::TYPE_BOARD_OPEN,
+            serde_json::json!({"board": 3}),
+        ));
+        let WsOut::Text(text) = rx_a.blocking_recv().unwrap() else {
+            panic!("text")
+        };
         assert!(text.contains("board.open"));
 
         hub.remove(a.id);
