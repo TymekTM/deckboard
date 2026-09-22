@@ -3,11 +3,34 @@
 //   { key, label, placeholder? }        - text input ("" key = raw command)
 //   { key, kind: "textarea" }           - multiline text
 //   { key, kind: "number" }             - numeric, stored as JSON number
-//   { key, kind: "select", options }    - dropdown, stored raw
+//   { key, kind: "select", options }    - dropdown, stored raw; option
+//                                         values may be numbers and are
+//                                         then stored as JSON numbers
 //   { key, showIf: { key, value } }     - rendered only when another field has a value
 // Entry extras:
 //   stepEditor - the tile command is an array of steps edited as rows
 //   options    - show the "program arguments" input (DB `options` column)
+
+// Voicemeeter parameter choices, mirroring the original voicemeeter-control
+// extension's INPUTS. Index values stay numbers: the backend reads them with
+// as_i64, a string would fail the tile press.
+const vmSelect = (values) => values.map((v) => ({ value: v, label: String(v) }));
+const VM_INDEX = vmSelect([0, 1, 2, 3, 4, 5, 6, 7]);
+const VM_SET_STRIP_PARAMS = vmSelect([
+  "Mono", "Mute", "Solo", "MC", "Gain", "Pan_x", "Pan_y", "Color_x", "Color_y",
+  "fx_x", "fx_y", "Audibility", "Comp", "Gate", "EqGain1", "EqGain2", "EqGain3",
+  "Label", "A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3", "FadeTo",
+  "Reverb", "Delay", "Fx1", "Fx2", "PostReverb", "PostDelay", "PostFx1", "PostFx2",
+]);
+const VM_TOGGLE_STRIP_PARAMS = vmSelect(["Mono", "Mute", "Solo", "A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3"]);
+const VM_SLIDER_STRIP_PARAMS = vmSelect(["Gain", "Comp", "Gate"]);
+const VM_SET_BUS_PARAMS = vmSelect([
+  "Mono", "Mute", "EQ.on", "Gain", "mode.normal", "mode.Amix", "mode.Bmix",
+  "mode.Repeat", "mode.Composite", "FadeTo", "Label",
+  "Sel", "ReturnReverb", "ReturnDelay", "ReturnFx1", "ReturnFx2",
+]);
+const VM_TOGGLE_BUS_PARAMS = vmSelect(["Mono", "Mute", "EQ.on"]);
+const VM_SLIDER_BUS_PARAMS = vmSelect(["Gain"]);
 
 export const CATALOG = [
   { header: "Deckboard" },
@@ -93,6 +116,19 @@ export const CATALOG = [
     fields: [{ key: "", label: "URL", placeholder: "https://..." }],
   },
   {
+    // native replacement of the deckboard-callurl extension; the backend
+    // fires a plain GET on urlToCall. commandAction is not executed but
+    // kept in the JSON so hand-added payloads survive an edit.
+    value: "url-to-call",
+    label: "URL to Call",
+    icon: "link",
+    color: "#ff29df",
+    fields: [
+      { key: "urlToCall", label: "URL to call", placeholder: "http://..." },
+      { key: "commandAction", label: "Command action", kind: "textarea", placeholder: "optional, stored with the tile" },
+    ],
+  },
+  {
     value: "dir",
     label: "Open Folder",
     icon: "folder",
@@ -153,6 +189,102 @@ export const CATALOG = [
     icon: "play-circle",
     color: "#27ae60",
     fields: [{ key: "", label: "Audio file path" }],
+  },
+  { divider: true },
+  { header: "Voicemeeter" },
+  // native deckboard_vm actions; the JS extension that declared these
+  // fields fails to load in the embedded runtime, so they are declared here
+  {
+    value: "vm-set-strip",
+    label: "Set Strip Parameter",
+    icon: "headphones",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_SET_STRIP_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "value", label: "Value" },
+    ],
+  },
+  {
+    value: "vm-toggle-strip",
+    label: "Toggle Strip Parameter",
+    icon: "microphone-slash",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_STRIP_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+    ],
+  },
+  {
+    value: "vm-increase-strip",
+    label: "Increase Strip Parameter",
+    icon: "volume-up",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_STRIP_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "value", label: "Value" },
+    ],
+  },
+  {
+    value: "vm-decrease-strip",
+    label: "Decrease Strip Parameter",
+    icon: "volume-down",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_STRIP_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "value", label: "Value" },
+    ],
+  },
+  {
+    value: "vm-set-bus",
+    label: "Set Bus Parameter",
+    icon: "headphones",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_SET_BUS_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "value", label: "Value" },
+    ],
+  },
+  {
+    value: "vm-toggle-bus",
+    label: "Toggle Bus Parameter",
+    icon: "volume-mute",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_BUS_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+    ],
+  },
+  {
+    value: "vm-increase-bus",
+    label: "Increase Bus Parameter",
+    icon: "volume-up",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "value", label: "Value" },
+    ],
+  },
+  {
+    value: "vm-decrease-bus",
+    label: "Decrease Bus Parameter",
+    icon: "volume-down",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "value", label: "Value" },
+    ],
+  },
+  {
+    value: "vm-restart",
+    label: "Restart Audio Engine",
+    icon: "sync",
+    color: "#171A21",
   },
   { divider: true },
   { header: "OBS Studio" },

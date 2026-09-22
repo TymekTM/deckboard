@@ -67,11 +67,14 @@ fn welcome() {
         w.channels["ext.si-cpu-usage"],
         ChannelInfo {
             shape: StateShape::Series,
-            cap: Some(SERIES_CAP)
+            cap: Some(SERIES_CAP),
+            title: Some("CPU Load".to_string()),
+            suffix: Some("%".to_string()),
         }
     );
     assert_eq!(w.channels["ext.speaker-muted"].shape, StateShape::Scalar);
     assert_eq!(w.channels["ext.speaker-muted"].cap, None);
+    assert_eq!(w.channels["ext.speaker-muted"].title, None);
 }
 
 #[test]

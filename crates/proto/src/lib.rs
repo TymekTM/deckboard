@@ -131,6 +131,13 @@ pub struct ChannelInfo {
     pub shape: StateShape,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cap: Option<u32>,
+    /// Display title captured from a producer's custom-value object
+    /// (`{"title": "CPU Load", ..}`), so graph tiles can label themselves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Unit suffix captured alongside the title (e.g. "%", "GB").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -146,6 +153,11 @@ pub struct Welcome {
     pub device: Device,
     #[serde(default, skip_serializing_if = "map_is_empty")]
     pub channels: std::collections::BTreeMap<String, ChannelInfo>,
+    /// The device token, issued only in the welcome that completes a
+    /// pairing (docs/protocol-v2.md §3 step 4); reconnecting devices know
+    /// it already.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

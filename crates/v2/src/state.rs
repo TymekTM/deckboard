@@ -27,10 +27,25 @@ fn series_point(value: &serde_json::Value) -> Option<f64> {
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ChannelMeta {
     pub shape: StateShape,
     pub cap: u32,
+    /// Display title captured from a pushed custom-value object.
+    pub title: Option<String>,
+    /// Unit suffix captured alongside the title.
+    pub suffix: Option<String>,
+}
+
+impl ChannelMeta {
+    fn new(shape: StateShape, cap: u32) -> ChannelMeta {
+        ChannelMeta {
+            shape,
+            cap,
+            title: None,
+            suffix: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -64,17 +79,27 @@ impl StateEngine {
     /// series' newest point becomes the scalar value.
     pub fn register(&self, channel: &str, shape: StateShape, cap: Option<u32>) {
         let mut inner = self.inner.lock().expect("state engine poisoned");
-        let meta = ChannelMeta {
-            shape,
-            cap: cap.unwrap_or(self.default_cap),
-        };
-        match inner.channels.get(channel).copied() {
-            Some(old) if old.shape == shape => {
-                inner.channels.insert(channel.to_string(), meta);
+        let meta = ChannelMeta::new(shape, cap.unwrap_or(self.default_cap));
+        match inner
+            .channels
+            .get(channel)
+            .map(|m| (m.shape, m.title.clone(), m.suffix.clone()))
+        {
+            Some((old_shape, title, suffix)) if old_shape == shape => {
+                // keep captured display metadata across re-registrations
+                inner.channels.insert(
+                    channel.to_string(),
+                    ChannelMeta {
+                        shape,
+                        cap: meta.cap,
+                        title,
+                        suffix,
+                    },
+                );
             }
-            Some(old) => {
+            Some((old_shape, _, _)) => {
                 inner.channels.insert(channel.to_string(), meta);
-                tracing::debug!(channel, from = ?old.shape, to = ?shape, "channel shape changed, migrating value");
+                tracing::debug!(channel, from = ?old_shape, to = ?shape, "channel shape changed, migrating value");
                 if shape == StateShape::Series {
                     if let Some(point) = inner.values.remove(channel).and_then(|v| v.as_f64()) {
                         inner
@@ -104,13 +129,36 @@ impl StateEngine {
     /// non-numeric is dropped.
     pub fn set(&self, channel: &str, value: serde_json::Value) {
         let mut inner = self.inner.lock().expect("state engine poisoned");
-        let meta = *inner
+        let meta = inner
             .channels
             .entry(channel.to_string())
-            .or_insert(ChannelMeta {
-                shape: StateShape::Scalar,
-                cap: self.default_cap,
-            });
+            .or_insert_with(|| ChannelMeta::new(StateShape::Scalar, self.default_cap))
+            .clone();
+        // Custom-value objects carry display metadata ({"title": "CPU Load",
+        // "suffix": "%", ..}); capture it for the welcome catalog. First
+        // wins so a flapping producer cannot rewrite the label mid-run.
+        if let Some(obj) = value.as_object() {
+            let title = obj
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let suffix = obj
+                .get("suffix")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if let Some(entry) = inner.channels.get_mut(channel) {
+                if (title.is_some() && entry.title.is_none())
+                    || (suffix.is_some() && entry.suffix.is_none())
+                {
+                    if entry.title.is_none() {
+                        entry.title = title;
+                    }
+                    if entry.suffix.is_none() {
+                        entry.suffix = suffix;
+                    }
+                }
+            }
+        }
         match meta.shape {
             StateShape::Series => {
                 let Some(point) = series_point(&value) else {
@@ -149,6 +197,8 @@ impl StateEngine {
                     ChannelInfo {
                         shape: meta.shape,
                         cap: (meta.shape == StateShape::Series).then_some(meta.cap),
+                        title: meta.title.clone(),
+                        suffix: meta.suffix.clone(),
                     },
                 )
             })
@@ -175,8 +225,8 @@ impl StateEngine {
         dirty
             .into_iter()
             .filter_map(|channel| {
-                let meta = *inner.channels.get(&channel)?;
-                if meta.shape == StateShape::Series {
+                let shape = inner.channels.get(&channel)?.shape;
+                if shape == StateShape::Series {
                     let newest = inner.series.get(&channel)?.back().copied()?;
                     Some(ChannelValue {
                         channel,
@@ -256,6 +306,14 @@ mod tests {
         let sync = engine.snapshot();
         assert_eq!(sync.series["ext.si-load-cpu"], vec![5.3]);
         assert_eq!(sync.series["ext.si-load-gb-ram"], vec![18.7]);
+        // display metadata rides the welcome catalog
+        let catalog = engine.catalog();
+        assert_eq!(
+            catalog["ext.si-load-cpu"].title.as_deref(),
+            Some("CPU Load")
+        );
+        assert_eq!(catalog["ext.si-load-cpu"].suffix.as_deref(), Some("%"));
+        assert_eq!(catalog["ext.si-load-gb-ram"].suffix.as_deref(), Some("GB"));
     }
 
     #[test]

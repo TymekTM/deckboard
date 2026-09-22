@@ -146,6 +146,9 @@ async fn run_session(
     }
 
     // 2) Resolve the device: known token, or consume the pairing code.
+    // A pairing welcome carries the freshly minted device token so the
+    // client can store it and reconnect without a new code.
+    let paired = matches!(auth, Auth::Pair(_));
     let device = match auth {
         Auth::Device(device) => {
             match hello.name.as_deref().filter(|n| !n.is_empty()) {
@@ -206,6 +209,7 @@ async fn run_session(
             name: device.name,
         },
         channels: state.engine.catalog(),
+        token: paired.then(|| device.token.clone()),
     };
     session.send_frame(&Frame {
         v: PROTOCOL_VERSION,
