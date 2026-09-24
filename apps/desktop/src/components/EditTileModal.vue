@@ -48,6 +48,29 @@ const form = reactive(
       }
 );
 
+// AI plan tile: which usage windows render, stored in the options column
+// as "windows:5h,week" (no token = both). Applies only to ai-plan-limits.
+const isPlanTile = computed(() => form.type === "ai-plan-limits");
+const planWindows = computed(() => {
+  const match = String(form.options || "").match(/(?:^|;)windows:([^;]*)/);
+  const want = match
+    ? match[1].split(",").map((s) => s.trim())
+    : ["5h", "week"];
+  return { five: want.includes("5h"), week: want.includes("week") };
+});
+function setPlanWindow(key, event) {
+  const next = { ...planWindows.value, [key]: event.target.checked };
+  const parts = [];
+  if (next.five) parts.push("5h");
+  if (next.week) parts.push("week");
+  const rest = String(form.options || "")
+    .replace(/(^|;)windows:[^;]*/g, "")
+    .replace(/^;+|;+$/g, "")
+    .replace(/;;+/g, ";");
+  const token = `windows:${parts.join(",")}`;
+  form.options = rest ? `${rest};${token}` : token;
+}
+
 // ---- action catalog (static groups + live extension inputs) ----------------
 
 function prettify(value) {
@@ -625,6 +648,30 @@ function colorOr(val, fallback) {
             <input v-model="form.command" placeholder="command" @keydown.enter.prevent />
           </label>
 
+          <template v-if="isPlanTile">
+            <div class="field">
+              Usage windows
+              <div class="win-row">
+                <label class="win-check">
+                  <input
+                    type="checkbox"
+                    :checked="planWindows.five"
+                    @change="setPlanWindow('five', $event)"
+                  />
+                  5-hour
+                </label>
+                <label class="win-check">
+                  <input
+                    type="checkbox"
+                    :checked="planWindows.week"
+                    @change="setPlanWindow('week', $event)"
+                  />
+                  Weekly
+                </label>
+              </div>
+            </div>
+          </template>
+
           <label v-if="catalogEntry?.options" class="field">
             Options (program arguments)
             <input v-model="form.options" placeholder="--flag" @keydown.enter.prevent />
@@ -820,6 +867,19 @@ function colorOr(val, fallback) {
   padding: 16px 20px 8px;
 }
 .right-col .field { margin-bottom: 13px; }
+.win-row {
+  display: flex;
+  gap: 16px;
+  margin-top: 6px;
+}
+.win-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+}
 .no-opts {
   font-size: 13px;
   color: var(--modal-muted);

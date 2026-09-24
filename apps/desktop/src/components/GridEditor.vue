@@ -150,7 +150,54 @@ function statusCompact(tile) {
 
 function statusRows(tile) {
   const data = statusData(tile);
-  return data ? data.rows : [];
+  if (!data) return [];
+  return data.rows.filter((row) => !planWindowHidden(tile, row.label));
+}
+
+// Per-tile editor option stored in the tile's options column as
+// "windows:5h,week" (missing token = both): percent rows of windows the
+// user unticked drop out; agent rows carry no percent, never touched.
+function planWindowHidden(tile, label) {
+  if (typeof label !== "string") return false;
+  const match = String(tile.options || "").match(/(?:^|;)windows:([^;]*)/);
+  if (!match) return false;
+  const want = match[1].split(",").map((s) => s.trim()).filter(Boolean);
+  if (label.endsWith(" 5h")) return !want.includes("5h");
+  if (label.endsWith(" week")) return !want.includes("week");
+  return false;
+}
+
+// Plan rows are named "<provider> <window>" ("GLM 5h") - the lane label
+// maps back to the provider for the mini view's glyph.
+function laneProvider(label) {
+  const first = String(label || "").split(" ")[0].toLowerCase();
+  return first === "glm" ? "zcode" : first;
+}
+
+// The backend summary names the worst window, which a filtered-out row
+// may no longer be: recompute from the visible percent rows when the
+// tile has any, else keep the producer's line.
+function statusSummary(tile) {
+  const data = statusData(tile);
+  if (!data) return "";
+  const percentRows = data.rows.filter(
+    (row) => row.percent != null && !planWindowHidden(tile, row.label),
+  );
+  if (!percentRows.length) return data.summary || "";
+  const worst = percentRows.reduce((a, b) => (b.percent > a.percent ? b : a));
+  return `${worst.label} ${Math.round(worst.percent)}%`;
+}
+
+// 1x1 plan tiles switch to the mini usage view: one bar + percentage per
+// visible window, provider glyph as the only label. Detail rows cannot
+// fit that size without truncating into noise.
+function statusMini(tile) {
+  const data = statusData(tile);
+  if (!data || tile.w > 1 || tile.h > 1) return [];
+  const rows = data.rows.filter(
+    (row) => row.percent != null && !planWindowHidden(tile, row.label),
+  );
+  return rows.length ? rows : [];
 }
 
 // Monochrome brand marks (24x24, currentColor) for the agent providers:
@@ -497,7 +544,10 @@ function onGridClick(event) {
           <div
             v-if="tile.mode === 'status' && statusData(tile)"
             class="tile-status"
-            :class="{ 'is-compact': statusCompact(tile).length }"
+            :class="{
+              'is-compact': statusCompact(tile).length,
+              'is-mini': statusMini(tile).length,
+            }"
           >
             <template v-if="statusCompact(tile).length">
               <div
@@ -511,6 +561,21 @@ function onGridClick(event) {
                   <span class="status-dot"></span>
                   <span class="compact-count">{{ c.count }}</span>
                 </span>
+              </div>
+            </template>
+            <template v-else-if="statusMini(tile).length">
+              <div
+                v-for="(row, i) in statusMini(tile)"
+                :key="i"
+                class="mini-usage"
+                :class="'s-' + row.state"
+                :title="row.label"
+              >
+                <span class="mini-glyph" v-html="providerSvg(laneProvider(row.label))"></span>
+                <span class="mini-bar">
+                  <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
+                </span>
+                <span class="mini-val">{{ Math.round(row.percent) }}%</span>
               </div>
             </template>
             <template v-else>
@@ -532,8 +597,8 @@ function onGridClick(event) {
                   <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
                 </span>
               </div>
-              <div v-if="statusData(tile).summary" class="status-summary">
-                {{ statusData(tile).summary }}
+              <div v-if="statusSummary(tile)" class="status-summary">
+                {{ statusSummary(tile) }}
               </div>
             </template>
           </div>
@@ -701,6 +766,10 @@ function onGridClick(event) {
   padding: 6px 9px;
   pointer-events: none;
 }
+.status-row .provider-glyph svg {
+  width: 17px;
+  height: 17px;
+}
 .status-row {
   position: relative;
   display: flex;
@@ -828,8 +897,8 @@ function onGridClick(event) {
   gap: 6px;
 }
 .compact-provider .provider-glyph svg {
-  width: 26px;
-  height: 26px;
+  width: 34px;
+  height: 34px;
 }
 .compact-provider .provider-glyph {
   color: rgba(255, 255, 255, 0.85);
@@ -843,6 +912,55 @@ function onGridClick(event) {
   font-size: 12px;
   font-weight: 700;
   color: rgba(255, 255, 255, 0.9);
+}
+/* mini usage view (1x1 plan tiles): glyph + colored bar + percentage */
+.tile-status.is-mini {
+  justify-content: center;
+  gap: 10px;
+  padding: 8px;
+}
+.mini-usage {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mini-usage .mini-glyph {
+  display: flex;
+  color: rgba(255, 255, 255, 0.8);
+}
+.mini-usage .mini-glyph svg {
+  width: 12px;
+  height: 12px;
+}
+.mini-bar {
+  flex: 1;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.mini-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.75);
+}
+.s-ok .mini-bar i {
+  background: #2ecc71;
+}
+.s-warn .mini-bar i,
+.s-attention .mini-bar i {
+  background: #f39c12;
+}
+.s-high .mini-bar i,
+.s-error .mini-bar i {
+  background: #e74c3c;
+}
+.mini-val {
+  min-width: 30px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-align: right;
 }
 /* per-provider breakdown overlay on the hour graph tile */
 .tile-hour-rows {
