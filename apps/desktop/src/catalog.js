@@ -31,6 +31,18 @@ const VM_SET_BUS_PARAMS = vmSelect([
 ]);
 const VM_TOGGLE_BUS_PARAMS = vmSelect(["Mono", "Mute", "EQ.on"]);
 const VM_SLIDER_BUS_PARAMS = vmSelect(["Gain"]);
+// Bus indices map straight onto Voicemeeter's A/B output channels
+// (A1..A5, then B1..B3 on Potato); the numbers stay the stored value
+const VM_BUS_INDEX = [
+  "0 (A1)", "1 (A2)", "2 (A3)", "3 (A4)", "4 (A5)", "5 (B1)", "6 (B2)", "7 (B3)",
+].map((label, i) => ({ value: i, label }));
+
+// Voicemeeter gain fader range in dB; vm sliders map 0..1 onto it. Must
+// match pulpit_vm::GAIN_MIN / GAIN_MAX on the backend.
+export const VM_GAIN_MIN = -60;
+export const VM_GAIN_MAX = 12;
+// double-tap reset position: 0 dB unity gain on the fader
+export const VM_SLIDER_RESET = (0 - VM_GAIN_MIN) / (VM_GAIN_MAX - VM_GAIN_MIN);
 
 export const CATALOG = [
   { header: "Pulpit" },
@@ -245,7 +257,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SET_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
       { key: "value", label: "Value" },
     ],
   },
@@ -257,7 +269,7 @@ export const CATALOG = [
     dual: true,
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
     ],
   },
   {
@@ -267,7 +279,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
       { key: "value", label: "Value" },
     ],
   },
@@ -278,8 +290,30 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
       { key: "value", label: "Value" },
+    ],
+  },
+  {
+    value: "vm-slider-bus",
+    label: "Volume Slider (Bus)",
+    mode: "slider",
+    icon: "sliders-h",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+    ],
+  },
+  {
+    value: "vm-slider-strip",
+    label: "Volume Slider (Strip)",
+    mode: "slider",
+    icon: "sliders-h",
+    color: "#171A21",
+    fields: [
+      { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_STRIP_PARAMS },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
     ],
   },
   {

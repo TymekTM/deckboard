@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
-import { CELL_W, ROW_H, stateActive } from "../catalog";
+import { CELL_W, ROW_H, stateActive, VM_SLIDER_RESET } from "../catalog";
 
 // Edit-mode grid: drag to move, corner handle to resize, double-click to
 // edit, empty-cell click to add. Touch mode: tap runs the tile.
@@ -276,8 +276,18 @@ function onGridContext(event) {
 }
 
 // Touch-mode sliders: drag vertically on the tile, value 0..1 from the
-// pointer position, sent to the backend on release (fill previews live).
+// pointer position. The value streams to the backend while dragging
+// (throttled) so the fader follows in realtime; release always sends the
+// final position. A second tap right after a tap resets Voicemeeter
+// sliders to 0 dB.
+const SLIDER_SEND_INTERVAL = 150;
+const SLIDER_DOUBLE_TAP_MS = 350;
+// pointer travel below this counts as a tap, not a drag
+const SLIDER_TAP_SLOP = 6;
+
 const sliderVals = reactive({});
+// tile id -> end time of the last tap (a pointer interaction that barely moved)
+const sliderTaps = {};
 function sliderValue(tile) {
   if (sliderVals[tile.id] != null) return sliderVals[tile.id];
   if (tile.type === "speaker-volume") {
@@ -286,17 +296,43 @@ function sliderValue(tile) {
   }
   return 0.5;
 }
+function isVmSlider(tile) {
+  return tile.type === "vm-slider-strip" || tile.type === "vm-slider-bus";
+}
 function startSlider(tile, event) {
   const rect = event.currentTarget.getBoundingClientRect();
   const setVal = (e) => {
     sliderVals[tile.id] = clamp(1 - (e.clientY - rect.top) / rect.height, 0, 1);
   };
-  setVal(event);
-  const onMove = (e) => setVal(e);
-  const onUp = () => {
+  let lastSent = 0;
+  const startY = event.clientY;
+  const send = (force = false) => {
+    const now = performance.now();
+    if (!force && now - lastSent < SLIDER_SEND_INTERVAL) return;
+    lastSent = now;
+    emit("tile-slider", tile, sliderVals[tile.id] ?? 0.5);
+  };
+  const now = performance.now();
+  if (isVmSlider(tile) && now - (sliderTaps[tile.id] ?? -Infinity) < SLIDER_DOUBLE_TAP_MS) {
+    // double tap: jump to 0 dB instead of the tapped position
+    sliderVals[tile.id] = VM_SLIDER_RESET;
+  } else {
+    setVal(event);
+  }
+  send(true);
+  const onMove = (e) => {
+    setVal(e);
+    send();
+  };
+  const onUp = (e) => {
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
-    emit("tile-slider", tile, sliderVals[tile.id] ?? 0.5);
+    send(true);
+    if (Math.abs(e.clientY - startY) < SLIDER_TAP_SLOP) {
+      sliderTaps[tile.id] = performance.now();
+    } else {
+      delete sliderTaps[tile.id];
+    }
   };
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);

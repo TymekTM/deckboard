@@ -36,6 +36,23 @@ pub enum VmError {
 
 pub type Result<T> = std::result::Result<T, VmError>;
 
+/// Voicemeeter gain fader range in dB, the same span the Voicemeeter UI
+/// sliders cover for Strip and Bus Gain.
+pub const GAIN_MIN: f32 = -60.0;
+pub const GAIN_MAX: f32 = 12.0;
+
+/// Slider position 0..1 -> gain in dB across the fader range.
+pub fn slider_gain(value: f64) -> f32 {
+    let v = value.clamp(0.0, 1.0) as f32;
+    (GAIN_MIN + (GAIN_MAX - GAIN_MIN) * v).clamp(GAIN_MIN, GAIN_MAX)
+}
+
+/// Inverse of [`slider_gain`]: gain in dB -> slider position 0..1.
+pub fn gain_to_slider(gain: f32) -> f64 {
+    let g = gain.clamp(GAIN_MIN, GAIN_MAX);
+    ((g - GAIN_MIN) / (GAIN_MAX - GAIN_MIN)) as f64
+}
+
 /// C API signatures from the Voicemeeter Remote API (ANSI string variants).
 type LoginFn = extern "system" fn() -> i32;
 type LogoutFn = extern "system" fn() -> i32;
@@ -171,15 +188,22 @@ impl Remote {
     }
 
     pub fn set_parameters(&self, text: &str) -> Result<()> {
+        self.set_parameters_nowait(text)?;
+        // the engine applies text commands asynchronously; voicemeeter-
+        // connector waited 200 ms so a following read sees the new state
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(())
+    }
+
+    /// Fire one text command and return immediately, for write-only paths
+    /// like the gain slider that stream many updates and never read back.
+    pub fn set_parameters_nowait(&self, text: &str) -> Result<()> {
         let c = std::ffi::CString::new(text)
             .map_err(|_| VmError::BadPayload("parameters", text.into()))?;
         // SAFETY: c is NUL-terminated
         if (self.symbols.set_parameters)(c.as_ptr() as *const u8) < 0 {
             return Err(VmError::Call("VBVMR_SetParameters"));
         }
-        // the engine applies text commands asynchronously; voicemeeter-
-        // connector waited 200 ms so a following read sees the new state
-        std::thread::sleep(Duration::from_millis(200));
         Ok(())
     }
 }
@@ -227,10 +251,10 @@ impl VoicemeeterState {
             return self.with_remote(|r| r.set_parameters("Command.Restart=1;"));
         }
         let kind: &'static str = match action {
-            "vm-set-strip" | "vm-toggle-strip" | "vm-increase-strip" | "vm-decrease-strip" => {
-                "Strip"
-            }
-            "vm-set-bus" | "vm-toggle-bus" | "vm-increase-bus" | "vm-decrease-bus" => "Bus",
+            "vm-set-strip" | "vm-toggle-strip" | "vm-increase-strip" | "vm-decrease-strip"
+            | "vm-slider-strip" => "Strip",
+            "vm-set-bus" | "vm-toggle-bus" | "vm-increase-bus" | "vm-decrease-bus"
+            | "vm-slider-bus" => "Bus",
             "vm-set-output" => return self.set_output(args),
             other => return Err(VmError::BadPayload("action", other.into())),
         };
@@ -271,6 +295,14 @@ impl VoicemeeterState {
                     r.set_parameters(&param_text(&index, current + delta as f32))
                 })
             }
+            // slider position 0..1 (injected by the backend dispatcher)
+            // mapped straight onto the gain fader range; streamed without
+            // the settle wait so dragging stays realtime
+            "vm-slider" => {
+                let value = parse_value(args)?;
+                let gain = slider_gain(value);
+                self.with_remote(|r| r.set_parameters_nowait(&param_text(&index, gain)))
+            }
             other => Err(VmError::BadPayload("action", other.into())),
         }
     }
@@ -278,6 +310,12 @@ impl VoicemeeterState {
     /// Read one Strip parameter - used by live diagnostics and tests.
     pub fn read_strip(&mut self, number: i64, param: &str) -> Result<f32> {
         let index = format!("Strip[{number}].{param}");
+        self.with_remote(|r| r.get_parameter_float(index.as_str()))
+    }
+
+    /// Read one Bus parameter - used by live diagnostics and tests.
+    pub fn read_bus(&mut self, number: i64, param: &str) -> Result<f32> {
+        let index = format!("Bus[{number}].{param}");
         self.with_remote(|r| r.get_parameter_float(index.as_str()))
     }
 
@@ -354,6 +392,8 @@ pub fn input_declarations() -> Vec<(
         ("vm-toggle-bus", Some("volume-mute"), "fas", "#171A21"),
         ("vm-increase-bus", Some("volume-up"), "fas", "#171A21"),
         ("vm-decrease-bus", Some("volume-down"), "fas", "#171A21"),
+        ("vm-slider-strip", Some("sliders-h"), "fas", "#171A21"),
+        ("vm-slider-bus", Some("sliders-h"), "fas", "#171A21"),
         ("vm-restart", Some("sync"), "fas", "#171A21"),
         ("vm-set-output", Some("headphones"), "fas", "#171A21"),
     ]
@@ -484,10 +524,67 @@ mod tests {
         vm.execute("vm-restart", &Value::Null).unwrap();
     }
 
+    /// Live round trip of the bus gain slider on A3 (Bus[2]): read the
+    /// current gain, move the slider to the middle (-24 dB), verify, then
+    /// restore. Run explicitly:
+    /// `cargo test -p pulpit-vm -- --ignored --nocapture live_slider_bus_a3`
+    #[test]
+    #[ignore = "moves the live A3 bus fader twice"]
+    fn live_slider_bus_a3() {
+        let _guard = live_lock();
+        let mut vm = VoicemeeterState::new();
+        // the slider path fires without the settle wait, so a verifying
+        // read must give the engine a moment to apply the command
+        let settle = || std::thread::sleep(Duration::from_millis(250));
+        let before = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
+        vm.execute(
+            "vm-slider-bus",
+            &json!({"param": "Gain", "number": 2, "value": 0.5}),
+        )
+        .unwrap();
+        settle();
+        let mid = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
+        assert!((mid - (-24.0)).abs() < 0.6, "expected -24 dB, got {mid}");
+        vm.execute(
+            "vm-slider-bus",
+            &json!({"param": "Gain", "number": 2, "value": gain_to_slider(before)}),
+        )
+        .unwrap();
+        settle();
+        let after = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
+        println!("A3 gain: {before} -> {mid} -> {after}");
+        assert!((after - before).abs() < 1.0, "restore drifted: {before} vs {after}");
+    }
+
     #[test]
     fn action_routing() {
         assert!(is_vm_action("vm-toggle-strip"));
+        assert!(is_vm_action("vm-slider-bus"));
         assert!(!is_vm_action("vol"));
+    }
+
+    #[test]
+    fn slider_gain_maps_fader_range() {
+        assert_eq!(slider_gain(0.0), -60.0);
+        assert_eq!(slider_gain(1.0), 12.0);
+        assert_eq!(slider_gain(0.5), -24.0);
+        // out-of-range positions clamp instead of overshooting the fader
+        assert_eq!(slider_gain(1.7), 12.0);
+        assert_eq!(slider_gain(-0.3), -60.0);
+        // round trip: gain back to a slider position lands on the same gain
+        for g in [-60.0f32, -24.0, 0.0, 12.0] {
+            assert!((slider_gain(gain_to_slider(g)) - g).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn slider_actions_reject_missing_value_before_connecting() {
+        let mut vm = VoicemeeterState::new();
+        // args straight from the tile command JSON: no slider value yet
+        let err = vm
+            .execute("vm-slider-bus", &json!({"param": "Gain", "number": 2}))
+            .unwrap_err();
+        assert!(matches!(err, VmError::BadPayload("value", _)));
     }
 
     #[test]

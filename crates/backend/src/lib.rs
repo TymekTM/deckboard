@@ -275,7 +275,7 @@ impl Backend for SqlBackend {
             && (self.exec_extension(&cmd, None)
                 || self.exec_sysinfo(&cmd)
                 || self.exec_callurl(&cmd)
-                || self.exec_voicemeeter(&cmd)
+                || self.exec_voicemeeter(&cmd, None)
                 || self.exec_discord(&cmd, sink)
                 || self.exec_speaker(&cmd, sink)
                 || self.exec_play(&cmd))
@@ -297,7 +297,7 @@ impl Backend for SqlBackend {
         if self.exec_extension(&cmd, Some(value))
             || self.exec_sysinfo(&cmd)
             || self.exec_callurl(&cmd)
-            || self.exec_voicemeeter(&cmd)
+            || self.exec_voicemeeter(&cmd, Some(value))
             || self.exec_speaker_volume(&cmd, value)
         {
             return;
@@ -481,12 +481,20 @@ impl SqlBackend {
 
     /// Run `vm-*` actions against the Voicemeeter remote DLL. Only tried
     /// when no loaded JS extension claimed the action (the original
-    /// voicemeeter-control extension cannot load in our host).
-    fn exec_voicemeeter(&self, cmd: &pulpit_actions::Command) -> bool {
+    /// voicemeeter-control extension cannot load in our host). Slider
+    /// positions arrive as `slider_value` and are injected into the action
+    /// arguments as `value` (vm-slider-* fader actions read it from there).
+    fn exec_voicemeeter(&self, cmd: &pulpit_actions::Command, slider_value: Option<f64>) -> bool {
         if !pulpit_vm::is_vm_action(&cmd.kind) {
             return false;
         }
-        let args = Self::command_args(cmd);
+        let mut args = Self::command_args(cmd);
+        if let Some(v) = slider_value {
+            if !args.is_object() {
+                args = serde_json::json!({});
+            }
+            args["value"] = serde_json::json!(v);
+        }
         let result = self.voicemeeter.lock().unwrap().execute(&cmd.kind, &args);
         if let Err(e) = &result {
             tracing::warn!(kind = %cmd.kind, error = %e, "voicemeeter action failed");
