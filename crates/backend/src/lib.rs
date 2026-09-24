@@ -508,6 +508,10 @@ impl SqlBackend {
             return true;
         };
         let args = Self::command_args(cmd);
+        // The client lock is held for the whole action on purpose: Discord
+        // actions queue up instead of racing the pipe. Worst case is a
+        // consent-popup re-authorization blocking later actions until it
+        // resolves - the same blocking the popup itself imposes.
         let mut clients = self.discord_client.lock().unwrap();
         let client = clients.get_or_insert_with(pulpit_discord::DiscordClient::spawn);
         let mut run = |config: &DiscordConfig| {
