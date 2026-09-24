@@ -935,7 +935,7 @@ function onGridClick(event) {
 .mini-bar {
   flex: 1;
   height: 8px;
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(26, 188, 156, 0.18);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -943,24 +943,14 @@ function onGridClick(event) {
   display: block;
   height: 100%;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.75);
-}
-.s-ok .mini-bar i {
-  background: #2ecc71;
-}
-.s-warn .mini-bar i,
-.s-attention .mini-bar i {
-  background: #f39c12;
-}
-.s-high .mini-bar i,
-.s-error .mini-bar i {
-  background: #e74c3c;
+  background: var(--accent);
 }
 .mini-val {
   min-width: 30px;
   font-size: 11.5px;
   font-weight: 700;
   text-align: right;
+  color: var(--accent);
 }
 /* per-provider breakdown overlay on the hour graph tile */
 .tile-hour-rows {

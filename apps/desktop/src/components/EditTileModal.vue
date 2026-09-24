@@ -877,7 +877,7 @@ function colorOr(val, fallback) {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.9);
+  color: #2c3e50;
   cursor: pointer;
 }
 .no-opts {
