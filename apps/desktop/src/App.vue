@@ -25,6 +25,34 @@ const pairingOffer = ref(null); // {code, expires_in_secs, addresses} | null
 const customValues = reactive({});
 const appStates = reactive({});
 
+// While the window is hidden to tray, state pushes are buffered per app
+// and applied on the next show - writing to the reactive maps would still
+// run the whole render pipeline behind a hidden window. Sparklines simply
+// miss the hidden samples, like the original's backgrounded webview; the
+// Rust emitters keep tablet clients correct either way.
+let hidden = document.hidden;
+let pendingStatus = {}; // app -> data of pushes seen while hidden
+
+function onStatusUpdate(payload) {
+  const data = payload?.data;
+  if (!data || typeof data !== "object") return;
+  if (hidden) {
+    pendingStatus[payload.app] = { ...pendingStatus[payload.app], ...data };
+    return;
+  }
+  applyStatusUpdate(payload);
+}
+
+function onVisibilityChange() {
+  hidden = document.hidden;
+  if (hidden) return;
+  const buffered = pendingStatus;
+  pendingStatus = {};
+  for (const [app, data] of Object.entries(buffered)) {
+    applyStatusUpdate({ app, data });
+  }
+}
+
 function applyStatusUpdate(payload) {
   const data = payload?.data;
   if (!data || typeof data !== "object") return;
@@ -420,15 +448,17 @@ onMounted(async () => {
       touchBoardId.value = e.payload;
       if (!touchMode.value) currentId.value = e.payload;
     }),
-    await listen("app-status-update", (e) => applyStatusUpdate(e.payload))
+    await listen("app-status-update", (e) => onStatusUpdate(e.payload))
   );
   // the context menu closes on any click outside of it, or on Escape
   window.addEventListener("mousedown", onGlobalMousedown, true);
   window.addEventListener("keydown", onKeydown, true);
+  document.addEventListener("visibilitychange", onVisibilityChange);
 });
 onUnmounted(() => {
   window.removeEventListener("mousedown", onGlobalMousedown, true);
   window.removeEventListener("keydown", onKeydown, true);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
   unlisteners.forEach((f) => f());
 });
 
