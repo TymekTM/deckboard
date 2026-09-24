@@ -163,6 +163,10 @@ impl Hub {
         self.sessions.lock().await.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.sessions.lock().await.is_empty()
+    }
+
     /// Drop sessions silent for longer than Engine.IO allows
     /// (pingInterval + pingTimeout). Returns the number removed.
     pub async fn reap(&self, max_idle_secs: u64) -> usize {
@@ -191,14 +195,21 @@ impl Hub {
         self.send_to_room("both", event, payload).await;
     }
 
-    /// Emit to a room: "PRO_ROOM", "BASIC_ROOM" or "both".
+    /// Emit to a room: "PRO_ROOM", "BASIC_ROOM" or "both". Session Arcs
+    /// are snapshotted under the lock and sent after releasing it - one
+    /// slow drain must not stall every other hub operation.
     pub async fn send_to_room(&self, room: &str, event: &str, payload: Option<&str>) {
         let packet = event_packet(event, payload);
-        let sessions = self.sessions.lock().await;
-        for s in sessions.values() {
-            if room == "both" || room == s.room() {
-                s.send(packet.clone()).await;
-            }
+        let targets: Vec<_> = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .values()
+                .filter(|s| room == "both" || room == s.room())
+                .cloned()
+                .collect()
+        };
+        for s in targets {
+            s.send(packet.clone()).await;
         }
     }
 }
@@ -214,7 +225,9 @@ pub fn event_packet(event: &str, payload: Option<&str>) -> String {
 fn new_sid() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    (0..20).map(|_| format!("{:x}", rng.gen::<u8>() & 0x0f)).collect()
+    (0..20)
+        .map(|_| format!("{:x}", rng.gen::<u8>() & 0x0f))
+        .collect()
 }
 
 #[cfg(test)]

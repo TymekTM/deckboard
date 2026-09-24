@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Mutex;
 
-use deckboard_proto::{ChannelInfo, ChannelValue, StateShape, StateSync};
+use pulpit_proto::{ChannelInfo, ChannelValue, StateShape, StateSync};
 
 /// The one place that knows how pushed keys map to channels: everything
 /// extension/native producers push lands under `ext.<key>` (the key being
@@ -14,10 +14,25 @@ pub fn ext_channel(key: &str) -> String {
     format!("ext.{key}")
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ChannelMeta {
     pub shape: StateShape,
     pub cap: u32,
+    /// Display title captured from a pushed custom-value object.
+    pub title: Option<String>,
+    /// Unit suffix captured alongside the title.
+    pub suffix: Option<String>,
+}
+
+impl ChannelMeta {
+    fn new(shape: StateShape, cap: u32) -> ChannelMeta {
+        ChannelMeta {
+            shape,
+            cap,
+            title: None,
+            suffix: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -55,7 +70,10 @@ pub struct StateEngine {
 
 impl StateEngine {
     pub fn new(default_cap: u32) -> StateEngine {
-        StateEngine { inner: Mutex::new(Inner::default()), default_cap }
+        StateEngine {
+            inner: Mutex::new(Inner::default()),
+            default_cap,
+        }
     }
 
     /// Tiles declare their channels while boards are built; the last
@@ -65,21 +83,38 @@ impl StateEngine {
     /// series' newest point becomes the scalar value.
     pub fn register(&self, channel: &str, shape: StateShape, cap: Option<u32>) {
         let mut inner = self.inner.lock().expect("state engine poisoned");
-        let meta = ChannelMeta { shape, cap: cap.unwrap_or(self.default_cap) };
-        match inner.channels.get(channel).copied() {
-            Some(old) if old.shape == shape => {
-                inner.channels.insert(channel.to_string(), meta);
+        let meta = ChannelMeta::new(shape, cap.unwrap_or(self.default_cap));
+        match inner
+            .channels
+            .get(channel)
+            .map(|m| (m.shape, m.title.clone(), m.suffix.clone()))
+        {
+            Some((old_shape, title, suffix)) if old_shape == shape => {
+                // keep captured display metadata across re-registrations
+                inner.channels.insert(
+                    channel.to_string(),
+                    ChannelMeta {
+                        shape,
+                        cap: meta.cap,
+                        title,
+                        suffix,
+                    },
+                );
             }
-            Some(old) => {
+            Some((old_shape, _, _)) => {
                 inner.channels.insert(channel.to_string(), meta);
-                tracing::debug!(channel, from = ?old.shape, to = ?shape, "channel shape changed, migrating value");
+                tracing::debug!(channel, from = ?old_shape, to = ?shape, "channel shape changed, migrating value");
                 if shape == StateShape::Series {
                     if let Some(point) = inner.values.remove(channel).and_then(|v| v.as_f64()) {
-                        inner.series.insert(channel.to_string(), VecDeque::from(vec![point]));
+                        inner
+                            .series
+                            .insert(channel.to_string(), VecDeque::from(vec![point]));
                     }
                 } else if let Some(buffer) = inner.series.remove(channel) {
                     if let Some(newest) = buffer.back().copied() {
-                        inner.values.insert(channel.to_string(), serde_json::Value::from(newest));
+                        inner
+                            .values
+                            .insert(channel.to_string(), serde_json::Value::from(newest));
                     }
                 }
             }
@@ -91,14 +126,43 @@ impl StateEngine {
 
     /// Producer push. Unregistered channels auto-register as scalar, so
     /// pushes are visible before any tile references them. Series channels
-    /// accumulate numeric points in their ring buffer; non-numeric values
-    /// for series channels are dropped.
+    /// accumulate numeric points in their ring buffer; producers may push a
+    /// bare number or the original app's custom-value object (`{"value":
+    /// "12.3", "suffix": "%", ..}`) - the number is extracted either way,
+    /// matching the client's own `numericValue()` tolerance. Anything else
+    /// non-numeric is dropped.
     pub fn set(&self, channel: &str, value: serde_json::Value) {
         let mut inner = self.inner.lock().expect("state engine poisoned");
-        let meta = *inner
+        let meta = inner
             .channels
             .entry(channel.to_string())
-            .or_insert(ChannelMeta { shape: StateShape::Scalar, cap: self.default_cap });
+            .or_insert_with(|| ChannelMeta::new(StateShape::Scalar, self.default_cap))
+            .clone();
+        // Custom-value objects carry display metadata ({"title": "CPU Load",
+        // "suffix": "%", ..}); capture it for the welcome catalog. First
+        // wins so a flapping producer cannot rewrite the label mid-run.
+        if let Some(obj) = value.as_object() {
+            let title = obj
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let suffix = obj
+                .get("suffix")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if let Some(entry) = inner.channels.get_mut(channel) {
+                if (title.is_some() && entry.title.is_none())
+                    || (suffix.is_some() && entry.suffix.is_none())
+                {
+                    if entry.title.is_none() {
+                        entry.title = title;
+                    }
+                    if entry.suffix.is_none() {
+                        entry.suffix = suffix;
+                    }
+                }
+            }
+        }
         match meta.shape {
             StateShape::Series => {
                 let Some(point) = series_point(&value) else {
@@ -137,6 +201,8 @@ impl StateEngine {
                     ChannelInfo {
                         shape: meta.shape,
                         cap: (meta.shape == StateShape::Series).then_some(meta.cap),
+                        title: meta.title.clone(),
+                        suffix: meta.suffix.clone(),
                     },
                 )
             })
@@ -163,15 +229,19 @@ impl StateEngine {
         dirty
             .into_iter()
             .filter_map(|channel| {
-                let meta = *inner.channels.get(&channel)?;
-                if meta.shape == StateShape::Series {
+                let shape = inner.channels.get(&channel)?.shape;
+                if shape == StateShape::Series {
                     let newest = inner.series.get(&channel)?.back().copied()?;
                     Some(ChannelValue {
                         channel,
                         value: serde_json::Value::from(newest),
                     })
                 } else {
-                    inner.values.get(&channel).cloned().map(|value| ChannelValue { channel, value })
+                    inner
+                        .values
+                        .get(&channel)
+                        .cloned()
+                        .map(|value| ChannelValue { channel, value })
                 }
             })
             .collect()
@@ -242,6 +312,34 @@ mod tests {
     }
 
     #[test]
+    fn series_accepts_the_original_custom_value_object() {
+        let engine = StateEngine::new(120);
+        engine.register("ext.si-load-cpu", StateShape::Series, None);
+        engine.register("ext.si-load-gb-ram", StateShape::Series, None);
+        // The native system-info push (JS-extension parity): object form
+        // with the number inside, as the stock client consumes it too.
+        engine.set(
+            "ext.si-load-cpu",
+            serde_json::json!({"title": "CPU Load", "description": "Ryzen", "value": "5.3", "suffix": "%"}),
+        );
+        engine.set(
+            "ext.si-load-gb-ram",
+            serde_json::json!({"title": "RAM Usage", "value": 18.7, "suffix": "GB"}),
+        );
+        let sync = engine.snapshot();
+        assert_eq!(sync.series["ext.si-load-cpu"], vec![5.3]);
+        assert_eq!(sync.series["ext.si-load-gb-ram"], vec![18.7]);
+        // display metadata rides the welcome catalog
+        let catalog = engine.catalog();
+        assert_eq!(
+            catalog["ext.si-load-cpu"].title.as_deref(),
+            Some("CPU Load")
+        );
+        assert_eq!(catalog["ext.si-load-cpu"].suffix.as_deref(), Some("%"));
+        assert_eq!(catalog["ext.si-load-gb-ram"].suffix.as_deref(), Some("GB"));
+    }
+
+    #[test]
     fn shape_change_migrates_the_value() {
         let engine = StateEngine::new(120);
         // Producer pushed before any tile declared the channel: scalar.
@@ -250,7 +348,7 @@ mod tests {
         engine.register("ext.cpu", StateShape::Series, None);
         let sync = engine.snapshot();
         assert_eq!(sync.series["ext.cpu"], vec![0.5]);
-        assert!(sync.values.get("ext.cpu").is_none());
+        assert!(!sync.values.contains_key("ext.cpu"));
         // And back: newest point becomes the scalar value.
         engine.register("ext.cpu", StateShape::Scalar, None);
         let sync = engine.snapshot();
@@ -274,7 +372,11 @@ mod tests {
         engine.set("ext.cpu", serde_json::json!("oops"));
         // No point ever landed: the channel stays out of the snapshot and
         // nothing is dirty.
-        assert!(engine.snapshot().series.get("ext.cpu").is_none_or(|v| v.is_empty()));
+        assert!(engine
+            .snapshot()
+            .series
+            .get("ext.cpu")
+            .is_none_or(|v| v.is_empty()));
         assert!(engine.drain_dirty().is_empty());
     }
 }

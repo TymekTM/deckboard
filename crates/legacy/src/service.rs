@@ -19,11 +19,26 @@ use crate::mapping::Mapper;
 
 /// Storage + execution seam so the transport layer stays testable.
 pub trait Backend: Send + Sync + 'static {
-    fn get_boards(&self) -> Vec<deckboard_db::BoardRow>;
-    fn get_buttons_by_board(&self, board_id: i64) -> Vec<deckboard_db::ButtonRow>;
-    fn get_button(&self, id: i64) -> Option<deckboard_db::ButtonRow>;
-    fn exec(&self, button: deckboard_db::ButtonRow, is_tap_start: bool, sink: &mut dyn deckboard_actions::EventSink);
-    fn slider(&self, button: deckboard_db::ButtonRow, value: f64);
+    fn get_boards(&self) -> Vec<pulpit_db::BoardRow>;
+    fn get_board(&self, board_id: i64) -> Option<pulpit_db::BoardRow>;
+    fn get_buttons_by_board(&self, board_id: i64) -> Vec<pulpit_db::ButtonRow>;
+    fn get_button(&self, id: i64) -> Option<pulpit_db::ButtonRow>;
+    fn exec(
+        &self,
+        button: pulpit_db::ButtonRow,
+        is_tap_start: bool,
+        sink: &mut dyn pulpit_actions::EventSink,
+    );
+    fn slider(&self, button: pulpit_db::ButtonRow, value: f64);
+    /// M2 speaker watcher snapshots: master volume percent, muted flag.
+    /// Defaults suit backends without speaker support.
+    fn speaker_status(&self) -> (Option<f32>, Option<bool>) {
+        (None, None)
+    }
+    /// Endpoint id of the current default playback device.
+    fn speaker_device_id(&self) -> Option<String> {
+        None
+    }
 }
 
 pub struct AppState {
@@ -40,7 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn health_page() -> Html<String> {
     Html(
-        "<html><body><h3>Deckboard Server is live.</h3>\
+        "<html><body><h3>Pulpit server is live.</h3>\
          <p>Legacy socket.io v2 endpoint on /socket.io/.</p>\
          </body></html>"
             .into(),
@@ -80,7 +95,10 @@ async fn socket_get(
 async fn polling_get(state: Arc<AppState>, q: SioQuery) -> Response {
     match &q.sid {
         None => {
-            let session = state.hub.create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO)).await;
+            let session = state
+                .hub
+                .create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO))
+                .await;
             // socket.io connect packet, delivered on the next poll
             session.send("40".into()).await;
             let open = json!({
@@ -89,7 +107,11 @@ async fn polling_get(state: Arc<AppState>, q: SioQuery) -> Response {
                 "pingInterval": 25000,
                 "pingTimeout": 60000,
             });
-            ([(header::CONTENT_TYPE, "text/plain; charset=UTF-8")], format!("0{open}")).into_response()
+            (
+                [(header::CONTENT_TYPE, "text/plain; charset=UTF-8")],
+                format!("0{open}"),
+            )
+                .into_response()
         }
         Some(sid) => match state.hub.get(sid).await {
             Some(session) => {
@@ -122,9 +144,14 @@ async fn socket_post(
 }
 
 /// Engine.IO v3 polling POSTs may arrive raw or form-encoded as `d=...`.
+/// Only the `d=`-encoded form is urldecoded: a raw body is already plain
+/// packets, and decoding it would corrupt every `+` and `%XX` it happens
+/// to contain.
 fn decode_post_body(body: &str) -> String {
-    let body = body.strip_prefix("d=").unwrap_or(body);
-    urldecode(body)
+    match body.strip_prefix("d=") {
+        Some(encoded) => urldecode(encoded),
+        None => body.to_string(),
+    }
 }
 
 fn urldecode(s: &str) -> String {
@@ -173,7 +200,12 @@ async fn handle_packet(state: &Arc<AppState>, session: &Arc<Session>, packet: &s
                     let data = &sio[1..];
                     match serde_json::from_str::<serde_json::Value>(data) {
                         Ok(v) => {
-                            let name = v.as_array().and_then(|a| a.first()).and_then(|e| e.as_str()).unwrap_or("").to_string();
+                            let name = v
+                                .as_array()
+                                .and_then(|a| a.first())
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let args: Vec<serde_json::Value> = v
                                 .as_array()
                                 .map(|a| a.iter().skip(1).cloned().collect())
@@ -195,8 +227,22 @@ async fn handle_packet(state: &Arc<AppState>, session: &Arc<Session>, packet: &s
 /// `exec_shortcut`/`exec_slider` accept the id as number or string.
 fn arg_id(arg: &serde_json::Value) -> Option<i64> {
     arg.get("id").and_then(|v| {
-        v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
     })
+}
+
+/// SQLite tile lookup off the async workers; a panic in the read logs
+/// instead of vanishing into a swallowed JoinError.
+async fn get_button_blocking(state: &Arc<AppState>, id: i64) -> Option<pulpit_db::ButtonRow> {
+    let backend = state.backend.clone();
+    match tokio::task::spawn_blocking(move || backend.get_button(id)).await {
+        Ok(button) => button,
+        Err(e) => {
+            tracing::error!(id, error = %e, "button lookup panicked");
+            None
+        }
+    }
 }
 
 async fn handle_event(
@@ -214,67 +260,103 @@ async fn handle_event(
                 .await;
         }
         "get_shortcuts" => {
-            let mapper = Mapper::new();
-            let boards: Vec<serde_json::Value> = state
-                .backend
-                .get_boards()
-                .iter()
-                .map(|b| {
-                    let buttons = state.backend.get_buttons_by_board(b.id);
-                    mapper.board_payload(b, &buttons, session.is_pro)
-                })
-                .collect();
+            // Board reads hit SQLite; the server runtime is
+            // single-threaded, so they run on the blocking pool.
+            let backend = state.backend.clone();
+            let is_pro = session.is_pro;
+            let boards = match tokio::task::spawn_blocking(move || {
+                let mapper = Mapper::new();
+                backend
+                    .get_boards()
+                    .iter()
+                    .map(|b| {
+                        let buttons = backend.get_buttons_by_board(b.id);
+                        mapper.board_payload(b, &buttons, is_pro)
+                    })
+                    .collect::<Vec<serde_json::Value>>()
+            })
+            .await
+            {
+                Ok(boards) => boards,
+                Err(e) => {
+                    tracing::error!(error = %e, "boards read panicked");
+                    Vec::new()
+                }
+            };
             let payload = serde_json::to_string(&boards).unwrap_or_else(|_| "[]".into());
-            session.send(event_packet("get_shortcuts", Some(&payload))).await;
+            session
+                .send(event_packet("get_shortcuts", Some(&payload)))
+                .await;
         }
         "exec_shortcut" => {
             let arg = args.first().cloned().unwrap_or(json!({}));
             let Some(id) = arg_id(&arg) else { return };
-            let is_tap_start = arg.get("isTapStart").and_then(|v| v.as_bool()).unwrap_or(false);
-            let Some(button) = state.backend.get_button(id) else {
+            let is_tap_start = arg
+                .get("isTapStart")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let Some(button) = get_button_blocking(state, id).await else {
                 tracing::debug!(id, "exec_shortcut: unknown id");
                 return;
             };
             tracing::info!(id, kind = %button.kind, "exec_shortcut");
             let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
             let (val_tx, mut val_rx) = mpsc::unbounded_channel::<(String, String)>();
+            let (third_tx, mut third_rx) = mpsc::unbounded_channel::<(String, String)>();
             struct Sink(
                 tokio::sync::mpsc::UnboundedSender<i64>,
                 tokio::sync::mpsc::UnboundedSender<(String, String)>,
+                tokio::sync::mpsc::UnboundedSender<(String, String)>,
             );
-            impl deckboard_actions::EventSink for Sink {
+            impl pulpit_actions::EventSink for Sink {
                 fn change_board(&mut self, board_id: i64) {
                     let _ = self.0.send(board_id);
                 }
                 fn app_value(&mut self, key: &str, value: &str) {
                     let _ = self.1.send((key.to_string(), value.to_string()));
                 }
+                fn third_party_value(&mut self, key: &str, value: &str) {
+                    let _ = self.2.send((key.to_string(), value.to_string()));
+                }
             }
-            let mut sink = Sink(tx, val_tx);
-            // actions may sleep (multiaction delays): keep them off the
-            // async workers
+            let mut sink = Sink(tx, val_tx, third_tx);
+            // The exec runs detached, not awaited: multiaction delays,
+            // url fetches and Discord re-auth can take seconds to minutes,
+            // and the packet loop must keep answering engine pings in the
+            // meantime or the client times out and disconnects.
             let backend = state.backend.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                backend.exec(button, is_tap_start, &mut sink)
-            })
-            .await;
-            while let Ok(board_id) = rx.try_recv() {
-                state
-                    .hub
-                    .broadcast("change_board", Some(&format!(r#"{{"boardId":{board_id}}}"#)))
+            let hub = state.hub.clone();
+            tokio::spawn(async move {
+                // actions may sleep (multiaction delays): keep them off the
+                // async workers
+                let _ = tokio::task::spawn_blocking(move || {
+                    backend.exec(button, is_tap_start, &mut sink)
+                })
+                .await;
+                while let Ok(board_id) = rx.try_recv() {
+                    hub.broadcast(
+                        "change_board",
+                        Some(&format!(r#"{{"boardId":{board_id}}}"#)),
+                    )
                     .await;
-            }
-            while let Ok((key, value)) = val_rx.try_recv() {
-                let data = serde_json::json!({ key: value }).to_string();
-                let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
-                state.hub.broadcast("app_status_update", Some(&payload)).await;
-            }
+                }
+                while let Ok((key, value)) = val_rx.try_recv() {
+                    let data = serde_json::json!({ key: value }).to_string();
+                    let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+                    hub.broadcast("app_status_update", Some(&payload)).await;
+                }
+                while let Ok((key, value)) = third_rx.try_recv() {
+                    let data = serde_json::json!({ key: value }).to_string();
+                    let payload = format!(r#"{{"app":"THIRD_PARTY_APP","data":{data}}}"#);
+                    hub.broadcast("app_status_update", Some(&payload)).await;
+                }
+            });
         }
         "exec_slider" => {
             let arg = args.first().cloned().unwrap_or(json!({}));
             let Some(id) = arg_id(&arg) else { return };
             let value = arg.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let Some(button) = state.backend.get_button(id) else {
+            let Some(button) = get_button_blocking(state, id).await else {
                 tracing::debug!(id, "exec_slider: unknown id");
                 return;
             };
@@ -308,7 +390,10 @@ async fn ws_loop(state: Arc<AppState>, socket: WebSocket, q: SioQuery) {
         },
         None => {
             // websocket-only session: open packet + connect go over the wire
-            let s = state.hub.create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO)).await;
+            let s = state
+                .hub
+                .create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO))
+                .await;
             s.upgrade_to_ws(out_tx.clone()).await;
             let open = json!({
                 "sid": s.sid,
@@ -357,4 +442,22 @@ async fn ws_loop(state: Arc<AppState>, socket: WebSocket, q: SioQuery) {
     }
     pump.abort();
     state.hub.remove(&sid).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn post_body_decoding_respects_the_d_prefix() {
+        // Dart client form: urlencoded after `d=`
+        assert_eq!(decode_post_body("d=42%5B%5D"), "42[]");
+        assert_eq!(decode_post_body("d=a+b"), "a b");
+        // Raw bodies pass through untouched: `+` and `%` are literal here.
+        assert_eq!(
+            decode_post_body(r#"42["exec","a+b"]"#),
+            r#"42["exec","a+b"]"#
+        );
+        assert_eq!(decode_post_body("42123%+5"), "42123%+5");
+    }
 }

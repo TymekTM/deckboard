@@ -2,11 +2,13 @@
 //! stock Deckboard Android client (Free and Pro) speaks. Wire behavior is
 //! ported from the original Electron main process (v3.2.0).
 
+pub mod editor;
 pub mod hub;
 pub mod mapping;
 pub mod props;
 pub mod service;
 
+pub use editor::EditorBroadcaster;
 pub use hub::{Hub, Session, ACCESS_KEY_PRO};
 pub use mapping::Mapper;
 pub use props::StyleResolver;

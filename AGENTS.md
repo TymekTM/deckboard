@@ -1,0 +1,43 @@
+# AGENTS.md
+
+Notes for coding agents working in this repo. Architecture, build setup
+and protocol details live in `README.md` and `docs/protocol-v2.md`; this
+file covers only what those documents cannot tell you.
+
+## One change, three surfaces
+
+Pulpit is three apps that must behave identically, connected by the
+payloads the server sends. The same tile behavior exists in all three at
+once:
+
+| Surface | Where it lives | Renders tiles from |
+| --- | --- | --- |
+| Desktop (editor + touch mode) | `apps/desktop` (Tauri + Vue) | backend JSON via Tauri commands |
+| Server (embedded in desktop, headless `apps/server`) | `crates/legacy`, `crates/v2` | DB rows mapped to wire payloads |
+| Android client | `apps/mobile` (Kotlin/Compose) | legacy payload; `proto/Models.kt` mirrors `crates/legacy/src/mapping.rs` |
+
+Tile behavior and styling - press modes (`button` / `toggle` / `slider`),
+dual states, live-state fields - must be implemented in every surface
+that consumes them, and each surface needs its own verification before
+the work counts as done:
+
+- Desktop: `npx vite build` in `apps/desktop`, plus exercising the editor
+  or touch mode when the change is visible in the UI.
+- Rust crates (backend, mappers, server): `cargo test --workspace` and
+  `cargo clippy --workspace --all-targets` from the repo root.
+- Android: run the Gradle unit tests in `apps/mobile` whenever its code
+  moved.
+
+Passing one surface is not completion. A change that edits only the layer
+where the bug was found is suspect by default: check what the other two
+surfaces do with the same field before assuming they need nothing.
+
+## Carry fields through both wire builders
+
+New or changed tile fields must reach BOTH wire builders: the legacy
+mapper (`crates/legacy/src/mapping.rs`) and the v2 manifest builder
+(`crates/v2/src/boards.rs`). Legacy field names are contractual - the
+stock Deckboard Android client renders exactly those fields - and the
+native client (`apps/mobile`) parses the legacy shape, so a field that
+skips the mapper silently vanishes from every tablet while the desktop
+editor still looks fine.

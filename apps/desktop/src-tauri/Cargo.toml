@@ -1,0 +1,38 @@
+[package]
+name = "pulpit-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pulpit desktop editor"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = "0.2"
+dirs = "5"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+pulpit-db = { path = "../../../crates/db" }
+pulpit-backend = { path = "../../../crates/backend" }
+pulpit-actions = { path = "../../../crates/actions" }
+pulpit-legacy = { path = "../../../crates/legacy" }
+pulpit-ext = { path = "../../../crates/ext" }
+pulpit-vm = { path = "../../../crates/vm" }
+pulpit-discord = { path = "../../../crates/discord" }
+pulpit-sysinfo = { path = "../../../crates/sysinfo" }
+pulpit-proto = { path = "../../../crates/proto" }
+pulpit-v2 = { path = "../../../crates/v2" }
+if-addrs = "0.15.0"
+qrcode = "0.14.1"

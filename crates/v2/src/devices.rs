@@ -1,4 +1,4 @@
-//! Paired devices (`~/deckboard/devices.json`) and one-time pairing codes
+//! Paired devices (`~/pulpitApp/devices.json`) and one-time pairing codes
 //! (docs/protocol-v2.md §3). One token per device: revoking a device is
 //! removing its entry; a leaked token never widens beyond one tablet.
 
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Alphabet for pairing codes: Crockford-style base32 without the
 /// confusable 0/O/1/I.
@@ -34,6 +35,9 @@ pub struct DeviceEntry {
 pub struct DeviceStore {
     path: PathBuf,
     entries: std::sync::Mutex<Vec<DeviceEntry>>,
+    /// `touch`-only saves are debounced to one per minute: hello arrives on
+    /// every (re)connect and `last_seen` is metadata, not data.
+    last_touch_save: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl DeviceStore {
@@ -41,45 +45,64 @@ impl DeviceStore {
     /// start rather than silently wiping the registry.
     pub fn load(path: PathBuf) -> std::io::Result<DeviceStore> {
         let entries = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-            })?,
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e),
         };
-        Ok(DeviceStore { path, entries: std::sync::Mutex::new(entries) })
+        Ok(DeviceStore {
+            path,
+            entries: std::sync::Mutex::new(entries),
+            last_touch_save: std::sync::Mutex::new(None),
+        })
     }
 
-    /// Token -> device, or `None` for unknown tokens.
+    /// Token -> device, or `None` for unknown tokens. Comparison runs on
+    /// sha-256 digests so the match leaks nothing about the token itself.
     pub fn verify(&self, token: &str) -> Option<DeviceEntry> {
+        let wanted = Sha256::digest(token);
         self.entries
             .lock()
             .expect("device store poisoned")
             .iter()
-            .find(|d| d.token == token)
+            .find(|d| Sha256::digest(d.token.as_bytes()) == wanted)
             .cloned()
     }
 
-    pub fn touch(&self, id: &str) {
-        self.update(id, None);
+    pub fn touch(&self, id: &str) -> Option<DeviceEntry> {
+        self.update(id, None)
     }
 
     /// hello.name may rename a paired device; persisted with the touch.
-    pub fn rename(&self, id: &str, name: &str) {
-        self.update(id, Some(name.to_string()));
+    /// Returns the updated entry so the caller's `welcome` reflects it.
+    pub fn rename(&self, id: &str, name: &str) -> Option<DeviceEntry> {
+        self.update(id, Some(name.to_string()))
     }
 
-    fn update(&self, id: &str, name: Option<String>) {
-        {
+    fn update(&self, id: &str, name: Option<String>) -> Option<DeviceEntry> {
+        let is_rename = name.is_some();
+        let updated = {
             let mut entries = self.entries.lock().expect("device store poisoned");
-            if let Some(d) = entries.iter_mut().find(|d| d.id == id) {
-                d.last_seen = unix_now();
-                if let Some(name) = name {
-                    d.name = name;
-                }
+            let entry = entries.iter_mut().find(|d| d.id == id)?;
+            entry.last_seen = unix_now();
+            if let Some(name) = name {
+                entry.name = name;
             }
+            entry.clone()
+        };
+        if is_rename {
+            self.save();
+            return Some(updated);
         }
-        self.save();
+        // Debounced last_seen persistence: at most one file write a minute.
+        let mut last_save = self.last_touch_save.lock().expect("device store poisoned");
+        let due = last_save.is_none_or(|at| at.elapsed() >= Duration::from_secs(60));
+        if due {
+            *last_save = Some(std::time::Instant::now());
+            drop(last_save);
+            self.save();
+        }
+        Some(updated)
     }
 
     /// Creates a device with a fresh random id + token (pairing step 4).
@@ -118,8 +141,11 @@ impl DeviceStore {
     fn save(&self) {
         let entries = self.entries.lock().expect("device store poisoned");
         let tmp = self.path.with_extension("json.tmp");
-        let write = std::fs::write(&tmp, serde_json::to_vec_pretty(&*entries).unwrap_or_default())
-            .and_then(|_| std::fs::rename(&tmp, &self.path));
+        let write = std::fs::write(
+            &tmp,
+            serde_json::to_vec_pretty(&*entries).unwrap_or_default(),
+        )
+        .and_then(|_| std::fs::rename(&tmp, &self.path));
         if let Err(e) = write {
             tracing::warn!(path = %self.path.display(), error = %e, "cannot persist devices.json");
         }
@@ -181,9 +207,18 @@ impl Pairing {
     }
 
     pub fn consume(&self, code: &str) -> Result<(), PairError> {
-        self.peek(code)?;
-        self.codes.lock().expect("pairing poisoned").remove(code);
-        Ok(())
+        // Lookup and remove under one lock: with separate scopes two
+        // concurrent consumes could both pass the check and both mint
+        // devices off a single one-time code.
+        let mut codes = self.codes.lock().expect("pairing poisoned");
+        match codes.get(code) {
+            None => Err(PairError::Invalid),
+            Some(created) if created.elapsed() >= PAIR_CODE_TTL => Err(PairError::Expired),
+            Some(_) => {
+                codes.remove(code);
+                Ok(())
+            }
+        }
     }
 }
 

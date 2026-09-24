@@ -5,4 +5,13 @@ import type { StateShape } from "./StateShape";
  * One live state channel in the `welcome` catalog: how to render its
  * values and (for series) the server's ring-buffer size.
  */
-export type ChannelInfo = { shape: StateShape, cap: number | null, };
+export type ChannelInfo = { shape: StateShape, cap: number | null, 
+/**
+ * Display title captured from a producer's custom-value object
+ * (`{"title": "CPU Load", ..}`), so graph tiles can label themselves.
+ */
+title: string | null, 
+/**
+ * Unit suffix captured alongside the title (e.g. "%", "GB").
+ */
+suffix: string | null, };

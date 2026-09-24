@@ -1,8 +1,10 @@
 # ROADMAP
 
-Rust rewrite of Deckboard: desktop core (Tauri 2 + Vue 3, M3+) with a
-Kotlin/Compose Android client (M4+), keeping the stock Android app working
-through a legacy compatibility layer until the new client ships.
+Pulpit: a Rust desktop core (Tauri 2 + Vue 3, M3+) with a Kotlin/Compose
+Android client (M4+), keeping the stock Deckboard Android app working
+through a legacy compatibility layer until the new client ships. Started
+as a Rust rewrite of Deckboard 3.x; owns its identity and data directory
+(`~/pulpitApp`) since the 2026-09-24 rebrand (ADR-011).
 
 ## Milestones
 
@@ -11,10 +13,10 @@ through a legacy compatibility layer until the new client ships.
       dispatching `exec_shortcut`/`exec_slider` for the system-level command
       subset. Acceptance: stock Deckboard Pro client connects over QR and
       renders boards.
-- [x] **M1 - proto v2**: typed schema in `deckboard-proto` (envelope, widget
+- [x] **M1 - proto v2**: typed schema in `pulpit-proto` (envelope, widget
       manifests, all messages) with ts-rs TypeScript bindings
       (`crates/proto/bindings/`) and golden JSON fixtures parsed by both the
-      Rust tests and a Kotlin unit test. Transport in `deckboard-v2`:
+      Rust tests and a Kotlin unit test. Transport in `pulpit-v2`:
       raw WebSocket `/v2/ws` on the shared port, one-time pairing codes
       (`POST /v2/pair`) + per-device tokens (`~/deckboard/devices.json`),
       `hello`/`welcome` with the live channel catalog, `boards.sync` +
@@ -23,15 +25,41 @@ through a legacy compatibility layer until the new client ships.
       and server-side hold-to-repeat, `board.open`, hashed assets on
       `/assets/<sha256>`, WS-level pings (60 s) + watchdog. Spec:
       `docs/protocol-v2.md`. The Kotlin client migrates to v2 in M4.
-- [ ] **M2 - Action engine complete**: remaining command types (audio
-      volume via windows-rs, speaker-device, screenshot, clipboard-based
-      unicode typing, media info), audio/device status watchers
-      (5 s / 60 s like the original) pushing v2 channels.
+- [x] **M2 - Action engine complete** (`crates/os`): master volume/mute
+      and default-device switching via WASAPI + IPolicyConfig (no
+      PowerShell dependency, unlike the original), `speaker-device` /
+      `speaker-volume` commands live, screenshot as
+      `Pulpit_<UTC stamp>.png` (same-second captures get a `_N`
+      suffix instead of overwriting), `type` via clipboard paste with
+      restore (unicode-safe). Status watcher pushes volume + mute every
+      5 s and the device id every 30 s (the original's real cadence)
+      over legacy `app_status_update` and the v2 state engine. Media
+      info was dropped: the original app has no such command (zero
+      references in its bundle). Merge notes (2026-09-21): the desktop
+      editor's watcher pushes the device on every detected change
+      (5 s poll) instead of a fixed 30 s cadence; `play` (local audio
+      file via MCI, restart on press) lives in `pulpit-os` and the
+      shared `SqlBackend`; the switch survives COM-apartment teardown
+      (`CoInitializeEx` S_FALSE means a pre-existing MTA we must not
+      `CoUninitialize`). Linux support: the `Speaker` trait is
+      the seam - swap in an ALSA/PipeWire implementation.
 - [ ] **M3 - Desktop editor (MVP gate)**: Tauri 2 + Vue 3 editor: boards,
       buttons, sliders CRUD, drag/resize, dual-state, `.boardjson`
       import/export (format-compatible), touch mode, tray, hotkeys,
       autolaunch. **Definition of MVP: full behavioral parity with the
       original desktop app using the stock Android client.**
+      Status (2026-09-14): editor MVP lives in `apps/desktop` - board/tile
+      CRUD, drag/resize, dual-state styling, format-compatible `.boardjson`
+      import/export, touch mode with local execution, tray, autostart
+      toggle, configurable touch-mode hotkey (validated, persisted to
+      `~/deckboard/editor.json`, re-registered at runtime), slider drag
+      interaction in touch mode, visible empty grid slots in the editor,
+      live second-state preview (extension/custom-value pushes broadcast
+      as `app_status_update` and forwarded to the editor, which mirrors
+      the original ToggleButton `isActive` over `customValues`/app state).
+      Cutover (2026-09-22): the editor replaced the original app for daily
+      use on this machine - installed from the NSIS bundle, HKCU Run
+      autostart on, original autostart bat disabled.
 - [ ] **M4 - Kotlin/Compose client MVP**: boards/buttons/sliders/toggles,
       live state, offline cache, QR/USB pairing. Includes Android plumbing:
       foreground service + battery-optimization exemption prompt (WS dies
@@ -56,19 +84,25 @@ through a legacy compatibility layer until the new client ships.
   stock Android client, Free and Pro). Custom grids / web widgets / media
   come after MVP ships.
 - **Twitter removed** everywhere (commands, services, OAuth route).
+- **Rebrand to Pulpit (2026-09-24)**: own product name and data directory
+      instead of living in Deckboard's shadow. Data is copied, not moved:
+      `~/deckboard` stays intact for the original app, and every
+      wire-visible string the stock client or original extensions depend
+      on (protocol payloads, extension ids, settings keys) keeps the old
+      name. ADR-011.
 - **Single port 8500** for both protocols: legacy lives at
-  `/socket.io/?EIO=3...`, protocol v2 at `/v2/ws` (plain WebSocket, JSON
-  frames, see `deckboard-proto`). **Temporary:** the server binary defaults
-  to **8501** while the original desktop app is still in use (it owns 8500
-  and the DB); note the stock Android client hardcodes 8500, so real-tablet
-  testing means closing the original app and running with
-  `DECKBOARD_PORT=8500` (or after the default is flipped back).
+      `/socket.io/?EIO=3...`, protocol v2 at `/v2/ws` (plain WebSocket, JSON
+      frames, see `pulpit-proto`). The temporary 8501 split ended on
+      2026-09-22: the original desktop app was retired from daily use (its
+      `deckboard.bat` autostart removed), 8500 is the default again, and the
+      desktop editor is the daily driver (single instance, logs in
+      `~/deckboard/logs/`, close-to-tray).
 - **ffmpeg optional**: transcoding/normalization happens only when a
   `ffmpeg` binary is found in PATH; otherwise assets are served as-is and
   the client decodes natively (H.264/VP9 in WebView/Media3).
 - **Web widget foundation without full implementation**: the manifest
   schema (`WidgetKind::Web`, `web_package`, interactions, state refs) is
-  defined and versioned in `deckboard-proto` now, so boards authored later
+  defined and versioned in `pulpit-proto` now, so boards authored later
   never need a storage migration. The WebView runtime itself lands in M6.
 
 ## Testing

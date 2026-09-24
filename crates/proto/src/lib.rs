@@ -1,6 +1,6 @@
 //! Protocol v2 types - the single source of truth for the wire format
 //! (ADR-004). TypeScript bindings are generated into `bindings/` by
-//! `cargo test -p deckboard-proto`; the golden fixtures in
+//! `cargo test -p pulpit-proto`; the golden fixtures in
 //! `tests/fixtures/` pin the exact JSON the Kotlin client parses too.
 //!
 //! Boards are data, not code: every tile carries a widget manifest the
@@ -76,17 +76,32 @@ pub struct Frame {
 impl Frame {
     /// Client/server request frame: carries `id`, expects an `ack`.
     pub fn request(kind: &str, id: &str, payload: serde_json::Value) -> Frame {
-        Frame { v: PROTOCOL_VERSION, id: Some(id.to_string()), ack: None, kind: kind.to_string(), payload: Some(payload) }
+        Frame {
+            v: PROTOCOL_VERSION,
+            id: Some(id.to_string()),
+            ack: None,
+            kind: kind.to_string(),
+            payload: Some(payload),
+        }
     }
 
     /// Server push: no `id`/`ack`.
     pub fn push(kind: &str, payload: serde_json::Value) -> Frame {
-        Frame { v: PROTOCOL_VERSION, id: None, ack: None, kind: kind.to_string(), payload: Some(payload) }
+        Frame {
+            v: PROTOCOL_VERSION,
+            id: None,
+            ack: None,
+            kind: kind.to_string(),
+            payload: Some(payload),
+        }
     }
 
     /// Server push with a typed payload, serialized to JSON.
     pub fn push_typed<T: Serialize>(kind: &str, payload: &T) -> Frame {
-        Frame::push(kind, serde_json::to_value(payload).unwrap_or(serde_json::Value::Null))
+        Frame::push(
+            kind,
+            serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+        )
     }
 }
 
@@ -116,6 +131,13 @@ pub struct ChannelInfo {
     pub shape: StateShape,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cap: Option<u32>,
+    /// Display title captured from a producer's custom-value object
+    /// (`{"title": "CPU Load", ..}`), so graph tiles can label themselves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Unit suffix captured alongside the title (e.g. "%", "GB").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -129,13 +151,13 @@ pub struct Welcome {
     #[ts(type = "number")]
     pub generation: u64,
     pub device: Device,
-    /// The device token, carried ONLY in the welcome that completes a
-    /// pairing (the client stores it and authenticates with it later).
-    /// Token reconnects omit it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
     #[serde(default, skip_serializing_if = "map_is_empty")]
     pub channels: std::collections::BTreeMap<String, ChannelInfo>,
+    /// The device token, issued only in the welcome that completes a
+    /// pairing (docs/protocol-v2.md §3 step 4); reconnecting devices know
+    /// it already.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -158,7 +180,9 @@ pub enum Background {
 /// Board grid background resolution of the legacy `background` column:
 /// empty string means "no color set".
 pub fn background_from_legacy(raw: &str) -> Option<Background> {
-    (!raw.is_empty()).then(|| Background::Color { color: raw.to_string() })
+    (!raw.is_empty()).then(|| Background::Color {
+        color: raw.to_string(),
+    })
 }
 
 /// Board-level v2 struct: a grid plus free-placement tiles.
@@ -426,8 +450,7 @@ mod tests {
 
     #[test]
     fn unknown_widget_kind_degrades() {
-        let m: WidgetManifest =
-            serde_json::from_str(r#"{"kind":"party-confetti"}"#).unwrap();
+        let m: WidgetManifest = serde_json::from_str(r#"{"kind":"party-confetti"}"#).unwrap();
         assert_eq!(m.kind, WidgetKind::Other);
     }
 
@@ -459,8 +482,7 @@ mod tests {
 
     #[test]
     fn unknown_state_shape_degrades() {
-        let r: StateRef =
-            serde_json::from_str(r#"{"channel":"x","shape":"spiral"}"#).unwrap();
+        let r: StateRef = serde_json::from_str(r#"{"channel":"x","shape":"spiral"}"#).unwrap();
         assert_eq!(r.shape, StateShape::Other);
     }
 
@@ -477,7 +499,9 @@ mod tests {
     fn background_from_legacy_column() {
         assert_eq!(
             background_from_legacy("#2c3e50"),
-            Some(Background::Color { color: "#2c3e50".into() })
+            Some(Background::Color {
+                color: "#2c3e50".into()
+            })
         );
         assert_eq!(background_from_legacy(""), None);
     }
@@ -486,7 +510,12 @@ mod tests {
     fn tile_flattens_placement_and_manifest() {
         let tile = Tile {
             id: 17,
-            placement: Placement { x: 0, y: 0, w: 2, h: 1 },
+            placement: Placement {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 1,
+            },
             manifest: WidgetManifest {
                 kind: WidgetKind::Button,
                 params: serde_json::Value::Null,

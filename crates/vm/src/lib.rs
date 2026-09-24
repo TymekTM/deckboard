@@ -36,6 +36,23 @@ pub enum VmError {
 
 pub type Result<T> = std::result::Result<T, VmError>;
 
+/// Voicemeeter gain fader range in dB, the same span the Voicemeeter UI
+/// sliders cover for Strip and Bus Gain.
+pub const GAIN_MIN: f32 = -60.0;
+pub const GAIN_MAX: f32 = 12.0;
+
+/// Slider position 0..1 -> gain in dB across the fader range.
+pub fn slider_gain(value: f64) -> f32 {
+    let v = value.clamp(0.0, 1.0) as f32;
+    (GAIN_MIN + (GAIN_MAX - GAIN_MIN) * v).clamp(GAIN_MIN, GAIN_MAX)
+}
+
+/// Inverse of [`slider_gain`]: gain in dB -> slider position 0..1.
+pub fn gain_to_slider(gain: f32) -> f64 {
+    let g = gain.clamp(GAIN_MIN, GAIN_MAX);
+    ((g - GAIN_MIN) / (GAIN_MAX - GAIN_MIN)) as f64
+}
+
 /// C API signatures from the Voicemeeter Remote API (ANSI string variants).
 type LoginFn = extern "system" fn() -> i32;
 type LogoutFn = extern "system" fn() -> i32;
@@ -68,8 +85,7 @@ unsafe fn load_symbols(path: &std::ffi::CStr) -> Result<Symbols> {
         return Err(VmError::Unavailable);
     }
     let resolve = |name: &'static str| -> Result<*mut c_void> {
-        let symbol = std::ffi::CString::new(name)
-            .expect("symbol names contain no NUL");
+        let symbol = std::ffi::CString::new(name).expect("symbol names contain no NUL");
         // SAFETY: symbol is NUL-terminated and module is a live handle
         let sym = unsafe { GetProcAddress(module, symbol.as_ptr() as *const u8) };
         if sym.is_null() {
@@ -84,10 +100,14 @@ unsafe fn load_symbols(path: &std::ffi::CStr) -> Result<Symbols> {
         login: unsafe { std::mem::transmute::<*mut c_void, LoginFn>(resolve("VBVMR_Login")?) },
         logout: unsafe { std::mem::transmute::<*mut c_void, LogoutFn>(resolve("VBVMR_Logout")?) },
         is_parameters_dirty: unsafe {
-            std::mem::transmute::<*mut c_void, IsParametersDirtyFn>(resolve("VBVMR_IsParametersDirty")?)
+            std::mem::transmute::<*mut c_void, IsParametersDirtyFn>(resolve(
+                "VBVMR_IsParametersDirty",
+            )?)
         },
         get_parameter_float: unsafe {
-            std::mem::transmute::<*mut c_void, GetParameterFloatFn>(resolve("VBVMR_GetParameterFloat")?)
+            std::mem::transmute::<*mut c_void, GetParameterFloatFn>(resolve(
+                "VBVMR_GetParameterFloat",
+            )?)
         },
         set_parameters: unsafe {
             std::mem::transmute::<*mut c_void, SetParametersFn>(resolve("VBVMR_SetParameters")?)
@@ -99,8 +119,8 @@ unsafe fn load_symbols(path: &std::ffi::CStr) -> Result<Symbols> {
 /// Candidate DLL locations, mirroring the install layouts Voicemeeter uses.
 pub fn dll_candidates() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    let base = std::env::var("ProgramFiles(x86)")
-        .unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+    let base =
+        std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
     // Potato installs into a versioned subfolder first
     for entry in [
         r"\VB\Voicemeeter\VoicemeeterRemote64.dll",
@@ -168,15 +188,22 @@ impl Remote {
     }
 
     pub fn set_parameters(&self, text: &str) -> Result<()> {
+        self.set_parameters_nowait(text)?;
+        // the engine applies text commands asynchronously; voicemeeter-
+        // connector waited 200 ms so a following read sees the new state
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(())
+    }
+
+    /// Fire one text command and return immediately, for write-only paths
+    /// like the gain slider that stream many updates and never read back.
+    pub fn set_parameters_nowait(&self, text: &str) -> Result<()> {
         let c = std::ffi::CString::new(text)
             .map_err(|_| VmError::BadPayload("parameters", text.into()))?;
         // SAFETY: c is NUL-terminated
         if (self.symbols.set_parameters)(c.as_ptr() as *const u8) < 0 {
             return Err(VmError::Call("VBVMR_SetParameters"));
         }
-        // the engine applies text commands asynchronously; voicemeeter-
-        // connector waited 200 ms so a following read sees the new state
-        std::thread::sleep(Duration::from_millis(200));
         Ok(())
     }
 }
@@ -224,14 +251,16 @@ impl VoicemeeterState {
             return self.with_remote(|r| r.set_parameters("Command.Restart=1;"));
         }
         let kind: &'static str = match action {
-            "vm-set-strip" | "vm-toggle-strip" | "vm-increase-strip" | "vm-decrease-strip" => "Strip",
-            "vm-set-bus" | "vm-toggle-bus" | "vm-increase-bus" | "vm-decrease-bus" => "Bus",
+            "vm-set-strip" | "vm-toggle-strip" | "vm-increase-strip" | "vm-decrease-strip"
+            | "vm-slider-strip" => "Strip",
+            "vm-set-bus" | "vm-toggle-bus" | "vm-increase-bus" | "vm-decrease-bus"
+            | "vm-slider-bus" => "Bus",
             "vm-set-output" => return self.set_output(args),
             other => return Err(VmError::BadPayload("action", other.into())),
         };
-        let args = args.as_object().ok_or_else(|| {
-            VmError::BadPayload("args", "expected object".into())
-        })?;
+        let args = args
+            .as_object()
+            .ok_or_else(|| VmError::BadPayload("args", "expected object".into()))?;
         let number = args
             .get("number")
             .and_then(Value::as_i64)
@@ -266,6 +295,14 @@ impl VoicemeeterState {
                     r.set_parameters(&param_text(&index, current + delta as f32))
                 })
             }
+            // slider position 0..1 (injected by the backend dispatcher)
+            // mapped straight onto the gain fader range; streamed without
+            // the settle wait so dragging stays realtime
+            "vm-slider" => {
+                let value = parse_value(args)?;
+                let gain = slider_gain(value);
+                self.with_remote(|r| r.set_parameters_nowait(&param_text(&index, gain)))
+            }
             other => Err(VmError::BadPayload("action", other.into())),
         }
     }
@@ -273,6 +310,12 @@ impl VoicemeeterState {
     /// Read one Strip parameter - used by live diagnostics and tests.
     pub fn read_strip(&mut self, number: i64, param: &str) -> Result<f32> {
         let index = format!("Strip[{number}].{param}");
+        self.with_remote(|r| r.get_parameter_float(index.as_str()))
+    }
+
+    /// Read one Bus parameter - used by live diagnostics and tests.
+    pub fn read_bus(&mut self, number: i64, param: &str) -> Result<f32> {
+        let index = format!("Bus[{number}].{param}");
         self.with_remote(|r| r.get_parameter_float(index.as_str()))
     }
 
@@ -295,7 +338,9 @@ impl VoicemeeterState {
 /// used parseFloat - numbers and numeric strings both pass.
 fn parse_value(args: &serde_json::Map<String, Value>) -> Result<f64> {
     match args.get("value") {
-        Some(Value::Number(n)) => n.as_f64().ok_or_else(|| VmError::BadPayload("value", "not a number".into())),
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .ok_or_else(|| VmError::BadPayload("value", "not a number".into())),
         Some(Value::String(s)) => s
             .trim()
             .parse::<f64>()
@@ -326,17 +371,29 @@ fn string_param_text(index: &str, value: &str) -> String {
 
 /// Extension input declarations for the style resolver (same colors and
 /// icons as the original voicemeeter-control package declares).
-pub fn input_declarations() -> Vec<(&'static str, Option<&'static str>, &'static str, &'static str)> {
+pub fn input_declarations() -> Vec<(
+    &'static str,
+    Option<&'static str>,
+    &'static str,
+    &'static str,
+)> {
     // (value, icon, fontIcon, color)
     vec![
         ("vm-set-strip", Some("headphones"), "fas", "#171A21"),
-        ("vm-toggle-strip", Some("microphone-slash"), "fas", "#171A21"),
+        (
+            "vm-toggle-strip",
+            Some("microphone-slash"),
+            "fas",
+            "#171A21",
+        ),
         ("vm-increase-strip", Some("volume-up"), "fas", "#171A21"),
         ("vm-decrease-strip", Some("volume-down"), "fas", "#171A21"),
         ("vm-set-bus", Some("headphones"), "fas", "#171A21"),
         ("vm-toggle-bus", Some("volume-mute"), "fas", "#171A21"),
         ("vm-increase-bus", Some("volume-up"), "fas", "#171A21"),
         ("vm-decrease-bus", Some("volume-down"), "fas", "#171A21"),
+        ("vm-slider-strip", Some("sliders-h"), "fas", "#171A21"),
+        ("vm-slider-bus", Some("sliders-h"), "fas", "#171A21"),
         ("vm-restart", Some("sync"), "fas", "#171A21"),
         ("vm-set-output", Some("headphones"), "fas", "#171A21"),
     ]
@@ -406,16 +463,29 @@ mod tests {
         let err = vm.execute("vm-explode", &Value::Null).unwrap_err();
         assert!(matches!(err, VmError::BadPayload("action", _)));
         let err = vm
-            .execute("vm-toggle-something", &json!({"param": "Mute", "number": 0}))
+            .execute(
+                "vm-toggle-something",
+                &json!({"param": "Mute", "number": 0}),
+            )
             .unwrap_err();
         assert!(matches!(err, VmError::BadPayload("action", _)));
     }
 
+    /// The remote API is single-client: parallel live tests in one process
+    /// would race their logins and crash the harness (0xc0000005). In the
+    /// app the shared `Mutex<VoicemeeterState>` in the backend plays this
+    /// role - the tests must not run the FFI concurrently either.
+    fn live_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LIVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LIVE_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Live check: reads the real Strip[2].A1 routing state. Run explicitly:
-    /// `cargo test -p deckboard-vm -- --ignored live_get`
+    /// `cargo test -p pulpit-vm -- --ignored live_get`
     #[test]
     #[ignore = "reads the live Voicemeeter state"]
     fn live_get_strip2_a1() {
+        let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
         let v = vm.read_strip(2, "A1").expect("read Strip[2].A1");
         println!("Strip[2].A1 = {v}");
@@ -426,34 +496,102 @@ mod tests {
     #[test]
     #[ignore = "flips live audio routing twice"]
     fn live_toggle_probe() {
+        let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
         let v0 = vm.read_strip(2, "A1").unwrap();
-        vm.execute("vm-toggle-strip", &serde_json::json!({"param": "A1", "number": 2})).unwrap();
+        vm.execute(
+            "vm-toggle-strip",
+            &serde_json::json!({"param": "A1", "number": 2}),
+        )
+        .unwrap();
         let v1 = vm.read_strip(2, "A1").unwrap();
-        vm.execute("vm-toggle-strip", &serde_json::json!({"param": "A1", "number": 2})).unwrap();
+        vm.execute(
+            "vm-toggle-strip",
+            &serde_json::json!({"param": "A1", "number": 2}),
+        )
+        .unwrap();
         let v2 = vm.read_strip(2, "A1").unwrap();
         println!("toggle round trip: {v0} -> {v1} -> {v2}");
     }
 
     /// Live test: touches the real Voicemeeter instance. Run explicitly:
-    /// `cargo test -p deckboard-vm -- --ignored`
+    /// `cargo test -p pulpit-vm -- --ignored`
     #[test]
     #[ignore = "fires Command.Restart on the live audio engine"]
     fn live_restart() {
+        let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
         vm.execute("vm-restart", &Value::Null).unwrap();
+    }
+
+    /// Live round trip of the bus gain slider on A3 (Bus[2]): read the
+    /// current gain, move the slider to the middle (-24 dB), verify, then
+    /// restore. Run explicitly:
+    /// `cargo test -p pulpit-vm -- --ignored --nocapture live_slider_bus_a3`
+    #[test]
+    #[ignore = "moves the live A3 bus fader twice"]
+    fn live_slider_bus_a3() {
+        let _guard = live_lock();
+        let mut vm = VoicemeeterState::new();
+        // the slider path fires without the settle wait, so a verifying
+        // read must give the engine a moment to apply the command
+        let settle = || std::thread::sleep(Duration::from_millis(250));
+        let before = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
+        vm.execute(
+            "vm-slider-bus",
+            &json!({"param": "Gain", "number": 2, "value": 0.5}),
+        )
+        .unwrap();
+        settle();
+        let mid = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
+        assert!((mid - (-24.0)).abs() < 0.6, "expected -24 dB, got {mid}");
+        vm.execute(
+            "vm-slider-bus",
+            &json!({"param": "Gain", "number": 2, "value": gain_to_slider(before)}),
+        )
+        .unwrap();
+        settle();
+        let after = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
+        println!("A3 gain: {before} -> {mid} -> {after}");
+        assert!((after - before).abs() < 1.0, "restore drifted: {before} vs {after}");
     }
 
     #[test]
     fn action_routing() {
         assert!(is_vm_action("vm-toggle-strip"));
+        assert!(is_vm_action("vm-slider-bus"));
         assert!(!is_vm_action("vol"));
+    }
+
+    #[test]
+    fn slider_gain_maps_fader_range() {
+        assert_eq!(slider_gain(0.0), -60.0);
+        assert_eq!(slider_gain(1.0), 12.0);
+        assert_eq!(slider_gain(0.5), -24.0);
+        // out-of-range positions clamp instead of overshooting the fader
+        assert_eq!(slider_gain(1.7), 12.0);
+        assert_eq!(slider_gain(-0.3), -60.0);
+        // round trip: gain back to a slider position lands on the same gain
+        for g in [-60.0f32, -24.0, 0.0, 12.0] {
+            assert!((slider_gain(gain_to_slider(g)) - g).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn slider_actions_reject_missing_value_before_connecting() {
+        let mut vm = VoicemeeterState::new();
+        // args straight from the tile command JSON: no slider value yet
+        let err = vm
+            .execute("vm-slider-bus", &json!({"param": "Gain", "number": 2}))
+            .unwrap_err();
+        assert!(matches!(err, VmError::BadPayload("value", _)));
     }
 
     #[test]
     fn dll_candidates_cover_standard_layout() {
         let cands = dll_candidates();
-        assert!(cands.iter().any(|p| p.to_string_lossy().ends_with("Voicemeeter\\VoicemeeterRemote64.dll")));
+        assert!(cands.iter().any(|p| p
+            .to_string_lossy()
+            .ends_with("Voicemeeter\\VoicemeeterRemote64.dll")));
     }
 }
-

@@ -1,0 +1,23 @@
+[package]
+name = "pulpit-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+pulpit-db = { path = "../db" }
+pulpit-actions = { path = "../actions" }
+pulpit-legacy = { path = "../legacy" }
+pulpit-ext = { path = "../ext" }
+pulpit-vm = { path = "../vm" }
+pulpit-discord = { path = "../discord" }
+pulpit-os = { path = "../os" }
+pulpit-sysinfo = { path = "../sysinfo" }
+ureq = "3"
+
+[dev-dependencies]
+tempfile = "3"

@@ -10,10 +10,10 @@ min_client: string,
 /**
  * Board generation; grows by one per committed write batch.
  */
-generation: number, device: Device, 
+generation: number, device: Device, channels?: { [key in string]: ChannelInfo }, 
 /**
- * The device token, carried ONLY in the welcome that completes a
- * pairing (the client stores it and authenticates with it later).
- * Token reconnects omit it.
+ * The device token, issued only in the welcome that completes a
+ * pairing (docs/protocol-v2.md §3 step 4); reconnecting devices know
+ * it already.
  */
-token: string | null, channels?: { [key in string]: ChannelInfo }, };
+token?: string | null, };

@@ -1,7 +1,7 @@
 //! Protocol v2 transport (docs/protocol-v2.md): `/v2/ws` sessions, board
 //! sync/delta, the state engine, pairing and the hashed-asset store.
-//! Types live in `deckboard-proto`; the legacy protocol stays frozen in
-//! `deckboard-legacy` - this crate only adds.
+//! Types live in `pulpit-proto`; the legacy protocol stays frozen in
+//! `pulpit-legacy` - this crate only adds.
 
 mod assets;
 mod boards;
@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use deckboard_proto::{Frame, StatePatch, TYPE_STATE_PATCH};
+use pulpit_proto::{Frame, StatePatch, TYPE_STATE_PATCH};
 
 pub use assets::AssetStore;
 pub use devices::{DeviceEntry, DeviceStore, PairError, Pairing};
@@ -61,11 +61,13 @@ pub async fn run_flusher(engine: Arc<StateEngine>, hub: Arc<V2Hub>, interval: Du
         tick.tick().await;
         let changes = engine.drain_dirty();
         if !changes.is_empty() {
-            hub.broadcast_frame(&Frame::push_typed(TYPE_STATE_PATCH, &StatePatch { changes }));
+            hub.broadcast_frame(&Frame::push_typed(
+                TYPE_STATE_PATCH,
+                &StatePatch { changes },
+            ));
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

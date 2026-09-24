@@ -48,11 +48,7 @@ pub struct ExtRuntime {
 }
 
 impl ExtRuntime {
-    pub fn load(
-        root: &Path,
-        package: &str,
-        configs: &Value,
-    ) -> Result<ExtRuntime> {
+    pub fn load(root: &Path, package: &str, configs: &Value) -> Result<ExtRuntime> {
         let mut context = Context::default();
         register_natives(&mut context);
         let prelude = include_str!("prelude.js")
@@ -104,7 +100,7 @@ impl ExtRuntime {
             .cloned()
             .unwrap_or_default();
 
-        // inject user configs from ~/deckboard/settings.json
+        // inject user configs from ~/pulpitApp/settings.json
         let cfg = serde_json::to_string(configs).unwrap_or_else(|_| "{}".into());
         run(
             &mut context,
@@ -154,24 +150,48 @@ impl ExtRuntime {
     pub fn drain(&mut self) -> Vec<HostEvent> {
         let mut events = Vec::new();
         if let Ok(v) = run(&mut self.context, "JSON.stringify(__flush_set_values())") {
-            if let Ok(list) = serde_json::from_str::<Vec<Value>>(&v.as_string().map(|s| s.to_std_string_escaped()).unwrap_or_default()) {
+            if let Ok(list) = serde_json::from_str::<Vec<Value>>(
+                &v.as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default(),
+            ) {
                 for obj in list {
                     events.push(HostEvent::SetValue(obj));
                 }
             }
         }
-        if let Ok(v) = run(&mut self.context, "JSON.stringify({n: __new_intervals.splice(0), c: __cleared_intervals.splice(0)})") {
+        if let Ok(v) = run(
+            &mut self.context,
+            "JSON.stringify({n: __new_intervals.splice(0), c: __cleared_intervals.splice(0)})",
+        ) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(
-                &v.as_string().map(|s| s.to_std_string_escaped()).unwrap_or_default(),
+                &v.as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default(),
             ) {
-                for iv in json.get("n").and_then(Value::as_array).cloned().unwrap_or_default() {
+                for iv in json
+                    .get("n")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                {
                     let id = iv.get("id").and_then(Value::as_u64).unwrap_or(0);
-                    let ms = iv.get("ms").and_then(Value::as_u64).unwrap_or(1000).max(100);
+                    let ms = iv
+                        .get("ms")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1000)
+                        .max(100);
                     self.intervals.retain(|(eid, _, _)| *eid != id);
-                    self.intervals.push((id, ms, Instant::now() + Duration::from_millis(ms)));
+                    self.intervals
+                        .push((id, ms, Instant::now() + Duration::from_millis(ms)));
                     events.push(HostEvent::IntervalStart(id, ms));
                 }
-                for id in json.get("c").and_then(Value::as_array).cloned().unwrap_or_default() {
+                for id in json
+                    .get("c")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                {
                     let id = id.as_u64().unwrap_or(0);
                     self.intervals.retain(|(eid, _, _)| *eid != id);
                     events.push(HostEvent::IntervalClear(id));
@@ -204,7 +224,12 @@ impl ExtRuntime {
 
     /// Minimum tick granularity needed by this runtime.
     pub fn tick_granularity(&self) -> Duration {
-        let min = self.intervals.iter().map(|(_, ms, _)| *ms).min().unwrap_or(1000);
+        let min = self
+            .intervals
+            .iter()
+            .map(|(_, ms, _)| *ms)
+            .min()
+            .unwrap_or(1000);
         Duration::from_millis(min.clamp(100, 60_000))
     }
 
@@ -280,8 +305,16 @@ native!(host_read_file_base64, |args, _ctx| {
                 let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
                 b64.push(table[(n >> 18) as usize & 63] as char);
                 b64.push(table[(n >> 12) as usize & 63] as char);
-                b64.push(if chunk.len() > 1 { table[(n >> 6) as usize & 63] as char } else { '=' });
-                b64.push(if chunk.len() > 2 { table[n as usize & 63] as char } else { '=' });
+                b64.push(if chunk.len() > 1 {
+                    table[(n >> 6) as usize & 63] as char
+                } else {
+                    '='
+                });
+                b64.push(if chunk.len() > 2 {
+                    table[n as usize & 63] as char
+                } else {
+                    '='
+                });
             }
             Ok(JsValue::from(boa_engine::JsString::from(b64)))
         }
@@ -313,24 +346,46 @@ native!(host_write_file, |args, _ctx| {
     Ok(JsValue::from(std::fs::write(&p, content).is_ok()))
 });
 
+// Extension commands must never flash a console window: without
+// CREATE_NO_WINDOW every `cmd /C` poll (steam-launcher runs tasklist on a
+// timer) pops up a visible terminal. Children inherit the hidden console.
+#[cfg(windows)]
+fn shell_command(cmd: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = std::process::Command::new("cmd");
+    c.args(["/C", cmd]).creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    c
+}
+
+#[cfg(not(windows))]
+fn shell_command(cmd: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("sh");
+    c.args(["-c", cmd]);
+    c
+}
+
 native!(host_shell_exec, |args, ctx| {
     let cmd = arg_str(args, 0);
-    let output = if cfg!(windows) {
-        std::process::Command::new("cmd").args(["/C", &cmd]).output()
-    } else {
-        std::process::Command::new("sh").args(["-c", &cmd]).output()
-    };
+    let output = shell_command(&cmd).output();
     let value = match output {
         Ok(out) => Value::Object(
             [
-                ("stdout".into(), Value::String(String::from_utf8_lossy(&out.stdout).into_owned())),
-                ("stderr".into(), Value::String(String::from_utf8_lossy(&out.stderr).into_owned())),
-                ("error".into(),
+                (
+                    "stdout".into(),
+                    Value::String(String::from_utf8_lossy(&out.stdout).into_owned()),
+                ),
+                (
+                    "stderr".into(),
+                    Value::String(String::from_utf8_lossy(&out.stderr).into_owned()),
+                ),
+                (
+                    "error".into(),
                     if out.status.success() {
                         Value::Null
                     } else {
                         Value::String(format!("exit code {}", out.status))
-                    }),
+                    },
+                ),
             ]
             .into_iter()
             .collect(),
@@ -350,15 +405,7 @@ native!(host_shell_exec, |args, ctx| {
 
 native!(host_spawn, |args, _ctx| {
     let cmd = arg_str(args, 0);
-    let result = if cfg!(windows) {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .args(["/C", &cmd])
-            .creation_flags(0x00000008) // DETACHED_PROCESS
-            .spawn()
-    } else {
-        std::process::Command::new("sh").args(["-c", &cmd]).spawn()
-    };
+    let result = shell_command(&cmd).spawn();
     if let Err(e) = &result {
         tracing::warn!(command = %cmd, err = %e, "extension spawn failed");
     }
@@ -377,9 +424,20 @@ native!(host_open, |args, _ctx| {
 native!(host_http, |args, ctx| {
     let spec = arg_str(args, 0);
     let parsed: Value = serde_json::from_str(&spec).unwrap_or(Value::Null);
-    let url = parsed.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
-    let method = parsed.get("method").and_then(Value::as_str).unwrap_or("GET").to_string();
-    let body = parsed.get("body").and_then(Value::as_str).map(str::to_string);
+    let url = parsed
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let method = parsed
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET")
+        .to_string();
+    let body = parsed
+        .get("body")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let value = match do_http(&url, &method, body) {
         Ok((status, text)) => Value::Object(
             [
@@ -403,12 +461,22 @@ native!(host_http, |args, ctx| {
     JsValue::from_json(&value, ctx)
 });
 
-fn do_http(url: &str, method: &str, body: Option<String>) -> std::result::Result<(u16, String), String> {
+fn do_http(
+    url: &str,
+    method: &str,
+    body: Option<String>,
+) -> std::result::Result<(u16, String), String> {
     let agent = ureq::Agent::new_with_defaults();
     let method = method.to_uppercase();
     let result = match (method.as_str(), body) {
-        ("POST", Some(b)) => agent.post(url).content_type("application/json").send(b.as_bytes()),
-        ("PUT", Some(b)) => agent.put(url).content_type("application/json").send(b.as_bytes()),
+        ("POST", Some(b)) => agent
+            .post(url)
+            .content_type("application/json")
+            .send(b.as_bytes()),
+        ("PUT", Some(b)) => agent
+            .put(url)
+            .content_type("application/json")
+            .send(b.as_bytes()),
         ("POST", None) => agent.post(url).send(&b""[..]),
         ("PUT", None) => agent.put(url).send(&b""[..]),
         ("DELETE", _) => agent.delete(url).call(),
@@ -416,7 +484,10 @@ fn do_http(url: &str, method: &str, body: Option<String>) -> std::result::Result
     };
     let resp = result.map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
-    let text = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    let text = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
     Ok((status, text))
 }
 
@@ -429,10 +500,10 @@ native!(host_log, |args, _ctx| {
     let level = arg_str(args, 0);
     let msg = arg_str(args, 1);
     match level.as_str() {
-        "warn" => tracing::warn!(target: "deckboard_ext", "{msg}"),
-        "error" => tracing::error!(target: "deckboard_ext", "{msg}"),
-        "debug" => tracing::debug!(target: "deckboard_ext", "{msg}"),
-        _ => tracing::info!(target: "deckboard_ext", "{msg}"),
+        "warn" => tracing::warn!(target: "pulpit_ext", "{msg}"),
+        "error" => tracing::error!(target: "pulpit_ext", "{msg}"),
+        "debug" => tracing::debug!(target: "pulpit_ext", "{msg}"),
+        _ => tracing::info!(target: "pulpit_ext", "{msg}"),
     }
     Ok(JsValue::undefined())
 });
@@ -455,7 +526,11 @@ fn system_cpu_times() -> (u64, u64, u64) {
     extern "system" {
         fn GetSystemTimes(idle: *mut Filetime, kernel: *mut Filetime, user: *mut Filetime) -> i32;
     }
-    let (mut idle, mut kernel, mut user) = (Filetime::default(), Filetime::default(), Filetime::default());
+    let (mut idle, mut kernel, mut user) = (
+        Filetime::default(),
+        Filetime::default(),
+        Filetime::default(),
+    );
     // SAFETY: three distinct out-parameters of the documented struct size
     let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
     if ok == 0 {
@@ -525,16 +600,15 @@ native!(host_cpu_times, |_args, ctx| {
 });
 
 native!(host_cpu_count, |_args, _ctx| {
-    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     Ok(JsValue::from(n as u32))
 });
 
 native!(host_mem_info, |_args, ctx| {
     let (total, free) = system_mem_info();
-    JsValue::from_json(
-        &serde_json::json!({ "total": total, "free": free }),
-        ctx,
-    )
+    JsValue::from_json(&serde_json::json!({ "total": total, "free": free }), ctx)
 });
 
 fn hostname() -> String {
@@ -543,26 +617,32 @@ fn hostname() -> String {
 
 native!(host_home_dir, |_args, _ctx| {
     Ok(JsValue::from(boa_engine::JsString::from(
-        dirs::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        dirs::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     )))
 });
 
 native!(host_tmp_dir, |_args, _ctx| {
-    Ok(JsValue::from(boa_engine::JsString::from(std::env::temp_dir().to_string_lossy().into_owned())))
+    Ok(JsValue::from(boa_engine::JsString::from(
+        std::env::temp_dir().to_string_lossy().into_owned(),
+    )))
 });
 
 native!(host_spawn_capture, |args, ctx| {
     let cmd = arg_str(args, 0);
-    let output = if cfg!(windows) {
-        std::process::Command::new("cmd").args(["/C", &cmd]).output()
-    } else {
-        std::process::Command::new("sh").args(["-c", &cmd]).output()
-    };
+    let output = shell_command(&cmd).output();
     let value = match output {
         Ok(out) => Value::Object(
             [
-                ("stdout".into(), Value::String(String::from_utf8_lossy(&out.stdout).into_owned())),
-                ("stderr".into(), Value::String(String::from_utf8_lossy(&out.stderr).into_owned())),
+                (
+                    "stdout".into(),
+                    Value::String(String::from_utf8_lossy(&out.stdout).into_owned()),
+                ),
+                (
+                    "stderr".into(),
+                    Value::String(String::from_utf8_lossy(&out.stderr).into_owned()),
+                ),
                 ("code".into(), Value::from(out.status.code().unwrap_or(0))),
                 ("error".into(), Value::Null),
             ]
@@ -585,24 +665,63 @@ native!(host_spawn_capture, |args, ctx| {
 
 fn register_natives(context: &mut Context) {
     let fns: Vec<(&str, NativeFunction)> = vec![
-        ("__host_read_file", NativeFunction::from_fn_ptr(host_read_file)),
-        ("__host_read_file_base64", NativeFunction::from_fn_ptr(host_read_file_base64)),
-        ("__host_file_exists", NativeFunction::from_fn_ptr(host_file_exists)),
-        ("__host_list_dir", NativeFunction::from_fn_ptr(host_list_dir)),
-        ("__host_write_file", NativeFunction::from_fn_ptr(host_write_file)),
-        ("__host_shell_exec", NativeFunction::from_fn_ptr(host_shell_exec)),
+        (
+            "__host_read_file",
+            NativeFunction::from_fn_ptr(host_read_file),
+        ),
+        (
+            "__host_read_file_base64",
+            NativeFunction::from_fn_ptr(host_read_file_base64),
+        ),
+        (
+            "__host_file_exists",
+            NativeFunction::from_fn_ptr(host_file_exists),
+        ),
+        (
+            "__host_list_dir",
+            NativeFunction::from_fn_ptr(host_list_dir),
+        ),
+        (
+            "__host_write_file",
+            NativeFunction::from_fn_ptr(host_write_file),
+        ),
+        (
+            "__host_shell_exec",
+            NativeFunction::from_fn_ptr(host_shell_exec),
+        ),
         ("__host_spawn", NativeFunction::from_fn_ptr(host_spawn)),
-        ("__host_spawn_capture", NativeFunction::from_fn_ptr(host_spawn_capture)),
+        (
+            "__host_spawn_capture",
+            NativeFunction::from_fn_ptr(host_spawn_capture),
+        ),
         ("__host_open", NativeFunction::from_fn_ptr(host_open)),
         ("__host_http", NativeFunction::from_fn_ptr(host_http)),
-        ("__host_dialog_error", NativeFunction::from_fn_ptr(host_dialog_error)),
+        (
+            "__host_dialog_error",
+            NativeFunction::from_fn_ptr(host_dialog_error),
+        ),
         ("__host_log", NativeFunction::from_fn_ptr(host_log)),
-        ("__host_hostname", NativeFunction::from_fn_ptr(host_hostname)),
-        ("__host_home_dir", NativeFunction::from_fn_ptr(host_home_dir)),
+        (
+            "__host_hostname",
+            NativeFunction::from_fn_ptr(host_hostname),
+        ),
+        (
+            "__host_home_dir",
+            NativeFunction::from_fn_ptr(host_home_dir),
+        ),
         ("__host_tmp_dir", NativeFunction::from_fn_ptr(host_tmp_dir)),
-        ("__host_cpu_times", NativeFunction::from_fn_ptr(host_cpu_times)),
-        ("__host_cpu_count", NativeFunction::from_fn_ptr(host_cpu_count)),
-        ("__host_mem_info", NativeFunction::from_fn_ptr(host_mem_info)),
+        (
+            "__host_cpu_times",
+            NativeFunction::from_fn_ptr(host_cpu_times),
+        ),
+        (
+            "__host_cpu_count",
+            NativeFunction::from_fn_ptr(host_cpu_count),
+        ),
+        (
+            "__host_mem_info",
+            NativeFunction::from_fn_ptr(host_mem_info),
+        ),
     ];
     for (name, f) in fns {
         let _ = context.register_global_callable(boa_engine::JsString::from(name), 1, f);

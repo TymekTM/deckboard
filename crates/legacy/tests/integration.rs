@@ -4,10 +4,10 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-use deckboard_actions::EventSink;
-use deckboard_db::{BoardRow, ButtonRow};
-use deckboard_legacy::{router, AppState, Backend, Hub};
 use futures_util::{SinkExt, StreamExt};
+use pulpit_actions::EventSink;
+use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_legacy::{router, AppState, Backend, Hub};
 use tokio_tungstenite::tungstenite::Message;
 
 /// Records exec calls instead of touching the OS.
@@ -33,6 +33,10 @@ impl Backend for MockBackend {
             height: 3,
             converted: 1,
         }]
+    }
+
+    fn get_board(&self, board_id: i64) -> Option<BoardRow> {
+        (board_id == 1).then(|| self.get_boards().remove(0))
     }
 
     fn get_buttons_by_board(&self, _board_id: i64) -> Vec<ButtonRow> {
@@ -133,8 +137,7 @@ async fn polling_full_flow() {
     let (status, open) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
     assert_eq!(status, 200);
     assert!(open.starts_with("0{"), "open packet: {open}");
-    let open_json: serde_json::Value =
-        serde_json::from_str(&open[1..]).unwrap();
+    let open_json: serde_json::Value = serde_json::from_str(&open[1..]).unwrap();
     let sid = open_json["sid"].as_str().unwrap().to_string();
     assert_eq!(open_json["upgrades"], serde_json::json!(["websocket"]));
 
@@ -177,7 +180,9 @@ async fn polling_full_flow() {
     assert!(shortcuts.iter().any(|s| s["id"] == 10));
     assert!(shortcuts.iter().any(|s| s["id"].is_null())); // fillers
 
-    // 4. exec_shortcut reaches the backend
+    // 4. exec_shortcut reaches the backend. Execution is detached from the
+    // POST (long actions must not stall the client's pings), so the effect
+    // lands shortly after the response - poll for it.
     let (status, _) = http(
         addr,
         "POST",
@@ -185,7 +190,7 @@ async fn polling_full_flow() {
         Some(r#"42["exec_shortcut",{"id":10,"isTapStart":false}]"#),
     );
     assert_eq!(status, 200);
-    assert_eq!(*backend.execs.lock().unwrap(), vec![(10, false)]);
+    wait_for_execs(&backend, &[(10, false)]);
 
     // 5. get_version broadcasts the exact legacy string
     let (status, _) = http(
@@ -203,7 +208,7 @@ async fn polling_full_flow() {
     );
     assert_eq!(packets, r#"42["get_version",{"version":"1.6.0"}]"#);
 
-    // 6. exec_slider reaches the backend
+    // 6. exec_slider reaches the backend (also detached; poll for it)
     let (status, _) = http(
         addr,
         "POST",
@@ -211,15 +216,41 @@ async fn polling_full_flow() {
         Some(r#"42["exec_slider",{"id":10,"value":0.5}]"#),
     );
     assert_eq!(status, 200);
-    assert_eq!(*backend.sliders.lock().unwrap(), vec![(10, 0.5)]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let sliders = backend.sliders.lock().unwrap().clone();
+        if sliders == vec![(10, 0.5)] {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "exec_slider never landed: {sliders:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Polls until the detached exec task has recorded exactly `expected`.
+fn wait_for_execs(backend: &MockBackend, expected: &[(i64, bool)]) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let execs = backend.execs.lock().unwrap().clone();
+        if execs.as_slice() == expected {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "exec_shortcut never landed: {execs:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn websocket_direct_flow() {
     let (addr, _backend) = spawn_server().await;
-    let url = format!(
-        "ws://{addr}/socket.io/?EIO=3&transport=websocket&access_key=DCKBRD_PRO_1_3_0"
-    );
+    let url =
+        format!("ws://{addr}/socket.io/?EIO=3&transport=websocket&access_key=DCKBRD_PRO_1_3_0");
     let (mut ws, _) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio_tungstenite::connect_async(url),
@@ -294,10 +325,14 @@ async fn health_page_served() {
     let (addr, _) = spawn_server().await;
     let (status, body) = http(addr, "GET", "/", None);
     assert_eq!(status, 200);
-    assert!(body.contains("Deckboard Server is live"));
+    assert!(body.contains("Pulpit server is live"));
 }
 
-async fn recv_text(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> String {
+async fn recv_text(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> String {
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
         .await
         .expect("ws recv timeout")

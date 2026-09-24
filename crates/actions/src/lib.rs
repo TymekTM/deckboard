@@ -109,6 +109,7 @@ pub enum Effect {
     MouseMove(i32, i32),
     MouseClick(bool), // true = left
     Media(MediaKey),
+    Screenshot(String),
     OpenUrl(String),
     Spawn(String, Vec<String>),
     Sleep(u64),
@@ -128,6 +129,17 @@ pub trait Input {
     fn open_url(&mut self, url: &str) -> Result<()>;
     fn spawn(&mut self, path: &str, args: &[String]) -> Result<()>;
     fn sleep(&mut self, ms: u64) -> Result<()>;
+    /// Paste text through the clipboard (the original `typeString`):
+    /// unicode reaches any focused app and the clipboard comes back.
+    /// Default falls back to plain key synthesis.
+    fn paste_text(&mut self, text: &str) -> Result<()> {
+        self.text(text)
+    }
+    /// Capture the primary screen as PNG into `dir` (empty: the pictures
+    /// folder), the original `screenshot` command.
+    fn screenshot(&mut self, _dir: &str) -> Result<()> {
+        Err(ActionError::Unsupported("screenshot".into()))
+    }
 }
 
 /// Events pushed back to connected clients (board tiles and multiaction
@@ -137,6 +149,9 @@ pub trait EventSink {
     /// Push a custom-value label (e.g. `toggle-microphone` -> "OFF") to
     /// clients as APP_CUSTOM_VALUE. Default no-op: not every action pushes.
     fn app_value(&mut self, _key: &str, _value: &str) {}
+    /// Push a third-party app state (e.g. `speaker-device` -> endpoint id)
+    /// to clients as THIRD_PARTY_APP. Default no-op.
+    fn third_party_value(&mut self, _key: &str, _value: &str) {}
 }
 
 /// No-op sink for tests that don't care about broadcasts.
@@ -178,6 +193,13 @@ pub fn run_command(
     if cmd.mode == "slider" {
         return run_slider_command(input, cmd, 0.0);
     }
+    // Touch-down (`is_tap_start = true`) only drives held `key` buttons;
+    // every other kind fires once on release. The client sends
+    // exec_shortcut on BOTH phases, so without this filter urls would
+    // open twice and multiactions would run twice.
+    if is_tap_start && cmd.kind != "key" {
+        return Ok(());
+    }
     match cmd.kind.as_str() {
         // Clients are remote viewers: the switch goes out through the
         // sink as a change-board event (v2 broadcasts board.open), the
@@ -193,10 +215,13 @@ pub fn run_command(
             }
         },
         "key" => run_key(input, cmd, is_tap_start),
-        k if k.starts_with("spotify") || k.starts_with("slobs") || k.starts_with("obs")
-            || k.starts_with("xsplit") || k.contains("twitch") || k.starts_with("vmod")
-            || k == "speaker-device" || k == "speaker-volume" || k == "play"
-            || k == "screenshot" =>
+        k if k.starts_with("spotify")
+            || k.starts_with("slobs")
+            || k.starts_with("obs")
+            || k.starts_with("xsplit")
+            || k.contains("twitch")
+            || k.starts_with("vmod")
+            || k == "play" =>
         {
             // M0 covers the system-level subset; integrations arrive in M7.
             tracing::warn!(kind = k, "command type not implemented yet");
@@ -206,7 +231,11 @@ pub fn run_command(
         "advance-key" => run_advance_key(input, cmd),
         "type" => {
             let text = cmd.command.as_deref().unwrap_or_default();
-            input.text(text)
+            input.paste_text(text)
+        }
+        "screenshot" => {
+            let dir = cmd.command.as_deref().unwrap_or_default();
+            input.screenshot(dir)
         }
         "mouse-ctrl" => run_mouse(input, cmd),
         "vol" => run_vol(input, cmd),
@@ -229,9 +258,12 @@ pub fn run_command(
 /// Slider value change (`exec_slider {id, value}`), value in 0..1.
 pub fn run_slider_command(_input: &mut dyn Input, cmd: &Command, _value: f64) -> Result<()> {
     match cmd.kind.as_str() {
-        "speaker-volume" | "wheels-volume" | "slider-obs-audio" | "slider-slobs-audio"
-        | "obs-audio-slider" | "slobs-audio-slider" => {
-            tracing::warn!(kind = cmd.kind.as_str(), "slider backends not implemented yet");
+        "wheels-volume" | "slider-obs-audio" | "slider-slobs-audio" | "obs-audio-slider"
+        | "slobs-audio-slider" => {
+            tracing::warn!(
+                kind = cmd.kind.as_str(),
+                "slider backends not implemented yet"
+            );
             Ok(())
         }
         other => {
@@ -274,8 +306,14 @@ fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Comman
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            command: step.get("command").and_then(Value::as_str).map(str::to_string),
-            options: step.get("options").and_then(Value::as_str).map(str::to_string),
+            command: step
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            options: step
+                .get("options")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             mode: "button".to_string(),
         };
         match step_cmd.kind.as_str() {
@@ -312,15 +350,16 @@ fn run_advance_key(input: &mut dyn Input, cmd: &Command) -> Result<()> {
     let steps: Vec<Value> = serde_json::from_str(raw)
         .map_err(|e| ActionError::BadPayload("advance-key".into(), e.to_string()))?;
     for step in steps {
-        let action = step.get("action").and_then(Value::as_str).unwrap_or_default();
-        let value = step
-            .get("value")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let action = step
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let value = step.get("value").cloned().unwrap_or(Value::Null);
         match action {
             "down" | "up" => {
-                let key = parse_key_name(value.as_str().unwrap_or_default())
-                    .ok_or_else(|| ActionError::BadPayload("advance-key".into(), "bad key".into()))?;
+                let key = parse_key_name(value.as_str().unwrap_or_default()).ok_or_else(|| {
+                    ActionError::BadPayload("advance-key".into(), "bad key".into())
+                })?;
                 if action == "down" {
                     input.key_down(&[key])?;
                 } else {
@@ -393,9 +432,7 @@ fn run_open_file(input: &mut dyn Input, cmd: &Command) -> Result<()> {
 
 /// Parse `"CTRL + SHIFT + K"` into modifier+key lists (original hotkey format).
 pub fn parse_hotkey(raw: &str) -> Vec<KeyName> {
-    raw.split('+')
-        .filter_map(parse_key_name)
-        .collect()
+    raw.split('+').filter_map(parse_key_name).collect()
 }
 
 /// Real OS backend.
@@ -490,7 +527,11 @@ impl Input for EnigoInput {
     }
 
     fn mouse_click(&mut self, left: bool) -> Result<()> {
-        let button = if left { enigo::Button::Left } else { enigo::Button::Right };
+        let button = if left {
+            enigo::Button::Left
+        } else {
+            enigo::Button::Right
+        };
         self.enigo
             .button(button, enigo::Direction::Click)
             .map_err(|e| ActionError::Input(e.to_string()))
@@ -508,6 +549,41 @@ impl Input for EnigoInput {
         };
         self.enigo
             .key(k, enigo::Direction::Click)
+            .map_err(|e| ActionError::Input(e.to_string()))
+    }
+
+    /// Clipboard paste: the system-level `type` command must deliver
+    /// unicode (enigo's key synthesis cannot), so mirror the original
+    /// `typeString`: save clipboard, write text, Ctrl+V, restore.
+    #[cfg(windows)]
+    fn paste_text(&mut self, text: &str) -> Result<()> {
+        // Non-text clipboard content (images) cannot be restored by this
+        // text-only path - the original app behaves the same; restore is
+        // text-only and best-effort.
+        let previous = pulpit_os::clipboard::get_text()
+            .ok()
+            .filter(|s| !s.is_empty());
+        pulpit_os::clipboard::set_text(text).map_err(|e| ActionError::Input(e.to_string()))?;
+        let seq_after_set = pulpit_os::clipboard::sequence_number();
+        let pasted = self.key_tap(&[KeyName::Control, KeyName::Char('v')]);
+        if let Some(previous) = previous {
+            // give the focused app a beat to read the paste before the
+            // user's clipboard content comes back
+            self.sleep(80)?;
+            // Restore only if the clipboard still holds OUR paste: when
+            // the user (or any app) copied something meanwhile, that
+            // content wins and must not be clobbered by the restore.
+            if pulpit_os::clipboard::sequence_number() == seq_after_set {
+                let _ = pulpit_os::clipboard::set_text(&previous);
+            }
+        }
+        pasted
+    }
+
+    #[cfg(windows)]
+    fn screenshot(&mut self, dir: &str) -> Result<()> {
+        pulpit_os::capture::screenshot_to_dir(dir)
+            .map(|_| ())
             .map_err(|e| ActionError::Input(e.to_string()))
     }
 
@@ -560,6 +636,14 @@ pub mod test_support {
         }
         fn text(&mut self, text: &str) -> Result<()> {
             self.effects.push(Effect::Text(text.into()));
+            Ok(())
+        }
+        fn paste_text(&mut self, text: &str) -> Result<()> {
+            self.effects.push(Effect::Text(text.into()));
+            Ok(())
+        }
+        fn screenshot(&mut self, dir: &str) -> Result<()> {
+            self.effects.push(Effect::Screenshot(dir.into()));
             Ok(())
         }
         fn mouse_move(&mut self, x: i32, y: i32) -> Result<()> {
@@ -632,17 +716,49 @@ mod tests {
     }
 
     #[test]
+    fn tap_start_only_drives_key_buttons() {
+        // The client sends exec_shortcut on touch-down AND touch-up; only
+        // `key` acts on touch-down (held keys). Everything else must fire
+        // exactly once, on release.
+        let mut input = MockInput::default();
+        let mut sink = MockSink::default();
+        let c = cmd("url", Some("https://example.com"));
+        run_command(&mut input, &mut sink, &c, true).unwrap();
+        assert!(
+            input.effects.is_empty(),
+            "tap-start must not fire non-key commands"
+        );
+        run_command(&mut input, &mut sink, &c, false).unwrap();
+        assert_eq!(
+            input.effects,
+            vec![Effect::OpenUrl("https://example.com".into())]
+        );
+
+        let multi = cmd(
+            "multiaction",
+            Some(r#"[{"type":"board","command":"{\"id\":7}"}]"#),
+        );
+        run_command(&mut input, &mut sink, &multi, true).unwrap();
+        assert!(
+            sink.boards.is_empty(),
+            "tap-start must not run multiactions"
+        );
+    }
+
+    #[test]
     fn multiaction_with_delay_board_and_key() {
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
         let c = cmd(
             "multiaction",
-            Some(r#"[
+            Some(
+                r#"[
                 {"type":"delay","command":"100"},
                 {"type":"board","command":"{\"id\":7}"},
                 {"type":"key","command":"ENTER"},
                 {"type":"url","command":"https://example.com"}
-            ]"#),
+            ]"#,
+            ),
         );
         run_command(&mut input, &mut sink, &c, false).unwrap();
         assert!(input.effects.contains(&Effect::Sleep(100)));
@@ -650,7 +766,9 @@ mod tests {
         assert!(input.effects.contains(&Effect::KeyDown(vec![Return])));
         assert!(input.effects.contains(&Effect::Sleep(150)));
         assert!(input.effects.contains(&Effect::KeyUp(vec![Return])));
-        assert!(input.effects.contains(&Effect::OpenUrl("https://example.com".into())));
+        assert!(input
+            .effects
+            .contains(&Effect::OpenUrl("https://example.com".into())));
         assert_eq!(sink.boards, vec![7]);
     }
 
@@ -702,7 +820,13 @@ mod tests {
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
         run_command(&mut input, &mut sink, &cmd("type", Some("hello")), false).unwrap();
-        run_command(&mut input, &mut sink, &cmd("url", Some("https://x.co")), false).unwrap();
+        run_command(
+            &mut input,
+            &mut sink,
+            &cmd("url", Some("https://x.co")),
+            false,
+        )
+        .unwrap();
         assert_eq!(input.effects[0], Effect::Text("hello".into()));
         assert_eq!(input.effects[1], Effect::OpenUrl("https://x.co".into()));
     }
@@ -713,7 +837,9 @@ mod tests {
         let mut sink = MockSink::default();
         let c = cmd(
             "advance-key",
-            Some(r#"[{"action":"down","value":"SHIFT"},{"action":"delay","value":50},{"action":"up","value":"SHIFT"},{"action":"type","value":"hi"}]"#),
+            Some(
+                r#"[{"action":"down","value":"SHIFT"},{"action":"delay","value":50},{"action":"up","value":"SHIFT"},{"action":"type","value":"hi"}]"#,
+            ),
         );
         run_command(&mut input, &mut sink, &c, false).unwrap();
         assert_eq!(
@@ -748,7 +874,19 @@ mod tests {
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
         run_command(&mut input, &mut sink, &cmd("obs-scene", Some("Cam")), false).unwrap();
-        run_command(&mut input, &mut sink, &cmd("speaker-volume", Some("")), false).unwrap();
-        run_command(&mut input, &mut sink, &cmd("spotify-playback", Some("play")), false).unwrap();
+        run_command(
+            &mut input,
+            &mut sink,
+            &cmd("speaker-volume", Some("")),
+            false,
+        )
+        .unwrap();
+        run_command(
+            &mut input,
+            &mut sink,
+            &cmd("spotify-playback", Some("play")),
+            false,
+        )
+        .unwrap();
     }
 }

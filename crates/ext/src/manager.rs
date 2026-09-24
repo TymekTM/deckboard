@@ -1,4 +1,4 @@
-//! Extension manager: scans `~/deckboard/extensions`, loads every package
+//! Extension manager: scans `~/pulpitApp/extensions`, loads every package
 //! into its own JS runtime, dispatches `execute` calls and drives timers.
 //!
 //! Boa's interpreter is not `Send` (it uses `Rc` internally), so each
@@ -26,6 +26,11 @@ use tracing::warn;
 
 use crate::host::{ExtRuntime, HostError, HostEvent};
 use thiserror::Error;
+
+/// One probe answer: metadata plus the channel to a spawned runtime, or the
+/// load error. A `type` alias keeps the plan enum below readable.
+type ProbeResponseRx =
+    mpsc::Receiver<Result<(ProbeMeta, Option<mpsc::Sender<ExtRequest>>), HostError>>;
 
 #[derive(Debug, Clone)]
 pub enum ExtEvent {
@@ -71,6 +76,23 @@ pub struct ExtInputInfo {
     pub font_icon: Option<String>,
     pub mode: Option<String>,
     pub command: Option<String>,
+    /// Human action label from the extension declaration.
+    pub label: Option<String>,
+    /// Per-action parameter fields declared by the extension (`inputs`).
+    pub fields: Vec<ExtFieldInfo>,
+}
+
+/// One parameter field of an extension action: how the editor (and the
+/// original renderer) builds the button dialog for that action.
+#[derive(Debug, Clone)]
+pub struct ExtFieldInfo {
+    /// INPUT_METHOD string, e.g. "input:text" / "input:select".
+    pub kind: String,
+    pub label: String,
+    /// JSON key of the value inside the button's command object.
+    pub key: String,
+    /// Choices for `input:select` fields.
+    pub items: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for ExtEntry {
@@ -98,8 +120,7 @@ pub enum ManagerError {
 }
 
 /// What the metadata cache stores per package (see `load` docs).
-#[derive(Serialize, Deserialize)]
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct CachedMeta {
     package: String,
     signature: u64,
@@ -134,14 +155,18 @@ impl ExtManager {
         skip: &[String],
     ) -> (Arc<ExtManager>, tokio_mpsc::UnboundedReceiver<ExtEvent>) {
         let (events_tx, events_rx) = tokio_mpsc::unbounded_channel();
-        let mut entries = Vec::new();
+        let entries: Vec<ExtEntry> = Vec::new();
         let mut all_inputs = Vec::new();
         let mut cache = MetadataCache::load();
 
         let Some(list) = std::fs::read_dir(dir).ok() else {
             tracing::info!(dir = %dir.display(), "no extensions directory");
             return (
-                Arc::new(ExtManager { entries, inputs: all_inputs, events_tx }),
+                Arc::new(ExtManager {
+                    entries,
+                    inputs: all_inputs,
+                    events_tx,
+                }),
                 events_rx,
             );
         };
@@ -163,6 +188,33 @@ impl ExtManager {
             .collect();
         packages.sort();
 
+        // One JS probe per cold package runs on its own thread, all in
+        // parallel; a single wedged extension must not stall the fleet.
+        // The deadline bounds the whole wait, matching the original app's
+        // tolerance for slow extensions without hanging startup forever.
+        const LOAD_DEADLINE: Duration = Duration::from_secs(30);
+        let deadline = Instant::now() + LOAD_DEADLINE;
+
+        enum Plan {
+            /// Cache hit, no timers: metadata only, runtime spawns lazily.
+            Lazy { meta: ProbeMeta },
+            /// Cache hit with timers: runtime spawned during planning.
+            Resident {
+                meta: ProbeMeta,
+                dispatch: Option<mpsc::Sender<ExtRequest>>,
+            },
+            Failed {
+                meta: Option<ProbeMeta>,
+                error: String,
+            },
+            /// Cold cache: probe thread still running.
+            Pending {
+                rx: ProbeResponseRx,
+                signature: Option<u64>,
+            },
+        }
+
+        let mut plans: Vec<(String, PathBuf, Plan)> = Vec::new();
         for (package, path) in packages {
             if skip.iter().any(|s| s == &package) {
                 tracing::info!(package = %package, "extension replaced by native implementation - JS not loaded");
@@ -175,7 +227,7 @@ impl ExtManager {
 
             let signature = source_signature(&path);
             let cached = signature.and_then(|sig| cache.valid(&package, sig));
-            let (meta, dispatch) = if let Some(cached) = cached {
+            let plan = if let Some(cached) = cached {
                 let meta = ProbeMeta {
                     name: cached.name,
                     actions: cached.actions,
@@ -183,51 +235,114 @@ impl ExtManager {
                     has_timers: cached.has_timers,
                 };
                 if meta.has_timers {
-                    // metadata known; still need the live runtime
+                    // metadata known; still need the live runtime (thread
+                    // spawn, no JS on this thread)
                     tracing::info!(package = %package, "timer extension from metadata cache - loading runtime");
                     match spawn_runtime(&path, &package, &configs, &events_tx) {
-                        Ok(dispatch) => (meta, Some(dispatch)),
+                        Ok(dispatch) => Plan::Resident {
+                            meta,
+                            dispatch: Some(dispatch),
+                        },
                         Err(e) => {
                             warn!(package = %package, error = %e, "extension failed to load - disabled");
-                            entries.push(ExtEntry {
-                                name: meta.name.clone(),
-                                package,
-                                actions: meta.actions,
-                                residence: std::sync::Mutex::new(Residence::Failed(e.to_string())),
-                            });
-                            continue;
+                            Plan::Failed {
+                                meta: Some(meta),
+                                error: e.to_string(),
+                            }
                         }
                     }
                 } else {
                     tracing::info!(package = %package, "extension metadata cached - JS not loaded until first execute");
-                    (meta, None)
+                    Plan::Lazy { meta }
                 }
             } else {
-                // first run for this source version: one JS load to learn
-                // what the package is and whether it needs to stay resident
-                match load_extension(&path, &package, &configs, &events_tx) {
-                    Ok((meta, dispatch)) => {
-                        if let Some(sig) = signature {
-                            cache.store(CachedMeta {
-                                package: package.clone(),
-                                signature: sig,
-                                name: meta.name.clone(),
-                                actions: meta.actions.clone(),
-                                inputs: meta.inputs.clone(),
-                                has_timers: meta.has_timers,
-                            });
+                // first run for this source version: one JS load (on its
+                // own thread) to learn what the package is
+                let (res_tx, res_rx) = mpsc::channel();
+                let spawned = std::thread::Builder::new()
+                    .name(format!("ext-probe-{package}"))
+                    .stack_size(64 * 1024 * 1024)
+                    .spawn({
+                        let path = path.clone();
+                        let package = package.clone();
+                        let events_tx = events_tx.clone();
+                        move || {
+                            let _ =
+                                res_tx.send(load_extension(&path, &package, &configs, &events_tx));
                         }
-                        (meta, dispatch)
-                    }
-                    Err(e) => {
-                        warn!(package = %package, error = %e, "extension failed to load - disabled");
-                        entries.push(ExtEntry {
-                            name: package.clone(),
-                            package,
-                            actions: Vec::new(),
-                            residence: std::sync::Mutex::new(Residence::Failed(e.to_string())),
-                        });
-                        continue;
+                    });
+                match spawned {
+                    Ok(_) => Plan::Pending {
+                        rx: res_rx,
+                        signature,
+                    },
+                    Err(e) => Plan::Failed {
+                        meta: None,
+                        error: format!("probe thread spawn: {e}"),
+                    },
+                }
+            };
+            plans.push((package, path, plan));
+        }
+
+        let mut entries: Vec<ExtEntry> = Vec::new();
+        for (package, path, plan) in plans {
+            let (meta, dispatch) = match plan {
+                Plan::Lazy { meta } => (meta, None),
+                Plan::Resident { meta, dispatch } => (meta, dispatch),
+                Plan::Failed { meta, error } => {
+                    entries.push(ExtEntry {
+                        name: meta
+                            .as_ref()
+                            .map(|m| m.name.clone())
+                            .unwrap_or_else(|| package.clone()),
+                        package,
+                        actions: meta.map(|m| m.actions).unwrap_or_default(),
+                        residence: std::sync::Mutex::new(Residence::Failed(error)),
+                    });
+                    continue;
+                }
+                Plan::Pending { rx, signature } => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let result = match rx.recv_timeout(remaining) {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(package = %package, "load timed out after 30s - disabled");
+                            entries.push(ExtEntry {
+                                name: package.clone(),
+                                package,
+                                actions: Vec::new(),
+                                residence: std::sync::Mutex::new(Residence::Failed(
+                                    "load timed out after 30s".into(),
+                                )),
+                            });
+                            continue;
+                        }
+                    };
+                    match result {
+                        Ok((meta, dispatch)) => {
+                            if let Some(sig) = signature {
+                                cache.store(CachedMeta {
+                                    package: package.clone(),
+                                    signature: sig,
+                                    name: meta.name.clone(),
+                                    actions: meta.actions.clone(),
+                                    inputs: meta.inputs.clone(),
+                                    has_timers: meta.has_timers,
+                                });
+                            }
+                            (meta, dispatch)
+                        }
+                        Err(e) => {
+                            warn!(package = %package, error = %e, "extension failed to load - disabled");
+                            entries.push(ExtEntry {
+                                name: package.clone(),
+                                package,
+                                actions: Vec::new(),
+                                residence: std::sync::Mutex::new(Residence::Failed(e.to_string())),
+                            });
+                            continue;
+                        }
                     }
                 }
             };
@@ -245,6 +360,10 @@ impl ExtManager {
                 }
                 None => {
                     tracing::info!(package = %package, name = %meta.name, actions = ?meta.actions, "extension lazy (runtime loads on first execute)");
+                    let configs = settings
+                        .get(&package)
+                        .cloned()
+                        .unwrap_or_else(|| Value::Object(Default::default()));
                     entries.push(ExtEntry {
                         package,
                         name: meta.name,
@@ -256,7 +375,14 @@ impl ExtManager {
         }
 
         cache.flush();
-        (Arc::new(ExtManager { entries, inputs: all_inputs, events_tx }), events_rx)
+        (
+            Arc::new(ExtManager {
+                entries,
+                inputs: all_inputs,
+                events_tx,
+            }),
+            events_rx,
+        )
     }
 
     /// Runtime threads are spawned at load time and self-manage their
@@ -266,24 +392,24 @@ impl ExtManager {
     fn forward(tx: &tokio_mpsc::UnboundedSender<ExtEvent>, ev: HostEvent) {
         match ev {
             HostEvent::SetValue(v) => {
-                tracing::debug!(target: "deckboard_ext", value = %v, "setValue event forwarded");
+                tracing::debug!(target: "pulpit_ext", value = %v, "setValue event forwarded");
                 let _ = tx.send(ExtEvent::SetValue(v));
             }
-            HostEvent::Log(level, msg) => {
-                match level.as_str() {
-                    "warn" => warn!(target: "deckboard_ext", "{msg}"),
-                    "error" => tracing::error!(target: "deckboard_ext", "{msg}"),
-                    "debug" => tracing::debug!(target: "deckboard_ext", "{msg}"),
-                    _ => tracing::info!(target: "deckboard_ext", "{msg}"),
-                }
-            }
+            HostEvent::Log(level, msg) => match level.as_str() {
+                "warn" => warn!(target: "pulpit_ext", "{msg}"),
+                "error" => tracing::error!(target: "pulpit_ext", "{msg}"),
+                "debug" => tracing::debug!(target: "pulpit_ext", "{msg}"),
+                _ => tracing::info!(target: "pulpit_ext", "{msg}"),
+            },
             HostEvent::IntervalStart(..) | HostEvent::IntervalClear(_) => {}
         }
     }
 
     /// Does any extension handle this action type?
     pub fn has_action(&self, action: &str) -> bool {
-        self.entries.iter().any(|e| e.actions.iter().any(|a| a == action))
+        self.entries
+            .iter()
+            .any(|e| e.actions.iter().any(|a| a == action))
     }
 
     /// Execute an action on whichever extension declared it. Blocks until
@@ -291,8 +417,9 @@ impl ExtManager {
     /// extensions pay a one-time runtime spawn here.
     pub fn execute(&self, action: &str, command: Option<&str>) -> Result<(), ManagerError> {
         let args: Value = match command {
-            Some(c) if !c.trim().is_empty() => serde_json::from_str(c)
-                .unwrap_or_else(|_| Value::String(c.to_string())),
+            Some(c) if !c.trim().is_empty() => {
+                serde_json::from_str(c).unwrap_or_else(|_| Value::String(c.to_string()))
+            }
             _ => Value::Null,
         };
         for entry in &self.entries {
@@ -373,13 +500,54 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
     raw.iter()
         .filter_map(|i| {
             let value = i.get("value").and_then(Value::as_str)?.to_string();
+            // field declarations come as "inputs" (pulpit-extension-kit)
+            // or "input" (older pulpit-kit) - accept both spellings
+            let fields = i
+                .get("inputs")
+                .or_else(|| i.get("input"))
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|f| {
+                            let kind = f.get("type").and_then(Value::as_str)?.to_string();
+                            let label = f.get("label").and_then(Value::as_str)?.to_string();
+                            let key = f.get("ref").and_then(Value::as_str)?.to_string();
+                            let items = f
+                                .get("items")
+                                .and_then(Value::as_array)
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .filter_map(|it| {
+                                            let v = it.get("value").and_then(Value::as_str)?;
+                                            let l = it.get("label").and_then(Value::as_str)?;
+                                            Some((v.to_string(), l.to_string()))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            Some(ExtFieldInfo {
+                                kind,
+                                label,
+                                key,
+                                items,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(ExtInputInfo {
                 value,
                 icon: i.get("icon").and_then(Value::as_str).map(str::to_string),
                 color: i.get("color").and_then(Value::as_str).map(str::to_string),
-                font_icon: i.get("fontIcon").and_then(Value::as_str).map(str::to_string),
+                font_icon: i
+                    .get("fontIcon")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 mode: i.get("mode").and_then(Value::as_str).map(str::to_string),
                 command: i.get("command").and_then(Value::as_str).map(str::to_string),
+                label: i.get("label").and_then(Value::as_str).map(str::to_string),
+                fields,
             })
         })
         .collect()
@@ -425,7 +593,16 @@ fn load_extension(
                 if has_timers {
                     let (req_tx, req_rx) = mpsc::channel();
                     if res_tx.send(Ok((meta, Some(req_tx.clone())))).is_ok() {
-                        runtime_loop(rt, req_rx, events_tx);
+                        runtime_loop(
+                            ExtSlot {
+                                root,
+                                package,
+                                configs,
+                                live: Some(rt),
+                            },
+                            req_rx,
+                            events_tx,
+                        );
                     }
                 } else {
                     let _ = res_tx.send(Ok((meta, None)));
@@ -468,7 +645,16 @@ fn spawn_runtime(
         .spawn(move || match ExtRuntime::load(&root, &package, &configs) {
             Ok(rt) => {
                 if res_tx.send(Ok(())).is_ok() {
-                    runtime_loop(rt, req_rx, events_tx);
+                    runtime_loop(
+                        ExtSlot {
+                            root,
+                            package,
+                            configs,
+                            live: Some(rt),
+                        },
+                        req_rx,
+                        events_tx,
+                    );
                 }
             }
             Err(e) => {
@@ -483,27 +669,70 @@ fn spawn_runtime(
     Ok(req_tx)
 }
 
+/// Interpreter slot owned by an extension thread: the runtime is held only
+/// while timers need it; stateless extensions get one per action.
+struct ExtSlot {
+    root: std::path::PathBuf,
+    package: String,
+    configs: Value,
+    live: Option<ExtRuntime>,
+}
+
+/// Execute an action on the slot's interpreter, (re)creating it on demand.
+/// The interpreter is released right after the run unless the action
+/// registered timers, so resident cost between actions is zero. Re-running
+/// the entry module is safe because extensions keep their own state on
+/// disk (see the module docs).
+fn run_action(
+    slot: &mut ExtSlot,
+    action: &str,
+    args: &Value,
+) -> Result<Vec<crate::host::HostEvent>, crate::host::HostError> {
+    if slot.live.is_none() {
+        tracing::info!(package = %slot.package, action, "extension runtime loaded on demand");
+        slot.live = Some(ExtRuntime::load(&slot.root, &slot.package, &slot.configs)?);
+    }
+    let rt = slot.live.as_mut().expect("runtime loaded above");
+    let events = rt.execute(action, args)?;
+    if !rt.has_timers() {
+        slot.live = None;
+    }
+    Ok(events)
+}
+
 fn runtime_loop(
-    mut rt: ExtRuntime,
+    mut slot: ExtSlot,
     req_rx: mpsc::Receiver<ExtRequest>,
     events_tx: tokio_mpsc::UnboundedSender<ExtEvent>,
 ) {
-    let mut next_tick = Instant::now();
     loop {
-        let now = Instant::now();
-        if next_tick <= now {
+        // Timers only run while a live interpreter is held; without one
+        // the thread blocks on recv() with no wakeups at all.
+        let wait = if let Some(rt) = slot.live.as_mut() {
             for ev in rt.tick_due() {
                 ExtManager::forward(&events_tx, ev);
             }
-            next_tick = now + rt
-                .tick_granularity()
-                .clamp(Duration::from_millis(50), Duration::from_secs(1));
-        }
-        match req_rx.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
-            Ok(ExtRequest::Execute { action, args, reply }) => {
+            rt.tick_granularity()
+                .clamp(Duration::from_millis(50), Duration::from_secs(1))
+        } else {
+            Duration::ZERO
+        };
+        let request = if wait.is_zero() {
+            req_rx
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+        } else {
+            req_rx.recv_timeout(wait)
+        };
+        match request {
+            Ok(ExtRequest::Execute {
+                action,
+                args,
+                reply,
+            }) => {
                 // execute() drains setValue/interval events itself; the
                 // manager forwards whatever the reply carries
-                let _ = reply.send(rt.execute(&action, &args));
+                let _ = reply.send(run_action(&mut slot, &action, &args));
             }
             Ok(ExtRequest::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -540,14 +769,18 @@ struct MetadataCache {
 
 impl MetadataCache {
     fn load() -> Self {
-        let path = dirs::cache_dir().map(|d| d.join("deckboard-server").join("extmeta.json"));
+        let path = dirs::cache_dir().map(|d| d.join("pulpit-server").join("extmeta.json"));
         let entries = path
             .as_deref()
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|bytes| serde_json::from_slice::<Vec<CachedMeta>>(&bytes).ok())
             .map(|list| list.into_iter().map(|m| (m.package.clone(), m)).collect())
             .unwrap_or_default();
-        MetadataCache { path, entries, dirty: false }
+        MetadataCache {
+            path,
+            entries,
+            dirty: false,
+        }
     }
 
     fn valid(&self, package: &str, signature: u64) -> Option<CachedMeta> {

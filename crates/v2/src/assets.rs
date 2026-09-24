@@ -1,5 +1,5 @@
 //! Content-addressed asset store (docs/protocol-v2.md §7):
-//! `~/deckboard/assets/<sha256-hex>.<ext>`. Imports are idempotent by
+//! `~/pulpitApp/assets/<sha256-hex>.<ext>`. Imports are idempotent by
 //! hash; legacy DB data URLs convert into the same store when boards are
 //! built. Served from `GET /assets/<hash>?token=...` with immutable cache
 //! headers.
@@ -23,12 +23,16 @@ impl AssetStore {
         let mut exts = HashMap::new();
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if let Some((hash, ext)) = split_stem(entry.file_name().to_string_lossy().as_ref()) {
+                if let Some((hash, ext)) = split_stem(entry.file_name().to_string_lossy().as_ref())
+                {
                     exts.insert(hash.to_string(), ext.to_string());
                 }
             }
         }
-        Ok(AssetStore { dir, exts: Mutex::new(exts) })
+        Ok(AssetStore {
+            dir,
+            exts: Mutex::new(exts),
+        })
     }
 
     /// Stores bytes under their sha-256 and returns the hex hash. Existing
@@ -54,12 +58,19 @@ impl AssetStore {
         let (head, payload) = rest.split_once(',')?;
         let mime = head.strip_suffix(";base64")?;
         let ext = mime_to_ext(mime)?;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(payload).ok()?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .ok()?;
         self.import_bytes(&bytes, ext).ok()
     }
 
     pub fn get(&self, hash: &str) -> Option<Vec<u8>> {
-        let ext = self.exts.lock().expect("asset store poisoned").get(hash).cloned()?;
+        let ext = self
+            .exts
+            .lock()
+            .expect("asset store poisoned")
+            .get(hash)
+            .cloned()?;
         std::fs::read(self.dir.join(format!("{hash}.{ext}"))).ok()
     }
 
@@ -85,10 +96,16 @@ fn split_stem(file_name: &str) -> Option<(&str, &str)> {
 }
 
 fn normalize_ext(ext: &str) -> String {
-    let cleaned: String = ext.to_ascii_lowercase().chars()
+    let cleaned: String = ext
+        .to_ascii_lowercase()
+        .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect();
-    if cleaned.is_empty() { "bin".to_string() } else { cleaned }
+    if cleaned.is_empty() {
+        "bin".to_string()
+    } else {
+        cleaned
+    }
 }
 
 fn mime_to_ext(mime: &str) -> Option<&'static str> {
@@ -142,12 +159,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = AssetStore::open(dir.path().to_path_buf()).unwrap();
         // 1x1 PNG from the base64 of "png-bytes"
-        let url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(b"png-bytes"));
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(b"png-bytes")
+        );
         let hash = store.import_data_url(&url).unwrap();
         assert_eq!(store.get(&hash).unwrap(), b"png-bytes");
         assert_eq!(store.content_type(&hash), Some("image/png"));
         // jpeg alias maps to jpg, same bytes same hash
-        let url2 = format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(b"png-bytes"));
+        let url2 = format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(b"png-bytes")
+        );
         assert_eq!(store.import_data_url(&url2).unwrap(), hash);
         assert!(store.import_data_url("data:image/png,notbase64").is_none());
         assert!(store.import_data_url("https://x/y.png").is_none());
