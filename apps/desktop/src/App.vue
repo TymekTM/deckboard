@@ -82,6 +82,12 @@ function applyStatusUpdate(payload) {
   }
 }
 
+// Pushed payloads are a few KB at most, so a stringify compare is the
+// simplest way to keep object identity stable for unchanged values.
+function jsonEqual(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 function mergeCustomValues(data) {
   for (const [key, value] of Object.entries(data)) {
     if (typeof value !== "object" || value === null) {
@@ -90,18 +96,37 @@ function mergeCustomValues(data) {
       // graph-style payload: keep the last 10 readings for the sparkline
       // and pass the rest through (title, suffix, per-provider rows)
       const prev = customValues[key];
-      const values = [...(prev?.values ?? []), value.value].slice(-10);
-      customValues[key] = { ...value, values };
+      if (
+        prev &&
+        Array.isArray(prev.values) &&
+        jsonEqual({ ...value, values: [] }, { ...prev, values: [] })
+      ) {
+        // same reading and meta: append the sample in place so the entry
+        // keeps its identity and only its readers re-render
+        prev.values.push(value.value);
+        if (prev.values.length > 10) prev.values.shift();
+      } else {
+        const values = [...(prev?.values ?? []), value.value].slice(-10);
+        customValues[key] = { ...value, values };
+      }
     } else {
       // status displays replace their whole snapshot; sample history
       // makes no sense for a live row list
-      customValues[key] = value;
+      if (!jsonEqual(value, customValues[key])) customValues[key] = value;
     }
   }
 }
 
 function mergeAppState(name, data) {
-  appStates[name] = { ...(appStates[name] || {}), ...data };
+  const prev = appStates[name];
+  const next = { ...(prev || {}) };
+  let changed = false;
+  for (const [k, v] of Object.entries(data)) {
+    if (prev && jsonEqual(prev[k], v)) continue;
+    next[k] = v;
+    changed = true;
+  }
+  if (changed) appStates[name] = next;
 }
 
 // type -> {icon, color, mode, dual} fallbacks: static catalog + extensions
