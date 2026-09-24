@@ -314,6 +314,23 @@ async fn main() -> anyhow::Result<()> {
         v2.config.ping_interval,
     ));
 
+    // Extension timers stretch to IDLE_TICK_FLOOR while no client is
+    // watching (see ExtManager::set_activity); keep the count current.
+    {
+        let ext = ext_manager.clone();
+        let hub = state.hub.clone();
+        let v2_hub = v2.hub.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let clients = hub.len().await + v2_hub.count();
+                ext.set_activity(clients);
+            }
+        });
+    }
+
     // ConnectInfo is needed by the loopback guard on POST /v2/pair.
     let app = deckboard_legacy::router(state).merge(deckboard_v2::router(v2));
     axum::serve(

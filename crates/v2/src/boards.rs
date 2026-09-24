@@ -21,15 +21,21 @@ pub fn build_boards(
     assets: &AssetStore,
     engine: &StateEngine,
 ) -> Vec<Board> {
+    // one grouped read for every board's shortcuts (was: one SELECT per
+    // board on each rebuild)
+    let buttons = backend.all_buttons_by_board();
     backend
         .get_boards()
         .iter()
         .map(|board| {
-            let tiles = backend
-                .get_buttons_by_board(board.id)
-                .iter()
-                .map(|row| build_tile(row, assets, engine))
-                .collect();
+            let tiles = buttons
+                .get(&board.id)
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| build_tile(row, assets, engine))
+                        .collect()
+                })
+                .unwrap_or_default();
             Board {
                 id: board.id,
                 name: board.name.clone(),

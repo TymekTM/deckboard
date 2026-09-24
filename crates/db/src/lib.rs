@@ -188,6 +188,28 @@ impl Db {
         Ok(rows)
     }
 
+    /// Every shortcut grouped by board id in one query. Whole-board reads
+    /// (`list_boards`, the v2 boards build) would otherwise issue one
+    /// SELECT per board; global rowid order preserves each board's
+    /// per-board `ORDER BY rowid` order.
+    pub fn get_buttons_grouped(&self) -> Result<std::collections::HashMap<i64, Vec<ButtonRow>>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, board_id, type, command, title, title_position, title_color, \
+             title_box_color, color, icon_color, icon_color2, border_color, shape, icon, \
+             img, img2, icon2, color2, shape2, border_color2, title_position2, \
+             title_box_color2, title_color2, position, position2, mode, x, y, w, h, options \
+             FROM Shortcuts ORDER BY rowid",
+        )?;
+        let mut grouped: std::collections::HashMap<i64, Vec<ButtonRow>> =
+            std::collections::HashMap::new();
+        let rows = stmt.query_map([], map_button_row)?;
+        for row in rows {
+            let button = row?;
+            grouped.entry(button.board_id).or_default().push(button);
+        }
+        Ok(grouped)
+    }
+
     pub fn get_button(&self, id: i64) -> Result<Option<ButtonRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, board_id, type, command, title, title_position, title_color, \
@@ -831,6 +853,37 @@ mod tests {
         db.clear_board(board_a).unwrap();
         assert!(db.get_buttons_by_board(board_a).unwrap().is_empty());
         assert_eq!(db.get_buttons_by_board(board_b).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn grouped_buttons_match_per_board_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+        let board_a = db.insert_board("A", "#2c3e50", 4, 3).unwrap();
+        let board_b = db.insert_board("B", "#2c3e50", 4, 3).unwrap();
+        for (board, x) in [(board_a, 0), (board_a, 1), (board_b, 0)] {
+            db.insert_button(&sample_button(board, x, 0)).unwrap();
+        }
+
+        let grouped = db.get_buttons_grouped().unwrap();
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[&board_a].len(), 2);
+        assert_eq!(grouped[&board_b].len(), 1);
+        // ids and order must match the per-board query exactly
+        for board in [board_a, board_b] {
+            let per_board: Vec<_> = db
+                .get_buttons_by_board(board)
+                .unwrap()
+                .into_iter()
+                .map(|b| b.id)
+                .collect();
+            let grouped_ids: Vec<_> = grouped[&board].iter().map(|b| b.id).collect();
+            assert_eq!(per_board, grouped_ids);
+        }
+        // a board without shortcuts has no entry at all
+        db.delete_button(grouped[&board_a][0].id).unwrap();
+        db.delete_button(grouped[&board_a][1].id).unwrap();
+        assert!(!db.get_buttons_grouped().unwrap().contains_key(&board_a));
     }
 
     #[test]

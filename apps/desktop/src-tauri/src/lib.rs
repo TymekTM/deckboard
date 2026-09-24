@@ -61,6 +61,7 @@ pub fn run() {
     if let Some(home) = dirs::home_dir() {
         let log_dir = home.join("deckboard/logs");
         let _ = std::fs::create_dir_all(&log_dir);
+        prune_old_logs(&log_dir, "deckboard-desktop.log", 14);
         let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
             log_dir,
             "deckboard-desktop.log",
@@ -96,10 +97,7 @@ pub fn run() {
         // Must be the first plugin: a second launch would fight this instance
         // for port 8500 and the SQLite file, so it only surfaces the window.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
@@ -113,6 +111,10 @@ pub fn run() {
             // stays in charge of the real exit.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                HIDDEN_SINCE.store(
+                    deckboard_v2::unix_millis(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 let _ = window.hide();
             }
         })
@@ -122,6 +124,7 @@ pub fn run() {
 
             build_tray(app.handle())?;
             create_main_window(app.handle())?;
+            spawn_webview_teardown(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -151,6 +154,35 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Delete rotated log files older than `keep_days` (by modification
+/// time). Daily rotation with no cap grows forever; the app is a 24/7
+/// tray resident, so this runs once per launch. Best-effort: a failed
+/// delete only skips the file.
+fn prune_old_logs(log_dir: &std::path::Path, prefix: &str, keep_days: u64) {
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(keep_days * 86_400));
+    let Some(cutoff) = cutoff else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(prefix) || name == prefix {
+            continue; // only rotated files (prefix.<date>), not today's
+        }
+        let ok = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|modified| modified < cutoff)
+            .unwrap_or(false);
+        if ok {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                tracing::debug!(file = %name, error = %e, "could not prune old log");
+            }
+        }
+    }
 }
 
 /// Register one button-style source (extension input, Voicemeeter or
@@ -292,6 +324,25 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             v2.hub.clone(),
             v2.config.patch_interval,
         ));
+    }
+    // Extension timers stretch to IDLE_TICK_FLOOR while no client is
+    // watching (see ExtManager::set_activity); keep the count current.
+    {
+        let ext = ext_manager.clone();
+        let hub = hub.clone();
+        let v2_hub = v2.as_ref().map(|v2| v2.hub.clone());
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let mut clients = hub.len().await;
+                if let Some(v2_hub) = &v2_hub {
+                    clients += v2_hub.count();
+                }
+                ext.set_activity(clients);
+            }
+        });
     }
     // Extension pushes feed both protocols: the legacy app_status_update
     // broadcast (stock client) and one v2 channel per data key.
@@ -537,6 +588,76 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
 
 // ---- tray + hotkey ---------------------------------------------------------
 
+/// Unix millis of the moment the main window was hidden; 0 means visible
+/// or not created. The teardown sweep below reads it.
+static HIDDEN_SINCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long the window may stay tray-hidden before its WebView is torn
+/// down. The WebView2 process tree costs ~60-150 MB resident around the
+/// clock; the embedded server, tray and tablets are unaffected. Showing
+/// the window again rebuilds the UI from scratch (the Vue app refetches
+/// everything on mount).
+const WEBVIEW_TEARDOWN_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Sweep: destroy the WebView once the window has been hidden longer
+/// than `WEBVIEW_TEARDOWN_AFTER`. Runs on the 30 s loop; the window is
+/// recreated by whatever shows it next (tray, second launch).
+fn spawn_webview_teardown(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let hidden_at = HIDDEN_SINCE.load(std::sync::atomic::Ordering::Relaxed);
+            if hidden_at == 0 {
+                continue;
+            }
+            let hidden_for = deckboard_v2::unix_millis().saturating_sub(hidden_at);
+            if hidden_for < WEBVIEW_TEARDOWN_AFTER.as_millis() as u64 {
+                continue;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                match window.is_visible() {
+                    Ok(false) => {
+                        tracing::info!(
+                            hidden_for_secs = hidden_for / 1000,
+                            "window hidden too long - tearing the WebView down"
+                        );
+                        HIDDEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
+                        let _ = window.destroy();
+                    }
+                    Ok(true) => {
+                        // raced a manual show; the flag is stale
+                        HIDDEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(_) => {}
+                }
+            } else {
+                HIDDEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+/// Show (or rebuild) the main window and clear the hidden flag.
+fn show_main_window(app: &AppHandle) {
+    HIDDEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
+    match app.get_webview_window("main") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        // torn down by the idle sweep: rebuild; the fresh Vue app
+        // refetches boards, settings and live state on mount
+        None => {
+            tracing::info!("rebuilding the main window WebView");
+            if let Err(e) = create_main_window(app) {
+                tracing::error!("could not rebuild the main window: {e}");
+            }
+        }
+    }
+}
+
 /// The main window is built here instead of `tauri.conf.json` because the
 /// WebView2 argument list is only reachable through the builder API, and a
 /// custom list replaces the default one - so the stock feature disables are
@@ -612,11 +733,16 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
+            HIDDEN_SINCE.store(
+                deckboard_v2::unix_millis(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let _ = window.hide();
         } else {
-            let _ = window.show();
-            let _ = window.set_focus();
+            show_main_window(app);
         }
+    } else {
+        show_main_window(app);
     }
 }
 
@@ -900,12 +1026,15 @@ fn pairing_shape(ip: &str, port: u16, code: &str) -> String {
 async fn list_boards(state: State<'_, DesktopState>) -> Result<Vec<BoardWithButtons>, String> {
     let backend = state.backend()?;
     tauri::async_runtime::spawn_blocking(move || {
-        let boards = backend.get_boards();
-        Ok(boards
+        // one grouped query for every board's shortcuts (was: one SELECT
+        // per board); boards with no shortcuts get an empty vec
+        let buttons = backend.all_buttons_by_board();
+        Ok(backend
+            .get_boards()
             .into_iter()
-            .map(|board| {
-                let buttons = backend.get_buttons_by_board(board.id);
-                BoardWithButtons { board, buttons }
+            .map(|board| BoardWithButtons {
+                buttons: buttons.get(&board.id).cloned().unwrap_or_default(),
+                board,
             })
             .collect())
     })

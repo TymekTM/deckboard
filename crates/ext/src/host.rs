@@ -466,7 +466,10 @@ fn do_http(
     method: &str,
     body: Option<String>,
 ) -> std::result::Result<(u16, String), String> {
-    let agent = ureq::Agent::new_with_defaults();
+    // one pooled agent for every extension HTTP call; a fresh agent per
+    // call would pay TLS handshake + connection setup each time
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    let agent = AGENT.get_or_init(ureq::Agent::new_with_defaults);
     let method = method.to_uppercase();
     let result = match (method.as_str(), body) {
         ("POST", Some(b)) => agent

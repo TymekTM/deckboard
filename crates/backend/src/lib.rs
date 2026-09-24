@@ -33,6 +33,9 @@ pub struct SqlBackend {
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
     speaker: Mutex<Option<Box<dyn deckboard_os::Speaker>>>,
+    /// Pooled HTTP client for fire-and-forget tiles; shared so repeat
+    /// calls reuse connections instead of paying TLS setup per press.
+    http_agent: ureq::Agent,
 }
 
 impl SqlBackend {
@@ -45,6 +48,10 @@ impl SqlBackend {
             discord: Mutex::new(None),
             discord_settings_path: None,
             speaker: Mutex::new(None),
+            http_agent: ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(10)))
+                .build()
+                .new_agent(),
         }
     }
 
@@ -251,6 +258,16 @@ impl Backend for SqlBackend {
         }
     }
 
+    fn all_buttons_by_board(&self) -> std::collections::HashMap<i64, Vec<ButtonRow>> {
+        match self.db.lock().unwrap().get_buttons_grouped() {
+            Ok(grouped) => grouped,
+            Err(e) => {
+                tracing::error!("get_buttons_grouped failed: {e}");
+                std::collections::HashMap::new()
+            }
+        }
+    }
+
     fn get_button(&self, id: i64) -> Option<ButtonRow> {
         match self.db.lock().unwrap().get_button(id) {
             Ok(button) => button,
@@ -387,11 +404,7 @@ impl SqlBackend {
             });
         match url {
             Some(url) => {
-                let agent = ureq::Agent::config_builder()
-                    .timeout_global(Some(std::time::Duration::from_secs(10)))
-                    .build()
-                    .new_agent();
-                if let Err(e) = agent.get(&url).call() {
+                if let Err(e) = self.http_agent.get(&url).call() {
                     tracing::warn!(url = %url, error = %e, "url-to-call failed");
                 }
             }

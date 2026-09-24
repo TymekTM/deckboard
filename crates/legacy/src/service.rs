@@ -22,6 +22,17 @@ pub trait Backend: Send + Sync + 'static {
     fn get_boards(&self) -> Vec<deckboard_db::BoardRow>;
     fn get_board(&self, board_id: i64) -> Option<deckboard_db::BoardRow>;
     fn get_buttons_by_board(&self, board_id: i64) -> Vec<deckboard_db::ButtonRow>;
+    /// Every shortcut grouped by board id, for whole-board reads. The
+    /// default loops the per-board getter (fine for mocks); real backends
+    /// override it with a single grouped query.
+    fn all_buttons_by_board(
+        &self,
+    ) -> std::collections::HashMap<i64, Vec<deckboard_db::ButtonRow>> {
+        self.get_boards()
+            .iter()
+            .map(|board| (board.id, self.get_buttons_by_board(board.id)))
+            .collect()
+    }
     fn get_button(&self, id: i64) -> Option<deckboard_db::ButtonRow>;
     /// Image-less row for per-event paths (gesture checks, exec dispatch).
     /// Defaults to the full row for backends without a cheaper query.
