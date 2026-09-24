@@ -159,8 +159,17 @@ pub fn run() {
             export_boards,
             import_boards,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // The idle sweep destroys the hidden WebView, which leaves the
+            // process window-less for a while; the default reaction to that
+            // (exit) would kill the server and the tray. Only an explicit
+            // exit carries a code - the tray's Quit Deckboard.
+            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
 
 /// Delete rotated log files older than `keep_days` (by modification
