@@ -277,8 +277,9 @@ const STATE_BINDINGS = {
 // null = the live state is unknown (nothing pushed yet), so the tile keeps
 // its current visual state; otherwise boolean. Mirrors the original
 // ToggleButton isActive(): boolean state wins, arrays/strings compare
-// against the command payload.
-export function stateActive(tile, customValues, appStates, typeMeta) {
+// against the command payload. `cmd` is the pre-parsed tile.command - the
+// caller owns the parse (once per command change, not per call).
+export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
   const binding = STATE_BINDINGS[tile.type];
   let value;
   if (tile.type === "vol") {
@@ -298,12 +299,6 @@ export function stateActive(tile, customValues, appStates, typeMeta) {
   }
   if (typeof value === "boolean") return value;
   if (value == null || value === false || value === "") return null;
-  let cmd = {};
-  try {
-    cmd = JSON.parse(tile.command) || {};
-  } catch {
-    cmd = {};
-  }
   if (Array.isArray(value)) return value.includes(cmd[binding.key]);
   if (typeof value === "string") return value === cmd[binding.key];
   return Boolean(value);
