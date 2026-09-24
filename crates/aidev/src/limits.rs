@@ -106,7 +106,7 @@ pub fn plan_rows(
     if !zai_live {
         let glm_five = provider_sums("Zcode").five_hour + provider_sums("OpenCode").five_hour;
         let glm_week = provider_sums("Zcode").week + provider_sums("OpenCode").week;
-        rows.push(local_lane(
+        rows.extend(local_rows(
             GLM_LANE,
             glm_five,
             glm_week,
@@ -116,7 +116,7 @@ pub fn plan_rows(
     }
     match http.claude_oauth {
         Some((five, week)) => rows.extend(percent_rows("Claude", five, week)),
-        None => rows.push(local_lane(
+        None => rows.extend(local_rows(
             "Claude",
             claude.five_hour,
             claude.week,
@@ -285,18 +285,14 @@ fn custom_row(custom: &crate::CustomProvider) -> ProviderRow {
 
 const GLM_LANE: &str = "GLM";
 
-/// One window of one provider as a bar row: the fill is the usage, the
-/// value shows `used / limit` when counts exist, else the percentage.
-fn window_row(
-    provider: &str,
-    window: &str,
-    percent: f64,
-    counts: Option<(f64, f64)>,
-) -> ProviderRow {
+/// One window of one provider as a bar row: the fill and the value are
+/// both the usage percentage - the one metric every source shares.
+fn window_row(provider: &str, window: &str, percent: f64) -> ProviderRow {
     let percent = percent.clamp(0.0, 100.0);
-    let text = match counts {
-        Some((used, limit)) => format!("{} / {}", fmt_tokens(used as u64), fmt_tokens(limit as u64)),
-        None => format!("{percent:.0}%"),
+    let text = if percent >= 10.0 || percent == 0.0 {
+        format!("{percent:.0}%")
+    } else {
+        format!("{percent:.1}%")
     };
     ProviderRow {
         name: format!("{provider} {window}"),
@@ -317,7 +313,6 @@ fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
             name,
             &primary.window_label(),
             primary.used_percent,
-            None,
         ));
     }
     if let Some(secondary) = &limits.secondary {
@@ -325,7 +320,6 @@ fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
             name,
             &secondary.window_label(),
             secondary.used_percent,
-            None,
         ));
     }
     if rows.is_empty() {
@@ -342,8 +336,7 @@ fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
 /// GLM Coding Plan via the z.ai monitor quota endpoint (CodexBar's
 /// mapping): `data.limits[]` entries of type TOKENS_LIMIT or
 /// CREDIT_LIMIT, each with `unit`+`number` for the window and a
-/// percentage the API computes itself. `usage` (allotment) together with
-/// `currentValue`/`remaining` upgrades the row to `used / limit` counts.
+/// percentage the API computes itself.
 fn zai_rows(key: &str, host: Option<&str>) -> Vec<ProviderRow> {
     let base = match host.map(str::trim).filter(|h| !h.is_empty()) {
         Some(h) if h.starts_with("http://") || h.starts_with("https://") => h.trim_end_matches('/').to_string(),
@@ -425,7 +418,8 @@ fn zai_window(raw: &serde_json::Value) -> Option<(u64, ProviderRow)> {
     let current = raw.get("currentValue").and_then(|c| c.as_f64());
     let remaining = raw.get("remaining").and_then(|r| r.as_f64());
     let mut percent = api_percent;
-    let mut counts = None;
+    // the counts exist only to keep the percentage honest: the API's own
+    // figure can be stale or zeroed on credit plans
     if let Some(usage) = usage.filter(|u| *u > 0.0) {
         let used = match (remaining, current) {
             (Some(remaining), Some(current)) => Some((usage - remaining).max(current)),
@@ -435,7 +429,6 @@ fn zai_window(raw: &serde_json::Value) -> Option<(u64, ProviderRow)> {
         };
         if let Some(used) = used {
             percent = 100.0 * used.clamp(0.0, usage) / usage;
-            counts = Some((used, usage));
         }
     }
     let window = crate::codex::RateLimit {
@@ -443,52 +436,48 @@ fn zai_window(raw: &serde_json::Value) -> Option<(u64, ProviderRow)> {
         window_minutes: minutes,
     }
     .window_label();
-    Some((minutes, window_row(GLM_LANE, &window, percent, counts)))
+    Some((minutes, window_row(GLM_LANE, &window, percent)))
 }
 
-/// Local lane: token sums per window, percent only where a ceiling is
-/// configured - no ceiling, no invented percentage, so no bar either.
-fn local_lane(
+/// Local lanes from token sums, one row per window: a window with a
+/// configured ceiling becomes a percentage bar, without a ceiling the raw
+/// sum is all there is (no invented percentages).
+fn local_rows(
     name: &str,
     five_hour: u64,
     week: u64,
     five_hour_ceiling: Option<u64>,
     week_ceiling: Option<u64>,
-) -> ProviderRow {
-    let mut parts = Vec::new();
-    let mut percent = None;
-    let mut week_percent = None;
-    if five_hour > 0 || five_hour_ceiling.is_some() {
-        parts.push(match five_hour_ceiling.filter(|c| *c > 0) {
+) -> Vec<ProviderRow> {
+    let mut rows = Vec::new();
+    for (window, used, ceiling) in [
+        ("5h", five_hour, five_hour_ceiling),
+        ("week", week, week_ceiling),
+    ] {
+        if used == 0 && ceiling.filter(|c| *c > 0).is_none() {
+            continue; // nothing used and no limit known: nothing to show
+        }
+        match ceiling.filter(|c| *c > 0) {
             Some(ceiling) => {
-                let p = 100.0 * five_hour as f64 / ceiling as f64;
-                percent = Some(p);
-                format!("5h {:.0}% · {}", p, fmt_tokens(five_hour))
+                rows.push(window_row(name, window, 100.0 * used as f64 / ceiling as f64))
             }
-            None => format!("5h {}", fmt_tokens(five_hour)),
+            None => rows.push(ProviderRow {
+                name: format!("{name} {window}"),
+                state: "ok".into(),
+                text: fmt_tokens(used),
+                percent: None,
+            }),
+        }
+    }
+    if rows.is_empty() {
+        rows.push(ProviderRow {
+            name: name.to_string(),
+            state: "ok".into(),
+            text: "no usage".into(),
+            percent: None,
         });
     }
-    if week > 0 || week_ceiling.is_some() {
-        parts.push(match week_ceiling.filter(|c| *c > 0) {
-            Some(ceiling) => {
-                let p = 100.0 * week as f64 / ceiling as f64;
-                week_percent = Some(p);
-                format!("week {:.0}%", p)
-            }
-            None => format!("week {}", fmt_tokens(week)),
-        });
-    }
-    // the dot tracks whichever window is closer to its ceiling
-    let worst = percent
-        .into_iter()
-        .chain(week_percent)
-        .fold(None::<f64>, |acc, p| Some(acc.map_or(p, |a: f64| a.max(p))));
-    ProviderRow {
-        name: name.to_string(),
-        state: threshold_state(worst).to_string(),
-        text: if parts.is_empty() { "no usage".into() } else { parts.join(" · ") },
-        percent: percent.map(|p| (p * 10.0).round() / 10.0),
-    }
+    rows
 }
 
 /// Claude via OAuth: per-window bar rows; utilization values arrive as
@@ -499,10 +488,10 @@ fn percent_rows(name: &str, five_hour: Option<f64>, week: Option<f64>) -> Vec<Pr
     let week = normalize(week);
     let mut rows = Vec::new();
     if let Some(p) = five {
-        rows.push(window_row(name, "5h", p, None));
+        rows.push(window_row(name, "5h", p));
     }
     if let Some(p) = week {
-        rows.push(window_row(name, "week", p, None));
+        rows.push(window_row(name, "week", p));
     }
     if rows.is_empty() {
         rows.push(ProviderRow {
@@ -554,10 +543,10 @@ fn antigravity_quota_rows() -> Vec<ProviderRow> {
     };
     let mut rows = Vec::new();
     if let Some(p) = quota.five_hour_used {
-        rows.push(window_row("Antigravity", "5h", p, None));
+        rows.push(window_row("Antigravity", "5h", p));
     }
     if let Some(p) = quota.weekly_used {
-        rows.push(window_row("Antigravity", "week", p, None));
+        rows.push(window_row("Antigravity", "week", p));
     }
     rows
 }
@@ -685,27 +674,35 @@ mod tests {
     }
 
     #[test]
-    fn local_lane_shows_windows_and_honors_ceilings() {
-        // no ceilings: raw sums, no invented percentage
-        let row = local_lane("GLM", 100_000, 1_000_000, None, None);
-        assert_eq!(row.text, "5h 100.0K · week 1.0M");
-        assert_eq!(row.percent, None);
+    fn local_rows_bar_ceilinged_windows() {
+        // no ceilings: raw sums per window, no invented percentage
+        let rows = local_rows("GLM", 100_000, 1_000_000, None, None);
+        let labels: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(labels, ["GLM 5h", "GLM week"]);
+        assert_eq!(rows[0].text, "100.0K");
+        assert_eq!(rows[0].percent, None);
 
-        // ceilings turn the tightest window into a percentage
-        let row = local_lane("GLM", 100_000, 1_000_000, Some(1_000_000), None);
-        assert_eq!(row.text, "5h 10% · 100.0K · week 1.0M");
-        assert_eq!(row.percent, Some(10.0));
+        // a ceiling turns its window into a percentage bar
+        let rows = local_rows("GLM", 100_000, 1_000_000, Some(1_000_000), None);
+        assert_eq!(rows[0].name, "GLM 5h");
+        assert_eq!(rows[0].text, "10%");
+        assert_eq!(rows[0].percent, Some(10.0));
+        assert_eq!(rows[1].text, "1.0M");
 
-        // the dot tracks the closer window: an easy 5h next to a nearly
-        // exhausted week still lights up
-        let row = local_lane("GLM", 100_000, 950_000, Some(1_000_000), Some(1_000_000));
-        assert_eq!(row.text, "5h 10% · 100.0K · week 95%");
-        assert_eq!(row.percent, Some(10.0));
-        assert_eq!(row.state, "high");
+        // both ceilings: each window gets its own bar and its own dot
+        let rows = local_rows("GLM", 100_000, 950_000, Some(1_000_000), Some(1_000_000));
+        assert_eq!(rows[0].text, "10%");
+        assert_eq!(rows[1].text, "95%");
+        assert_eq!(rows[1].state, "high");
 
         // zero usage without a ceiling collapses to a quiet row
-        let row = local_lane("GLM", 0, 0, None, None);
-        assert_eq!(row.text, "no usage");
+        let rows = local_rows("GLM", 0, 0, None, None);
+        assert_eq!(rows[0].text, "no usage");
+
+        // a ceiling with zero usage still shows the limit exists
+        let rows = local_rows("GLM", 0, 0, Some(1_000_000), None);
+        assert_eq!(rows[0].text, "0%");
+        assert_eq!(rows[0].percent, Some(0.0));
     }
 
     #[test]
@@ -767,11 +764,11 @@ mod tests {
         // TIME_LIMIT is not a coding-plan window; windows sort by length
         let labels: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(labels, ["GLM 5h", "GLM week"]);
-        // counts upgrade the row to used / limit
-        assert_eq!(rows[0].text, "40.8K / 120.0K");
+        // rows show percentages; the counts only keep them honest
+        assert_eq!(rows[0].text, "34%");
         assert_eq!(rows[0].percent, Some(34.0));
         // remaining is honored when currentValue is zeroed
-        assert_eq!(rows[1].text, "60.0K / 600.0K");
+        assert_eq!(rows[1].text, "10%");
         assert_eq!(rows[1].percent, Some(10.0));
     }
 
@@ -817,12 +814,13 @@ mod tests {
             ("OpenCode", Sums { five_hour: 50_000, ..Default::default() }),
         ];
         let rows = plan_rows(&config, &http, &sums, &paths, crate::unix_now());
-        // no codex sessions on this fake path: the lane stays absent
+        // no codex sessions on this fake path: the lane stays absent; the
+        // no-ceiling GLM sums show raw tokens, the empty Claude week is dropped
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, ["OpenRouter", "GLM", "Claude"]);
-        let glm = rows.iter().find(|r| r.name == "GLM").unwrap();
-        // zcode + opencode together; an empty window is simply not shown
-        assert_eq!(glm.text, "5h 50.0K");
+        assert_eq!(names, ["OpenRouter", "GLM 5h", "Claude 5h", "Claude week"]);
+        let glm = rows.iter().find(|r| r.name == "GLM 5h").unwrap();
+        // zcode + opencode together
+        assert_eq!(glm.text, "50.0K");
 
         // a live GLM quota lane replaces the local ceilings lane
         let http = HttpState {
@@ -830,13 +828,13 @@ mod tests {
                 ProviderRow {
                     name: "GLM 5h".into(),
                     state: "ok".into(),
-                    text: "40.8K / 120.0K".into(),
+                    text: "34%".into(),
                     percent: Some(34.0),
                 },
                 ProviderRow {
                     name: "GLM week".into(),
                     state: "ok".into(),
-                    text: "60.0K / 600.0K".into(),
+                    text: "10%".into(),
                     percent: Some(10.0),
                 },
             ],
@@ -844,6 +842,6 @@ mod tests {
         };
         let rows = plan_rows(&config, &http, &sums, &paths, crate::unix_now());
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, ["GLM 5h", "GLM week", "Claude"]);
+        assert_eq!(names, ["GLM 5h", "GLM week", "Claude 5h", "Claude week"]);
     }
 }
