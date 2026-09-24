@@ -197,6 +197,24 @@ impl Speaker for WinSpeaker {
         Ok(mute.as_bool())
     }
 
+    fn status(&mut self, want_device: bool) -> Result<(f32, bool, Option<String>)> {
+        // one enumerator + default device + endpoint-volume activation
+        // for all three values (the getters above build one chain each)
+        let enumr = enumerator()?;
+        let device = default_device(&enumr)?;
+        let vol = endpoint_volume(&device)?;
+        let value = unsafe { vol.GetMasterVolumeLevelScalar() }
+            .map_err(|e| OsError::Failed(format!("get volume: {e}")))?;
+        let mute =
+            unsafe { vol.GetMute() }.map_err(|e| OsError::Failed(format!("get mute: {e}")))?;
+        let id = if want_device {
+            Some(endpoint_id(&device)?)
+        } else {
+            None
+        };
+        Ok(((value * 100.0).clamp(0.0, 100.0), mute.as_bool(), id))
+    }
+
     fn set_volume(&mut self, percent: f32) -> Result<()> {
         let enumr = enumerator()?;
         let vol = endpoint_volume(&default_device(&enumr)?)?;

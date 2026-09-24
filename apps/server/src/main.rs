@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use deckboard_backend::SqlBackend;
-use deckboard_legacy::{router, AppState, Hub};
+use deckboard_legacy::{AppState, Hub};
 use tracing_subscriber::EnvFilter;
 
 // current_thread: the workload is a couple of tablets doing tiny async IO;
@@ -257,15 +257,8 @@ async fn main() -> anyhow::Result<()> {
                 let backend = backend.clone();
                 // the original fetched the device id on the first fetch
                 // and every 6th cycle after that
-                let with_device = cycle == 1;
                 let snapshot = tokio::task::spawn_blocking(move || {
-                    let (volume, muted) = backend.speaker_status();
-                    let device = if with_device {
-                        backend.speaker_device_id()
-                    } else {
-                        None
-                    };
-                    (volume, muted, device)
+                    backend.speaker_snapshot(cycle == 1)
                 })
                 .await
                 .ok();

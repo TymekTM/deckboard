@@ -52,6 +52,19 @@ pub trait Speaker: Send {
     /// Make `id` the default playback device (console, multimedia and
     /// communications roles, like SoundSwitch does).
     fn set_active_device(&mut self, id: &str) -> Result<()>;
+    /// Volume, mute and (when `want_device`) the default endpoint id in
+    /// one pass. Watcher loops call this per tick; routing through the
+    /// single getters would build the COM object graph once per value.
+    fn status(&mut self, want_device: bool) -> Result<(f32, bool, Option<String>)> {
+        let volume = self.volume()?;
+        let muted = self.muted()?;
+        let device = if want_device {
+            self.active_device().ok()
+        } else {
+            None
+        };
+        Ok((volume, muted, device))
+    }
 }
 
 /// Construct the platform Speaker implementation.

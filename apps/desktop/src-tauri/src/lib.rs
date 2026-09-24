@@ -303,6 +303,21 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         }
     }
 
+    // Emit to the editor WebView only when its window can be seen: a
+    // tray-hidden window cannot render pushes, and every emit is an IPC
+    // round-trip with a second serialization of the payload. Tablets ride
+    // the hub broadcasts and are unaffected. On the next push (<= 15 s
+    // for the slowest lane) a re-shown window is current again.
+    fn emit_if_visible(app: &AppHandle, event: &str, payload: &serde_json::Value) {
+        let visible = app
+            .get_webview_window("main")
+            .map(|w| w.is_visible().unwrap_or(false))
+            .unwrap_or(false);
+        if visible {
+            let _ = app.emit(event, payload);
+        }
+    }
+
     // extensions push custom values -> app_status_update, like the original
     {
         let hub = hub.clone();
@@ -315,7 +330,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
                 hub.broadcast("app_status_update", Some(&payload.to_string()))
                     .await;
-                let _ = app.emit("app-status-update", &payload);
+                emit_if_visible(&app, "app-status-update", &payload);
             }
         });
     }
@@ -337,7 +352,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
                 hub.broadcast("app_status_update", Some(&payload.to_string()))
                     .await;
-                let _ = app.emit("app-status-update", &payload);
+                emit_if_visible(&app, "app-status-update", &payload);
             }
         });
     }
@@ -372,7 +387,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
                 hub.broadcast("app_status_update", Some(&payload.to_string()))
                     .await;
-                let _ = app.emit("app-status-update", &payload);
+                emit_if_visible(&app, "app-status-update", &payload);
             }
         });
     }
@@ -380,7 +395,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // master audio status watcher: the original polls every 5 s and pushes
     // speaker-volume/speaker-muted; that is what flips mute tiles live.
     // The active output device rides along (THIRD_PARTY_APP, like the
-    // original) but only when it changed, so tablets are not spammed.
+    // original) but is read only every 6th cycle (~30 s, like the headless
+    // server) and pushed only when it changed, so tablets are not spammed.
+    // Volume/mute likewise broadcast only on change: the v2 engine dedupes
+    // anyway, the legacy lane and the WebView do not.
     {
         let hub = hub.clone();
         let app = app.clone();
@@ -390,16 +408,20 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut last_device: Option<String> = None;
+            let mut last_level: Option<f32> = None;
+            let mut last_muted: Option<bool> = None;
+            let mut tick: u32 = 0;
             loop {
+                tick = tick.wrapping_add(1);
+                let want_device = tick % 6 == 0;
                 interval.tick().await;
                 // Speaker COM calls block; keep them off the runtime
                 // workers. The shared SqlBackend owns the lazy speaker
                 // instance, so exec switches and watcher reads agree.
+                // `speaker_snapshot` builds ONE COM chain for all values.
                 let snapshot_backend = backend.clone();
                 let snapshot = tauri::async_runtime::spawn_blocking(move || {
-                    let (volume, muted) = snapshot_backend.speaker_status();
-                    let device = snapshot_backend.speaker_device_id();
-                    (volume, muted, device)
+                    snapshot_backend.speaker_snapshot(want_device)
                 })
                 .await
                 .ok();
@@ -408,13 +430,17 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                     let level = (volume / 100.0 * 1000.0).round() / 1000.0;
                     feed_v2.set("speaker-volume", serde_json::json!(level));
                     feed_v2.set("speaker-muted", serde_json::json!(muted));
-                    let payload = serde_json::json!({
-                        "app": "APP_CUSTOM_VALUE",
-                        "data": {"speaker-volume": level, "speaker-muted": muted},
-                    });
-                    hub.broadcast("app_status_update", Some(&payload.to_string()))
-                        .await;
-                    let _ = app.emit("app-status-update", &payload);
+                    if last_level != Some(level) || last_muted != Some(muted) {
+                        last_level = Some(level);
+                        last_muted = Some(muted);
+                        let payload = serde_json::json!({
+                            "app": "APP_CUSTOM_VALUE",
+                            "data": {"speaker-volume": level, "speaker-muted": muted},
+                        });
+                        hub.broadcast("app_status_update", Some(&payload.to_string()))
+                            .await;
+                        emit_if_visible(&app, "app-status-update", &payload);
+                    }
                 }
                 if let Some((_, _, Some(id))) = snapshot {
                     if last_device.as_deref() != Some(id.as_str()) {
@@ -426,7 +452,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                         });
                         hub.broadcast("app_status_update", Some(&payload.to_string()))
                             .await;
-                        let _ = app.emit("app-status-update", &payload);
+                        emit_if_visible(&app, "app-status-update", &payload);
                     }
                 }
             }

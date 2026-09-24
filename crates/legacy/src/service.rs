@@ -44,6 +44,22 @@ pub trait Backend: Send + Sync + 'static {
     fn speaker_device_id(&self) -> Option<String> {
         None
     }
+    /// Watcher snapshot in one platform pass: volume, mute and (when
+    /// `want_device`) the default device id. Per-tick loops use this;
+    /// the default composes the getters for backends without a combined
+    /// read.
+    fn speaker_snapshot(
+        &self,
+        want_device: bool,
+    ) -> (Option<f32>, Option<bool>, Option<String>) {
+        let (volume, muted) = self.speaker_status();
+        let device = if want_device {
+            self.speaker_device_id()
+        } else {
+            None
+        };
+        (volume, muted, device)
+    }
 }
 
 pub struct AppState {

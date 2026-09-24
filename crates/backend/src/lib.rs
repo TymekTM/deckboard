@@ -214,6 +214,13 @@ impl Backend for SqlBackend {
         SqlBackend::speaker_device_id(self)
     }
 
+    fn speaker_snapshot(
+        &self,
+        want_device: bool,
+    ) -> (Option<f32>, Option<bool>, Option<String>) {
+        SqlBackend::speaker_snapshot(self, want_device)
+    }
+
     fn get_boards(&self) -> Vec<BoardRow> {
         match self.db.lock().unwrap().get_boards() {
             Ok(boards) => boards,
@@ -473,6 +480,19 @@ impl SqlBackend {
     pub fn speaker_status(&self) -> (Option<f32>, Option<bool>) {
         self.with_speaker(|sp| (sp.volume().ok(), sp.muted().ok()))
             .unwrap_or((None, None))
+    }
+
+    /// Watcher snapshot in one COM pass: volume, mute and (optionally)
+    /// the default device id. The per-tick loops use this instead of the
+    /// three separate getters.
+    pub fn speaker_snapshot(
+        &self,
+        want_device: bool,
+    ) -> (Option<f32>, Option<bool>, Option<String>) {
+        self.with_speaker(|sp| sp.status(want_device).ok())
+            .flatten()
+            .map(|(volume, muted, device)| (Some(volume), Some(muted), device))
+            .unwrap_or((None, None, None))
     }
 
     pub fn speaker_device_id(&self) -> Option<String> {
