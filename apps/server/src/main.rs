@@ -112,10 +112,21 @@ async fn main() -> anyhow::Result<()> {
         value: "url-to-call".into(),
         icon: Some("link".into()),
         color: Some("#ff29df".into()),
-        font_icon: Some("fas".into()),
+        font_icon: Some("fas".to_string()),
         mode: None,
         command: None,
     });
+    // Native AI dev-work display tiles (plan limits, agent progress).
+    for (value, icon, color, mode) in deckboard_aidev::input_declarations() {
+        deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+            value: value.to_string(),
+            icon: Some(icon.to_string()),
+            color: Some(color.to_string()),
+            font_icon: Some("fas".to_string()),
+            mode: Some(mode.to_string()),
+            command: None,
+        });
+    }
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -195,6 +206,29 @@ async fn main() -> anyhow::Result<()> {
     let hub_legacy = state.hub.clone();
     tokio::spawn(async move {
         while let Some(data) = sysinfo_values.recv().await {
+            feed(data.clone());
+            let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
+            let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+            hub_legacy
+                .broadcast("app_status_update", Some(&payload))
+                .await;
+        }
+    });
+
+    // Native AI dev-work source: plan limits + agent progress, same channel.
+    let aidev_paths = deckboard_aidev::Paths {
+        config: home.join("deckboard/aidev.json"),
+        zcode_cli: home.join(".zcode/cli"),
+        claude_projects: home.join(".claude/projects"),
+        codex_sessions: home.join(".codex/sessions"),
+        opencode_db: home.join(".local/share/opencode/opencode.db"),
+        antigravity_conversations: home.join(".gemini/antigravity/conversations"),
+    };
+    let mut aidev_values = deckboard_aidev::spawn_push(aidev_paths);
+    let feed = feed_v2.clone();
+    let hub_legacy = state.hub.clone();
+    tokio::spawn(async move {
+        while let Some(data) = aidev_values.recv().await {
             feed(data.clone());
             let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
             let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);

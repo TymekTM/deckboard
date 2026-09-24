@@ -17,6 +17,7 @@ deckboard-vm = { path = "../vm" }
 deckboard-discord = { path = "../discord" }
 deckboard-os = { path = "../os" }
 deckboard-sysinfo = { path = "../sysinfo" }
+deckboard-aidev = { path = "../aidev" }
 ureq = "3"
 
 [dev-dependencies]

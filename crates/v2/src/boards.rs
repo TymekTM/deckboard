@@ -109,6 +109,8 @@ fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>
         "knob" => (WidgetKind::Knob, vec![Interaction::Slide]),
         "graph" => (WidgetKind::Graph, vec![]),
         "list" => (WidgetKind::List, vec![]),
+        // ai dev-work display tiles: a read-only row list, no gestures
+        "status" => (WidgetKind::List, vec![]),
         _ if app == Some("custom-value") => (WidgetKind::Toggle, vec![Interaction::Tap]),
         _ => (
             WidgetKind::Button,

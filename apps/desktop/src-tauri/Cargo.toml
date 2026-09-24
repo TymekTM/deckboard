@@ -32,6 +32,7 @@ deckboard-ext = { path = "../../../crates/ext" }
 deckboard-vm = { path = "../../../crates/vm" }
 deckboard-discord = { path = "../../../crates/discord" }
 deckboard-sysinfo = { path = "../../../crates/sysinfo" }
+deckboard-aidev = { path = "../../../crates/aidev" }
 deckboard-proto = { path = "../../../crates/proto" }
 deckboard-v2 = { path = "../../../crates/v2" }
 if-addrs = "0.15.0"

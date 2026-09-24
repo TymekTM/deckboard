@@ -58,16 +58,16 @@ function mergeCustomValues(data) {
   for (const [key, value] of Object.entries(data)) {
     if (typeof value !== "object" || value === null) {
       customValues[key] = value;
-    } else if (customValues[key]?.values) {
-      // graph samples keep the last 10 readings, like the original
+    } else if (typeof value.value === "number") {
+      // graph-style payload: keep the last 10 readings for the sparkline
+      // and pass the rest through (title, suffix, per-provider rows)
       const prev = customValues[key];
-      customValues[key] = {
-        ...prev,
-        values: [...prev.values, value.value ?? 0].slice(-10),
-      };
+      const values = [...(prev?.values ?? []), value.value].slice(-10);
+      customValues[key] = { ...value, values };
     } else {
-      const { value: sample, ...rest } = value;
-      customValues[key] = { ...rest, values: [sample ?? 0] };
+      // status displays replace their whole snapshot; sample history
+      // makes no sense for a live row list
+      customValues[key] = value;
     }
   }
 }

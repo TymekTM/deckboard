@@ -263,6 +263,7 @@ impl Backend for SqlBackend {
         );
         if self.exec_extension(&cmd, None)
             || self.exec_sysinfo(&cmd)
+            || self.exec_aidev(&cmd)
             || self.exec_callurl(&cmd)
             || self.exec_voicemeeter(&cmd)
             || self.exec_discord(&cmd, sink)
@@ -285,6 +286,7 @@ impl Backend for SqlBackend {
         );
         if self.exec_extension(&cmd, Some(value))
             || self.exec_sysinfo(&cmd)
+            || self.exec_aidev(&cmd)
             || self.exec_callurl(&cmd)
             || self.exec_voicemeeter(&cmd)
             || self.exec_speaker_volume(&cmd, value)
@@ -337,6 +339,17 @@ impl SqlBackend {
             return false;
         }
         deckboard_sysinfo::execute(&cmd.kind);
+        true
+    }
+
+    /// Native AI dev-work display tiles (plan limits, agent progress):
+    /// presses are claimed as no-ops so display tiles never fall through
+    /// to the macro dispatcher.
+    fn exec_aidev(&self, cmd: &deckboard_actions::Command) -> bool {
+        if !deckboard_aidev::is_aidev_action(&cmd.kind) {
+            return false;
+        }
+        deckboard_aidev::execute(&cmd.kind);
         true
     }
 

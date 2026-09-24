@@ -58,6 +58,18 @@ through a legacy compatibility layer until the new client ships.
       Cutover (2026-09-22): the editor replaced the original app for daily
       use on this machine - installed from the NSIS bundle, HKCU Run
       autostart on, original autostart bat disabled.
+      AI dev work (2026-09-22, provider-agnostic rework 2026-09-24): new
+      display-tile class ("status" mode - colored-dot rows with optional
+      usage bars; "graph" mode sparklines) under an "AI dev work" catalog
+      section, fed by `crates/aidev`: plan limits (OpenRouter / Anthropic
+      admin / generic JSON endpoints, Codex embedded rate limits, Claude
+      OAuth usage, local token sums with optional ceilings) and agent
+      progress across zcode / claude / codex / opencode / antigravity
+      (transcript freshness -> working / attention / done, grouped by
+      project, compact per-provider fallback on overflow); token tiles for
+      today and a rolling hour with per-provider tap-through. See
+      docs/aidev.md. Pushed on the normal APP_CUSTOM_VALUE channel and as
+      v2 `ext.ai-*` channels (status maps to WidgetKind::List).
 - [ ] **M4 - Kotlin/Compose client MVP**: boards/buttons/sliders/toggles,
       live state, offline cache, QR/USB pairing. Includes Android plumbing:
       foreground service + battery-optimization exemption prompt (WS dies

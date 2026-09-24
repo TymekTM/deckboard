@@ -25,6 +25,14 @@ function metaOf(tile) {
 // dual-state tiles flip to their second state when tapped, like the
 // tablet client; the toggle lives for the editor session only
 const activeTiles = reactive(new Set());
+// ai-tokens-hour tiles currently showing the per-provider breakdown
+const hourExpanded = reactive(new Set());
+
+// the hour tile renders either the shared sparkline or, when tapped, the
+// per-provider rows the producer ships alongside the graph value
+function hourShowRows(tile) {
+  return hourExpanded.has(tile.id) && graphData(tile)?.rows?.length;
+}
 function isDual(tile) {
   return Boolean(
     tile.color2 || tile.icon2 || tile.img2 || metaOf(tile).dual
@@ -108,8 +116,53 @@ function graphData(tile) {
 
 function graphLast(tile) {
   const g = graphData(tile);
+  if (g.value_label) return g.value_label;
   const last = g.values[g.values.length - 1];
   return `${last ?? ""}${g.suffix || ""}`;
+}
+
+// StatusButton: the producer pushes {title, rows:[{label, value, state,
+// percent?, provider?}], compact:[{provider, value}], summary} under the
+// tile's command (or type) - a live list that replaces itself wholesale
+// (see mergeCustomValues). Rows arrive display-ready so this stays a dumb
+// renderer.
+function statusData(tile) {
+  if (tile.mode !== "status") return null;
+  const v = props.customValues[tile.command || tile.type];
+  if (!v || typeof v !== "object" || !Array.isArray(v.rows) || !v.rows.length) {
+    return null;
+  }
+  return v;
+}
+
+// When the tile cannot fit the detail (small tile, or more rows than the
+// height can hold) the producer's compact per-provider counts take over -
+// logo plus "N working · M done", no chat titles.
+function statusRows(tile) {
+  const data = statusData(tile);
+  if (!data) return [];
+  const compact = data.compact;
+  if (Array.isArray(compact) && compact.length && (tile.h <= 1 || data.rows.length > tile.h * 4)) {
+    return compact.map((c) => ({ ...c, state: "compact" }));
+  }
+  return data.rows;
+}
+
+// Monochrome brand glyphs (12x12, currentColor) for the agent providers.
+// Hand-drawn paths: Claude's starburst, OpenAI's knot, a Z mark, OpenCode's
+// brackets and Antigravity's delta.
+const PROVIDER_GLYPHS = {
+  zcode: "M2 2h8v2.2L5.6 8H10v2H2V7.8L6.4 4H2V2Z",
+  claude: "M6 0.8 7 4.6 10.2 2.7 8.3 6 12 7 8.3 8 10.2 11.3 7 9.4 6 13.2 5 9.4 1.8 11.3 3.7 8 0 7 3.7 6 1.8 2.7 5 4.6Z",
+  codex: "M6 1a5 5 0 0 1 4.3 2.5A5 5 0 0 1 10.5 10 5 5 0 0 1 6 13a5 5 0 0 1-4.5-3A5 5 0 0 1 1.7 3.5 5 5 0 0 1 6 1Zm0 2a3 3 0 0 0-2.6 1.5A3 3 0 0 0 3.2 8.4 3 3 0 0 0 6 11a3 3 0 0 0 2.8-2.6A3 3 0 0 0 8.6 4.5 3 3 0 0 0 6 3Z",
+  opencode: "M4 2 1.5 6 4 10h2.2L3.7 6 6.2 2H4Zm4 0 2.5 4L8 10H5.8L8.3 6 5.8 2H8Z",
+  antigravity: "M6 1 11.3 11H0.7L6 1Zm0 4.6L3.5 10.3h5L6 5.6Z",
+};
+
+function providerSvg(provider) {
+  const path = PROVIDER_GLYPHS[provider];
+  if (!path) return "";
+  return `<svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true"><path d="${path}"/></svg>`;
 }
 
 // polyline points over the tile, y normalized to the sample range
@@ -239,6 +292,14 @@ function startDrag(tile, mode, event) {
 }
 
 function onTileTap(tile) {
+  if (tile.type === "ai-tokens-hour" && graphData(tile)?.rows?.length) {
+    // the hour tile's tap flips between the shared sparkline and the
+    // per-provider breakdown instead of firing an action; works in edit
+    // mode too, where plain tiles have no click behavior at all
+    if (hourExpanded.has(tile.id)) hourExpanded.delete(tile.id);
+    else hourExpanded.add(tile.id);
+    return;
+  }
   if (!props.touch) return;
   if (tile.mode === "slider") return;
   if (isDual(tile)) {
@@ -376,6 +437,7 @@ function onGridClick(event) {
             v-if="
               tileIcon(tile) &&
               !(tile.mode === 'graph' && graphData(tile)) &&
+              !(tile.mode === 'status' && statusData(tile)) &&
               !(tile.mode === 'custom-value' && !tile.title && customValueLabel(tile))
             "
             class="tile-icon"
@@ -394,7 +456,23 @@ function onGridClick(event) {
               }}</b>
               <span class="tile-graph-val">{{ graphLast(tile) }}</span>
             </div>
+            <div v-if="hourShowRows(tile)" class="tile-status tile-hour-rows">
+              <div
+                v-for="(row, i) in graphData(tile).rows"
+                :key="i"
+                class="status-row"
+              >
+                <span
+                  v-if="row.provider"
+                  class="provider-glyph"
+                  v-html="providerSvg(row.provider)"
+                ></span>
+                <span class="status-label">{{ row.label }}</span>
+                <span v-if="row.value" class="status-val">{{ row.value }}</span>
+              </div>
+            </div>
             <svg
+              v-else
               class="tile-spark"
               viewBox="0 0 100 100"
               preserveAspectRatio="none"
@@ -411,6 +489,32 @@ function onGridClick(event) {
               />
             </svg>
           </template>
+          <div v-if="tile.mode === 'status' && statusData(tile)" class="tile-status">
+            <div
+              v-for="(row, i) in statusRows(tile)"
+              :key="i"
+              class="status-row"
+              :class="['s-' + (row.state || 'off'), { 'is-header': row.state === 'header' }]"
+            >
+              <span v-if="row.state !== 'header' && row.state !== 'compact'" class="status-dot"></span>
+              <span
+                v-if="row.provider && providerSvg(row.provider)"
+                class="provider-glyph"
+                v-html="providerSvg(row.provider)"
+              ></span>
+              <span v-if="row.label" class="status-label">{{ row.label }}</span>
+              <span v-if="row.value" class="status-val">{{ row.value }}</span>
+              <span v-if="row.percent != null" class="status-bar">
+                <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
+              </span>
+            </div>
+            <div
+              v-if="statusData(tile).summary && !statusRows(tile).some((r) => r.state === 'compact')"
+              class="status-summary"
+            >
+              {{ statusData(tile).summary }}
+            </div>
+          </div>
           <span
             v-if="boardTileTitle(tile)"
             class="tile-title"
@@ -563,6 +667,139 @@ function onGridClick(event) {
   width: 100%;
   height: 50%;
   pointer-events: none;
+}
+/* status tiles: colored-dot rows with an optional thin usage bar per row */
+.tile-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 9px;
+  pointer-events: none;
+}
+.status-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: #95a5a6;
+}
+.s-working .status-dot,
+.s-ok .status-dot {
+  background: #2ecc71;
+}
+.s-working .status-dot {
+  animation: status-pulse 1.6s ease-in-out infinite;
+}
+.s-attention .status-dot,
+.s-warn .status-dot {
+  background: #f39c12;
+}
+.s-high .status-dot,
+.s-error .status-dot {
+  background: #e74c3c;
+}
+.status-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+.status-val {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.85);
+  white-space: nowrap;
+}
+/* agent states color the value text to match the dot */
+.s-working .status-val {
+  color: #2ecc71;
+}
+.s-attention .status-val {
+  color: #f39c12;
+}
+.s-done .status-val {
+  color: rgba(255, 255, 255, 0.55);
+}
+/* project header rows: small caps, no dot, breathing room above */
+.status-row.is-header {
+  margin-top: 3px;
+}
+.status-row.is-header:first-child {
+  margin-top: 0;
+}
+.is-header .status-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+  text-shadow: none;
+}
+.status-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -3px;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 1px;
+}
+.status-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.75);
+}
+.status-summary {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  margin-top: 2px;
+  padding-top: 4px;
+}
+.provider-glyph {
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: rgba(255, 255, 255, 0.72);
+}
+/* compact fallback rows: glyph left, counts right */
+.s-compact .status-val {
+  margin-left: auto;
+  color: rgba(255, 255, 255, 0.85);
+}
+/* per-provider breakdown overlay on the hour graph tile */
+.tile-hour-rows {
+  position: static;
+  flex: 1;
+  justify-content: flex-start;
+  overflow: hidden;
+  padding: 0;
+}
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 .slider-fill {
   position: absolute;

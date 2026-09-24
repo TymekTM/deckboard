@@ -342,6 +342,36 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         });
     }
 
+    // native AI dev-work source: declarations style the ai-* display tiles
+    // (plan limits, agent progress), and its poll loop feeds both protocols
+    // from local transcripts, agent sessions and configured plan APIs.
+    for (value, icon, color, mode) in deckboard_aidev::input_declarations() {
+        register_ext_input(value, Some(icon), Some(color), "fas", Some(mode), None);
+    }
+    {
+        let paths = deckboard_aidev::Paths {
+            config: home.join("deckboard").join("aidev.json"),
+            zcode_cli: home.join(".zcode").join("cli"),
+            claude_projects: home.join(".claude").join("projects"),
+            codex_sessions: home.join(".codex").join("sessions"),
+            opencode_db: home.join(".local").join("share").join("opencode").join("opencode.db"),
+            antigravity_conversations: home.join(".gemini").join("antigravity").join("conversations"),
+        };
+        let mut aidev_values = deckboard_aidev::spawn_push(paths);
+        let hub = hub.clone();
+        let app = app.clone();
+        let feed_v2 = feed_v2.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(data) = aidev_values.recv().await {
+                feed_ext(&feed_v2, &data);
+                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
+                hub.broadcast("app_status_update", Some(&payload.to_string()))
+                    .await;
+                let _ = app.emit("app-status-update", &payload);
+            }
+        });
+    }
+
     // master audio status watcher: the original polls every 5 s and pushes
     // speaker-volume/speaker-muted; that is what flips mute tiles live.
     // The active output device rides along (THIRD_PARTY_APP, like the

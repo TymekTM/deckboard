@@ -1069,10 +1069,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "deckboard-aidev"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "deckboard-backend"
 version = "0.1.0"
 dependencies = [
  "deckboard-actions",
+ "deckboard-aidev",
  "deckboard-db",
  "deckboard-discord",
  "deckboard-ext",
@@ -1109,6 +1122,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "deckboard-actions",
+ "deckboard-aidev",
  "deckboard-backend",
  "deckboard-db",
  "deckboard-discord",
@@ -1207,6 +1221,7 @@ dependencies = [
  "anyhow",
  "axum",
  "deckboard-actions",
+ "deckboard-aidev",
  "deckboard-backend",
  "deckboard-db",
  "deckboard-discord",
