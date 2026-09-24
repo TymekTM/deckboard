@@ -22,6 +22,17 @@ covers v2.
   application-level ping/pong frames.
 - Ordering: frames from the server arrive in the order produced (TCP).
   Server → client pushes and acks share one FIFO per connection.
+- Backpressure: each session drains its outbound queue through one pump.
+  The queue is bounded; a client that stops reading while the producer
+  keeps pushing gets the connection closed on overflow - a plain
+  WebSocket close that may come without a preceding `error` frame (the
+  queue that would carry it is the full one). The client reconnects and
+  recovers from the snapshot. A unicast ack can be dropped in the same
+  situation, so clients must treat interactions as fire-and-forget
+  unless they implement their own confirmation.
+- Silence watchdog: a session with no inbound frames (data or pongs) for
+  3 x the ping interval is torn down like an overflow, even if TCP has
+  not noticed the dead peer yet.
 
 ## 2. Frame envelope
 

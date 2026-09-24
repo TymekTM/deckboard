@@ -22,7 +22,23 @@ pub trait Backend: Send + Sync + 'static {
     fn get_boards(&self) -> Vec<pulpit_db::BoardRow>;
     fn get_board(&self, board_id: i64) -> Option<pulpit_db::BoardRow>;
     fn get_buttons_by_board(&self, board_id: i64) -> Vec<pulpit_db::ButtonRow>;
+    /// Every shortcut grouped by board id, for whole-board reads. The
+    /// default loops the per-board getter (fine for mocks); real backends
+    /// override it with a single grouped query.
+    fn all_buttons_by_board(
+        &self,
+    ) -> std::collections::HashMap<i64, Vec<pulpit_db::ButtonRow>> {
+        self.get_boards()
+            .iter()
+            .map(|board| (board.id, self.get_buttons_by_board(board.id)))
+            .collect()
+    }
     fn get_button(&self, id: i64) -> Option<pulpit_db::ButtonRow>;
+    /// Image-less row for per-event paths (gesture checks, exec dispatch).
+    /// Defaults to the full row for backends without a cheaper query.
+    fn get_button_meta(&self, id: i64) -> Option<pulpit_db::ButtonRow> {
+        self.get_button(id)
+    }
     fn exec(
         &self,
         button: pulpit_db::ButtonRow,
@@ -38,6 +54,22 @@ pub trait Backend: Send + Sync + 'static {
     /// Endpoint id of the current default playback device.
     fn speaker_device_id(&self) -> Option<String> {
         None
+    }
+    /// Watcher snapshot in one platform pass: volume, mute and (when
+    /// `want_device`) the default device id. Per-tick loops use this;
+    /// the default composes the getters for backends without a combined
+    /// read.
+    fn speaker_snapshot(
+        &self,
+        want_device: bool,
+    ) -> (Option<f32>, Option<bool>, Option<String>) {
+        let (volume, muted) = self.speaker_status();
+        let device = if want_device {
+            self.speaker_device_id()
+        } else {
+            None
+        };
+        (volume, muted, device)
     }
 }
 

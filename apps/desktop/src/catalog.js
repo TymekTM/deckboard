@@ -350,6 +350,36 @@ export const CATALOG = [
   { value: "twitch-subs-only", label: "Subs-Only Mode", icon: "star", color: "#9146ff", dual: true },
   { value: "twitch-emote-only", label: "Emote-Only Mode", icon: "smile", color: "#9146ff", dual: true },
   { divider: true },
+  { header: "AI dev work" },
+  {
+    value: "ai-plan-limits",
+    label: "AI Plan Limits (display)",
+    icon: "tachometer-alt",
+    color: "#171A21",
+    mode: "status",
+  },
+  {
+    value: "ai-agent-status",
+    label: "Agent Progress (display)",
+    icon: "robot",
+    color: "#171A21",
+    mode: "status",
+  },
+  {
+    value: "ai-tokens-today",
+    label: "AI Tokens Today (graph)",
+    icon: "coins",
+    color: "#171A21",
+    mode: "graph",
+  },
+  {
+    value: "ai-tokens-hour",
+    label: "AI Tokens Per Hour (graph)",
+    icon: "clock",
+    color: "#171A21",
+    mode: "graph",
+  },
+  { divider: true },
   { header: "Integrations (extensions / native bridges)" },
   {
     value: "custom-value",
@@ -415,8 +445,9 @@ const STATE_BINDINGS = {
 // null = the live state is unknown (nothing pushed yet), so the tile keeps
 // its current visual state; otherwise boolean. Mirrors the original
 // ToggleButton isActive(): boolean state wins, arrays/strings compare
-// against the command payload.
-export function stateActive(tile, customValues, appStates, typeMeta) {
+// against the command payload. `cmd` is the pre-parsed tile.command - the
+// caller owns the parse (once per command change, not per call).
+export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
   const binding = STATE_BINDINGS[tile.type];
   let value;
   if (tile.type === "vol") {
@@ -436,12 +467,6 @@ export function stateActive(tile, customValues, appStates, typeMeta) {
   }
   if (typeof value === "boolean") return value;
   if (value == null || value === false || value === "") return null;
-  let cmd = {};
-  try {
-    cmd = JSON.parse(tile.command) || {};
-  } catch {
-    cmd = {};
-  }
   if (Array.isArray(value)) return value.includes(cmd[binding.key]);
   if (typeof value === "string") return value === cmd[binding.key];
   return Boolean(value);

@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -142,7 +143,16 @@ pub struct ExtManager {
     entries: Vec<ExtEntry>,
     inputs: Vec<ExtInputInfo>,
     events_tx: tokio_mpsc::UnboundedSender<ExtEvent>,
+    /// Connected tablet clients, updated by the embedding app. Timer
+    /// threads read it to stretch their tick cadence while nobody is
+    /// watching: zero clients means the pushed values go unseen, so
+    /// ticking at full speed would be pure idle CPU.
+    active_clients: Arc<AtomicUsize>,
 }
+
+/// When no clients are connected, timer ticks wait at least this long,
+/// whatever the extension requested (see `runtime_loop`).
+pub const IDLE_TICK_FLOOR: Duration = Duration::from_secs(15);
 
 impl ExtManager {
     /// Scan `dir` for packages (directories and `*.asar` files). Extension
@@ -158,6 +168,7 @@ impl ExtManager {
         let entries: Vec<ExtEntry> = Vec::new();
         let mut all_inputs = Vec::new();
         let mut cache = MetadataCache::load();
+        let active_clients = Arc::new(AtomicUsize::new(0));
 
         let Some(list) = std::fs::read_dir(dir).ok() else {
             tracing::info!(dir = %dir.display(), "no extensions directory");
@@ -166,6 +177,7 @@ impl ExtManager {
                     entries,
                     inputs: all_inputs,
                     events_tx,
+                    active_clients,
                 }),
                 events_rx,
             );
@@ -238,7 +250,13 @@ impl ExtManager {
                     // metadata known; still need the live runtime (thread
                     // spawn, no JS on this thread)
                     tracing::info!(package = %package, "timer extension from metadata cache - loading runtime");
-                    match spawn_runtime(&path, &package, &configs, &events_tx) {
+                    match spawn_runtime(
+                        &path,
+                        &package,
+                        &configs,
+                        &events_tx,
+                        &active_clients,
+                    ) {
                         Ok(dispatch) => Plan::Resident {
                             meta,
                             dispatch: Some(dispatch),
@@ -266,9 +284,15 @@ impl ExtManager {
                         let path = path.clone();
                         let package = package.clone();
                         let events_tx = events_tx.clone();
+                        let active_clients = active_clients.clone();
                         move || {
-                            let _ =
-                                res_tx.send(load_extension(&path, &package, &configs, &events_tx));
+                            let _ = res_tx.send(load_extension(
+                                &path,
+                                &package,
+                                &configs,
+                                &events_tx,
+                                &active_clients,
+                            ));
                         }
                     });
                 match spawned {
@@ -380,9 +404,17 @@ impl ExtManager {
                 entries,
                 inputs: all_inputs,
                 events_tx,
+                active_clients: active_clients.clone(),
             }),
             events_rx,
         )
+    }
+
+    /// Report the number of connected clients. Timer threads stretch
+    /// their cadence to `IDLE_TICK_FLOOR` while it reads zero, so an
+    /// idle tray app does not burn CPU pushing values nobody reads.
+    pub fn set_activity(&self, clients: usize) {
+        self.active_clients.store(clients, Ordering::Relaxed);
     }
 
     /// Runtime threads are spawned at load time and self-manage their
@@ -433,7 +465,13 @@ impl ExtManager {
                 }
                 Residence::Lazy { path, configs } => {
                     tracing::info!(package = %entry.package, "first execute - spawning extension runtime");
-                    let dispatch = spawn_runtime(path, &entry.package, configs, &self.events_tx)?;
+                    let dispatch = spawn_runtime(
+                        path,
+                        &entry.package,
+                        configs,
+                        &self.events_tx,
+                        &self.active_clients,
+                    )?;
                     *residence = Residence::Resident(dispatch);
                     let Residence::Resident(dispatch) = &*residence else {
                         unreachable!("just assigned Resident")
@@ -561,6 +599,7 @@ fn load_extension(
     package: &str,
     configs: &Value,
     events_tx: &tokio_mpsc::UnboundedSender<ExtEvent>,
+    active_clients: &Arc<AtomicUsize>,
 ) -> Result<(ProbeMeta, Option<mpsc::Sender<ExtRequest>>), HostError> {
     // extract to a temp dir before spawning (plain IO, thread-agnostic)
     let source = crate::source::PackageSource::open(path, package.to_string())
@@ -569,6 +608,7 @@ fn load_extension(
     let package = package.to_string();
     let configs = configs.clone();
     let events_tx = events_tx.clone();
+    let active_clients = active_clients.clone();
 
     // The interpreter is created inside the thread and never crosses a
     // thread boundary afterwards (Boa is !Send).
@@ -602,6 +642,7 @@ fn load_extension(
                             },
                             req_rx,
                             events_tx,
+                            active_clients,
                         );
                     }
                 } else {
@@ -629,6 +670,7 @@ fn spawn_runtime(
     package: &str,
     configs: &Value,
     events_tx: &tokio_mpsc::UnboundedSender<ExtEvent>,
+    active_clients: &Arc<AtomicUsize>,
 ) -> Result<mpsc::Sender<ExtRequest>, HostError> {
     let source = crate::source::PackageSource::open(path, package.to_string())
         .map_err(|e| HostError::Other(e.to_string()))?;
@@ -636,6 +678,7 @@ fn spawn_runtime(
     let package = package.to_string();
     let configs = configs.clone();
     let events_tx = events_tx.clone();
+    let active_clients = active_clients.clone();
 
     let (req_tx, req_rx) = mpsc::channel::<ExtRequest>();
     let (res_tx, res_rx) = mpsc::channel();
@@ -654,6 +697,7 @@ fn spawn_runtime(
                         },
                         req_rx,
                         events_tx,
+                        active_clients,
                     );
                 }
             }
@@ -704,16 +748,25 @@ fn runtime_loop(
     mut slot: ExtSlot,
     req_rx: mpsc::Receiver<ExtRequest>,
     events_tx: tokio_mpsc::UnboundedSender<ExtEvent>,
+    active_clients: Arc<AtomicUsize>,
 ) {
     loop {
         // Timers only run while a live interpreter is held; without one
-        // the thread blocks on recv() with no wakeups at all.
+        // the thread blocks on recv() with no wakeups at all. With no
+        // clients connected the pushed values go unseen, so the wait
+        // stretches to `IDLE_TICK_FLOOR` instead of full speed.
         let wait = if let Some(rt) = slot.live.as_mut() {
             for ev in rt.tick_due() {
                 ExtManager::forward(&events_tx, ev);
             }
-            rt.tick_granularity()
-                .clamp(Duration::from_millis(50), Duration::from_secs(1))
+            let granularity = rt
+                .tick_granularity()
+                .clamp(Duration::from_millis(50), Duration::from_secs(1));
+            if active_clients.load(Ordering::Relaxed) == 0 {
+                granularity.max(IDLE_TICK_FLOOR)
+            } else {
+                granularity
+            }
         } else {
             Duration::ZERO
         };

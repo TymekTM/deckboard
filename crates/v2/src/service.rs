@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
@@ -156,6 +156,7 @@ async fn asset_get(
     State(state): State<Arc<V2State>>,
     Path(hash): Path<String>,
     Query(q): Query<WsQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let Some(token) = q.token.as_deref() else {
         return (StatusCode::UNAUTHORIZED, "missing token").into_response();
@@ -169,24 +170,52 @@ async fn asset_get(
     let Some(content_type) = state.assets.content_type(&hash) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     // Asset files are arbitrarily large; the read must not run on the
     // async workers (the server runtime is single-threaded).
     let assets = state.assets.clone();
-    let bytes = match tokio::task::spawn_blocking(move || assets.get(&hash)).await {
-        Ok(Some(bytes)) => bytes,
+    let body = match tokio::task::spawn_blocking(move || {
+        assets.read_for_serving(&hash, range.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(body)) => body,
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    (
-        [
-            (header::CONTENT_TYPE, content_type.to_string()),
-            (
-                header::CACHE_CONTROL,
-                "immutable, max-age=31536000".to_string(),
-            ),
-        ],
-        bytes,
-    )
-        .into_response()
+    // Every response advertises byte ranges; a satisfied window adds its
+    // Content-Range, an unsatisfiable request gets the 416 form.
+    let mut head = HeaderMap::new();
+    head.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    head.insert(
+        header::CACHE_CONTROL,
+        "immutable, max-age=31536000".parse().unwrap(),
+    );
+    head.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    match body {
+        crate::assets::AssetBody::Full(bytes) => (head, bytes).into_response(),
+        crate::assets::AssetBody::Window {
+            start,
+            end_incl,
+            total,
+            bytes,
+        } => {
+            head.insert(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end_incl}/{total}")
+                    .parse()
+                    .unwrap(),
+            );
+            (head, bytes).into_response()
+        }
+        crate::assets::AssetBody::Unsatisfiable(total) => (
+            [(header::CONTENT_RANGE, format!("bytes */{total}"))],
+            StatusCode::RANGE_NOT_SATISFIABLE,
+        )
+            .into_response(),
+    }
 }
 
 impl V2State {

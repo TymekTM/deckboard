@@ -69,6 +69,23 @@ pub async fn run_flusher(engine: Arc<StateEngine>, hub: Arc<V2Hub>, interval: Du
     }
 }
 
+/// Drops v2 sessions silent for longer than `3 * ping_interval`. The
+/// session pump answers protocol pings, so a healthy client's pongs keep
+/// `last_seen` fresh; three missed intervals mean the peer is gone
+/// without a TCP close (the queue-bounded hub also tears down peers that
+/// stop reading). Spawn once per hub with the ping interval from
+/// `V2Config`; sweeps every 30 s.
+pub async fn run_reaper(hub: Arc<V2Hub>, ping_interval: Duration) {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // interval ticks immediately the first time
+    let max_silent = 3 * ping_interval.as_millis() as u64;
+    loop {
+        tick.tick().await;
+        hub.reap_silent(max_silent);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

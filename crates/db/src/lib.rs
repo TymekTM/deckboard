@@ -150,7 +150,7 @@ impl Db {
     }
 
     pub fn get_boards(&self) -> Result<Vec<BoardRow>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, name, background, layout, image, sort, type, args, \
              COALESCE(\"order\", 0), width, height, converted \
              FROM Boards ORDER BY COALESCE(\"order\", 0), id",
@@ -162,7 +162,7 @@ impl Db {
     }
 
     pub fn get_board(&self, id: i64) -> Result<Option<BoardRow>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, name, background, layout, image, sort, type, args, \
              COALESCE(\"order\", 0), width, height, converted \
              FROM Boards WHERE id = ?1",
@@ -188,11 +188,52 @@ impl Db {
         Ok(rows)
     }
 
+    /// Every shortcut grouped by board id in one query. Whole-board reads
+    /// (`list_boards`, the v2 boards build) would otherwise issue one
+    /// SELECT per board; global rowid order preserves each board's
+    /// per-board `ORDER BY rowid` order.
+    pub fn get_buttons_grouped(&self) -> Result<std::collections::HashMap<i64, Vec<ButtonRow>>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, board_id, type, command, title, title_position, title_color, \
+             title_box_color, color, icon_color, icon_color2, border_color, shape, icon, \
+             img, img2, icon2, color2, shape2, border_color2, title_position2, \
+             title_box_color2, title_color2, position, position2, mode, x, y, w, h, options \
+             FROM Shortcuts ORDER BY rowid",
+        )?;
+        let mut grouped: std::collections::HashMap<i64, Vec<ButtonRow>> =
+            std::collections::HashMap::new();
+        let rows = stmt.query_map([], map_button_row)?;
+        for row in rows {
+            let button = row?;
+            grouped.entry(button.board_id).or_default().push(button);
+        }
+        Ok(grouped)
+    }
+
     pub fn get_button(&self, id: i64) -> Result<Option<ButtonRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, board_id, type, command, title, title_position, title_color, \
              title_box_color, color, icon_color, icon_color2, border_color, shape, icon, \
              img, img2, icon2, color2, shape2, border_color2, title_position2, \
+             title_box_color2, title_color2, position, position2, mode, x, y, w, h, options \
+             FROM Shortcuts WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], map_button_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Same row as [`Db::get_button`] with the `img`/`img2` columns left
+    /// empty. Taps and slider slides read a button per event and must not
+    /// materialize multi-MB base64 image strings; every consumer treats an
+    /// empty `img` as "no image" (see `build_tile`'s filter).
+    pub fn get_button_meta(&self, id: i64) -> Result<Option<ButtonRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, board_id, type, command, title, title_position, title_color, \
+             title_box_color, color, icon_color, icon_color2, border_color, shape, icon, \
+             '' AS img, '' AS img2, icon2, color2, shape2, border_color2, title_position2, \
              title_box_color2, title_color2, position, position2, mode, x, y, w, h, options \
              FROM Shortcuts WHERE id = ?1",
         )?;
@@ -867,6 +908,44 @@ mod tests {
     }
 
     #[test]
+    fn button_meta_matches_get_button_except_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+        let board = db.insert_board("Board", "#2c3e50", 4, 3).unwrap();
+
+        let mut row = sample_button(board, 0, 0);
+        row.img2 = Some("data:image/png;base64,BBB".into());
+        let id = db.insert_button(&row).unwrap();
+
+        // the meta read skips the image columns; every other field must be
+        // identical to the full read (interaction lookups rely on it)
+        let full = db.get_button(id).unwrap().unwrap();
+        let meta = db.get_button_meta(id).unwrap().unwrap();
+        assert_eq!(meta.img.as_deref(), Some(""));
+        assert_eq!(meta.img2.as_deref(), Some(""));
+        assert_eq!(meta.id, full.id);
+        assert_eq!(meta.board_id, full.board_id);
+        assert_eq!(meta.kind, full.kind);
+        assert_eq!(meta.command, full.command);
+        assert_eq!(meta.title, full.title);
+        assert_eq!(meta.mode, full.mode);
+        assert_eq!(meta.options, full.options);
+        assert_eq!(meta.x, full.x);
+        assert_eq!(meta.y, full.y);
+        assert_eq!(meta.w, full.w);
+        assert_eq!(meta.h, full.h);
+        assert_eq!(meta.color, full.color);
+        assert_eq!(meta.color2, full.color2);
+        assert_eq!(meta.icon, full.icon);
+        assert_eq!(meta.icon2, full.icon2);
+        assert_eq!(meta.shape, full.shape);
+        assert_eq!(meta.shape2, full.shape2);
+        assert_eq!(meta.title_position, full.title_position);
+        assert_eq!(meta.title_position2, full.title_position2);
+        assert!(db.get_button_meta(999).unwrap().is_none());
+    }
+
+    #[test]
     fn clear_board_removes_only_that_boards_buttons() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
@@ -879,6 +958,37 @@ mod tests {
         db.clear_board(board_a).unwrap();
         assert!(db.get_buttons_by_board(board_a).unwrap().is_empty());
         assert_eq!(db.get_buttons_by_board(board_b).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn grouped_buttons_match_per_board_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+        let board_a = db.insert_board("A", "#2c3e50", 4, 3).unwrap();
+        let board_b = db.insert_board("B", "#2c3e50", 4, 3).unwrap();
+        for (board, x) in [(board_a, 0), (board_a, 1), (board_b, 0)] {
+            db.insert_button(&sample_button(board, x, 0)).unwrap();
+        }
+
+        let grouped = db.get_buttons_grouped().unwrap();
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[&board_a].len(), 2);
+        assert_eq!(grouped[&board_b].len(), 1);
+        // ids and order must match the per-board query exactly
+        for board in [board_a, board_b] {
+            let per_board: Vec<_> = db
+                .get_buttons_by_board(board)
+                .unwrap()
+                .into_iter()
+                .map(|b| b.id)
+                .collect();
+            let grouped_ids: Vec<_> = grouped[&board].iter().map(|b| b.id).collect();
+            assert_eq!(per_board, grouped_ids);
+        }
+        // a board without shortcuts has no entry at all
+        db.delete_button(grouped[&board_a][0].id).unwrap();
+        db.delete_button(grouped[&board_a][1].id).unwrap();
+        assert!(!db.get_buttons_grouped().unwrap().contains_key(&board_a));
     }
 
     #[test]

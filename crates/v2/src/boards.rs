@@ -21,15 +21,21 @@ pub fn build_boards(
     assets: &AssetStore,
     engine: &StateEngine,
 ) -> Vec<Board> {
+    // one grouped read for every board's shortcuts (was: one SELECT per
+    // board on each rebuild)
+    let buttons = backend.all_buttons_by_board();
     backend
         .get_boards()
         .iter()
         .map(|board| {
-            let tiles = backend
-                .get_buttons_by_board(board.id)
-                .iter()
-                .map(|row| build_tile(row, assets, engine))
-                .collect();
+            let tiles = buttons
+                .get(&board.id)
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| build_tile(row, assets, engine))
+                        .collect()
+                })
+                .unwrap_or_default();
             Board {
                 id: board.id,
                 name: board.name.clone(),
@@ -94,21 +100,28 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
 }
 
 /// Gestures a tile declares - the same set the manifest carries, derived
-/// so the interaction handler can enforce it.
+/// so the interaction handler can enforce it. Runs per interaction event
+/// (taps, every slide tick), so it must not build the full legacy payload;
+/// only the `app` marker feeds the kind decision.
 pub fn allowed_interactions(row: &ButtonRow) -> Vec<Interaction> {
-    let legacy = Mapper::new().shortcut_payload(row);
-    widget_kind(row, &legacy).1
+    let app = Mapper::new().app_value(row);
+    widget_kind_for(row, app.as_deref()).1
 }
 
 /// Widget kind from the legacy `mode`/`app` columns: rendering modes map
 /// 1:1, custom-value buttons are toggles, everything else is a button.
 fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>) {
-    let app = legacy.get("app").and_then(Value::as_str);
+    widget_kind_for(row, legacy.get("app").and_then(Value::as_str))
+}
+
+fn widget_kind_for(row: &ButtonRow, app: Option<&str>) -> (WidgetKind, Vec<Interaction>) {
     match row.mode.as_str() {
         "slider" => (WidgetKind::Slider, vec![Interaction::Slide]),
         "knob" => (WidgetKind::Knob, vec![Interaction::Slide]),
         "graph" => (WidgetKind::Graph, vec![]),
         "list" => (WidgetKind::List, vec![]),
+        // ai dev-work display tiles: a read-only row list, no gestures
+        "status" => (WidgetKind::List, vec![]),
         _ if app == Some("custom-value") => (WidgetKind::Toggle, vec![Interaction::Tap]),
         _ => (
             WidgetKind::Button,
@@ -194,6 +207,27 @@ mod tests {
             w: 2,
             h: 1,
             options: None,
+        }
+    }
+
+    #[test]
+    fn allowed_interactions_match_the_full_mapper_derivation() {
+        // oracle: the same rows through the full legacy payload (what
+        // build_tile does) must agree with the cheap per-event path
+        for (kind, mode, command) in [
+            ("vol", "button", Some("vol_mute")),
+            ("vol", "button", Some("vol_up")),
+            ("url", "button", Some("https://example.com")),
+            ("volume", "slider", None),
+            ("ai-tokens-hour", "graph", None),
+        ] {
+            let r = row(kind, mode, command);
+            let legacy = Mapper::new().shortcut_payload(&r);
+            assert_eq!(
+                allowed_interactions(&r),
+                widget_kind(&r, &legacy).1,
+                "{kind}/{mode}/{command:?}"
+            );
         }
     }
 

@@ -1,0 +1,49 @@
+PERFORMANCE NOTES (2026-09-24 audit, commit c1e0086)
+=====================================================
+
+This crate is INTENTIONALLY LEFT NON-OPTIMIZED (owner decision, 2026-09-24).
+Optimization plans exist but were deliberately not applied. If this crate
+ever shows up in CPU profiling, the findings below are the known reasons.
+
+Known inefficiencies (all in the 15 s local poll loop, poll_secs default):
+
+1. Immutable file facts are re-derived from disk on every poll, with no
+   mtime/size-keyed caching:
+   - Claude: `agents.rs` `claude_sessions` walks EVERY project dir under
+     ~/.claude/projects with no age cutoff, stats every .jsonl, and reads +
+     JSON-parses up to 256 KB of the freshest transcript's head per dir per
+     tick (cwd and opening prompt are immutable properties of that head).
+   - Codex: `codex.rs` `sessions` does TWO separate 256 KB head reads of
+     each fresh rollout (session_meta cwd + first user message);
+     `limits()` - called on EVERY push via `plan_rows`, not just the slow
+     HTTP cadence - walks the whole sessions tree and reads + parses the
+     last 64 KB of every file <= 8 days old.
+   - The codex tree is walked three times per tick (sessions, limits,
+     local_usage scanner), each walk doing its own stat() per file.
+2. `antigravity.rs` `Usage::scan` opens EVERY conversation .db every tick
+   with no mtime cutoff (the sessions lane in the same file does filter);
+   the first poll after startup materializes all blobs of all conversations
+   at once (watermark starts at -1).
+3. `local_usage.rs` `Scanner::scan` retains its file set with an
+   O(files x live) `Vec::contains` and stats every live file twice per pass.
+4. First-sight ingest `read_to_string`s whole JSONLs from offset 0; offsets
+   live only in process memory, so every app restart re-reads and re-parses
+   up to `history_days` of transcripts in one burst. Steady state is
+   delta-only (this part is fine).
+5. The assembled payload is sent unconditionally every tick with no
+   change-detection; agent rows embed tick-varying age strings, so even the
+   v2 state engine's scalar dedup can never fire for ai-* keys.
+6. SQLite journals (zcode db.sqlite, opencode.db x2) are re-opened per
+   poll instead of keeping one read-only connection per DB in the loop state.
+7. HTTP lanes build a fresh ureq Agent (new pool + TLS session) per request
+   (`limits.rs` `http_agent`), and Antigravity port discovery spawns
+   tasklist + netstat on every HTTP refresh.
+
+The ready-to-execute fix plan (mtime-keyed caches, freshness cutoffs, one
+walk per tick) is `plans/001-aidev-mtime-caches.md` at the repo root,
+written against commit c1e0086 - re-verify excerpts before using it.
+
+Expected effect if ever applied: removes the large majority of this crate's
+steady-state CPU and allocation churn at LOW risk (append-only files make
+(mtime, size) a sound cache key; cutoffs cannot change rendered rows
+because rows older than agent_done_secs never render).

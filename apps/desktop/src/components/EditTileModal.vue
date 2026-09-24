@@ -17,10 +17,13 @@ const emit = defineEmits(["save", "create", "delete", "close"]);
 
 const isCreate = computed(() => !props.button);
 
-// editable copy: every column the dialog touches
+// editable copy: every column the dialog touches. Shallow spread, not a
+// JSON deep clone: button fields are all primitives, and the base64 img
+// strings are immutable - spreading them shares instead of duplicating
+// multi-MB payloads on every dialog open.
 const form = reactive(
   props.button
-    ? JSON.parse(JSON.stringify(props.button))
+    ? { ...props.button }
     : {
         id: null,
         board_id: props.create?.boardId ?? null,

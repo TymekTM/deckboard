@@ -25,6 +25,34 @@ const pairingOffer = ref(null); // {code, expires_in_secs, addresses} | null
 const customValues = reactive({});
 const appStates = reactive({});
 
+// While the window is hidden to tray, state pushes are buffered per app
+// and applied on the next show - writing to the reactive maps would still
+// run the whole render pipeline behind a hidden window. Sparklines simply
+// miss the hidden samples, like the original's backgrounded webview; the
+// Rust emitters keep tablet clients correct either way.
+let hidden = document.hidden;
+let pendingStatus = {}; // app -> data of pushes seen while hidden
+
+function onStatusUpdate(payload) {
+  const data = payload?.data;
+  if (!data || typeof data !== "object") return;
+  if (hidden) {
+    pendingStatus[payload.app] = { ...pendingStatus[payload.app], ...data };
+    return;
+  }
+  applyStatusUpdate(payload);
+}
+
+function onVisibilityChange() {
+  hidden = document.hidden;
+  if (hidden) return;
+  const buffered = pendingStatus;
+  pendingStatus = {};
+  for (const [app, data] of Object.entries(buffered)) {
+    applyStatusUpdate({ app, data });
+  }
+}
+
 function applyStatusUpdate(payload) {
   const data = payload?.data;
   if (!data || typeof data !== "object") return;
@@ -54,26 +82,51 @@ function applyStatusUpdate(payload) {
   }
 }
 
+// Pushed payloads are a few KB at most, so a stringify compare is the
+// simplest way to keep object identity stable for unchanged values.
+function jsonEqual(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 function mergeCustomValues(data) {
   for (const [key, value] of Object.entries(data)) {
     if (typeof value !== "object" || value === null) {
       customValues[key] = value;
-    } else if (customValues[key]?.values) {
-      // graph samples keep the last 10 readings, like the original
+    } else if (typeof value.value === "number") {
+      // graph-style payload: keep the last 10 readings for the sparkline
+      // and pass the rest through (title, suffix, per-provider rows)
       const prev = customValues[key];
-      customValues[key] = {
-        ...prev,
-        values: [...prev.values, value.value ?? 0].slice(-10),
-      };
+      if (
+        prev &&
+        Array.isArray(prev.values) &&
+        jsonEqual({ ...value, values: [] }, { ...prev, values: [] })
+      ) {
+        // same reading and meta: append the sample in place so the entry
+        // keeps its identity and only its readers re-render
+        prev.values.push(value.value);
+        if (prev.values.length > 10) prev.values.shift();
+      } else {
+        const values = [...(prev?.values ?? []), value.value].slice(-10);
+        customValues[key] = { ...value, values };
+      }
     } else {
-      const { value: sample, ...rest } = value;
-      customValues[key] = { ...rest, values: [sample ?? 0] };
+      // status displays replace their whole snapshot; sample history
+      // makes no sense for a live row list
+      if (!jsonEqual(value, customValues[key])) customValues[key] = value;
     }
   }
 }
 
 function mergeAppState(name, data) {
-  appStates[name] = { ...(appStates[name] || {}), ...data };
+  const prev = appStates[name];
+  const next = { ...(prev || {}) };
+  let changed = false;
+  for (const [k, v] of Object.entries(data)) {
+    if (prev && jsonEqual(prev[k], v)) continue;
+    next[k] = v;
+    changed = true;
+  }
+  if (changed) appStates[name] = next;
 }
 
 // type -> {icon, color, mode} fallbacks: static catalog + extensions
@@ -170,7 +223,7 @@ function boardContextMenu(board, event) {
         });
         if (ok) {
           await api.clearBoard(board.id);
-          await load();
+          await loadBoards();
         }
       },
     },
@@ -185,7 +238,7 @@ function boardContextMenu(board, event) {
         });
         if (ok) {
           await api.deleteBoard(board.id);
-          await load();
+          await loadBoards();
         }
       },
     },
@@ -210,11 +263,18 @@ const boardNames = computed(() =>
   Object.fromEntries(boards.value.map((b) => [b.id, b.name || "Untitled"]))
 );
 
-async function load() {
+// Panel data that only changes on restart or settings edits: fetched at
+// startup only, not after every tile edit (each call is an IPC round-trip
+// and listBoards ships every board with its base64 images).
+async function loadCore() {
   status.value = await api.serverStatus();
   hotkey.value = (await api.getSettings()).hotkey;
   knownInputs.value = await api.listKnownInputs();
   audioDevices.value = await api.listAudioDevices().catch(() => []);
+}
+
+// Board data: the only thing tile/board edits change.
+async function loadBoards() {
   if (status.value.dbOk) {
     boards.value = await api.listBoards();
     if (!boards.value.some((b) => b.id === currentId.value)) {
@@ -222,6 +282,11 @@ async function load() {
     }
   }
   if (touchBoardId.value === null) touchBoardId.value = currentId.value;
+}
+
+async function load() {
+  await loadCore();
+  await loadBoards();
 }
 
 // Open (or close) the server-status popover; on open, refresh the LAN
@@ -289,7 +354,7 @@ async function tileCreated(form) {
     h: form.h || 1,
   });
   createFlow.value = null;
-  await load();
+  await loadBoards();
   const tile = boards.value
     .find((b) => b.id === board.id)
     ?.buttons.find((b) => b.id === id);
@@ -311,13 +376,13 @@ async function tileMoved(tile, x, y, w, h) {
 async function tileEdited(button) {
   await api.updateButton(button);
   editingTile.value = null;
-  await load();
+  await loadBoards();
 }
 
 async function tileDeleted(tile) {
   await api.deleteButton(tile.id, tile.board_id);
   editingTile.value = null;
-  await load();
+  await loadBoards();
 }
 
 async function doExport() {
@@ -339,7 +404,7 @@ async function doImport() {
   });
   if (!path) return;
   await api.importBoards(path);
-  await load();
+  await loadBoards();
 }
 
 async function clearCurrentBoard() {
@@ -351,7 +416,7 @@ async function clearCurrentBoard() {
   });
   if (!ok) return;
   await api.clearBoard(currentBoard.value.id);
-  await load();
+  await loadBoards();
 }
 
 async function deleteCurrentBoard() {
@@ -363,7 +428,7 @@ async function deleteCurrentBoard() {
   });
   if (!ok) return;
   await api.deleteBoard(currentBoard.value.id);
-  await load();
+  await loadBoards();
 }
 
 async function saveHotkey() {
@@ -406,15 +471,17 @@ onMounted(async () => {
       touchBoardId.value = e.payload;
       if (!touchMode.value) currentId.value = e.payload;
     }),
-    await listen("app-status-update", (e) => applyStatusUpdate(e.payload))
+    await listen("app-status-update", (e) => onStatusUpdate(e.payload))
   );
   // the context menu closes on any click outside of it, or on Escape
   window.addEventListener("mousedown", onGlobalMousedown, true);
   window.addEventListener("keydown", onKeydown, true);
+  document.addEventListener("visibilitychange", onVisibilityChange);
 });
 onUnmounted(() => {
   window.removeEventListener("mousedown", onGlobalMousedown, true);
   window.removeEventListener("keydown", onKeydown, true);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
   unlisteners.forEach((f) => f());
 });
 

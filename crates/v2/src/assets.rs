@@ -15,6 +15,10 @@ pub struct AssetStore {
     dir: PathBuf,
     /// hash -> file extension, rebuilt from the directory at open.
     exts: Mutex<HashMap<String, String>>,
+    /// data-URL fingerprint -> hash. Board rebuilds re-import the same URL
+    /// strings on every generation bump; the fingerprint key (not the URL
+    /// itself) keeps multi-MB base64 strings out of memory.
+    url_hashes: Mutex<HashMap<[u8; 16], String>>,
 }
 
 impl AssetStore {
@@ -32,6 +36,7 @@ impl AssetStore {
         Ok(AssetStore {
             dir,
             exts: Mutex::new(exts),
+            url_hashes: Mutex::new(HashMap::new()),
         })
     }
 
@@ -53,7 +58,18 @@ impl AssetStore {
 
     /// `data:image/png;base64,....` -> store entry, hash returned. Returns
     /// `None` for anything that is not a base64 data URL with a mime type.
+    /// Repeated URLs (board rebuilds) hit the fingerprint cache and skip
+    /// the base64 decode + sha-256.
     pub fn import_data_url(&self, url: &str) -> Option<String> {
+        let fingerprint = url_fingerprint(url);
+        if let Some(hash) = self
+            .url_hashes
+            .lock()
+            .expect("asset store poisoned")
+            .get(&fingerprint)
+        {
+            return Some(hash.clone());
+        }
         let rest = url.strip_prefix("data:")?;
         let (head, payload) = rest.split_once(',')?;
         let mime = head.strip_suffix(";base64")?;
@@ -61,7 +77,15 @@ impl AssetStore {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(payload)
             .ok()?;
-        self.import_bytes(&bytes, ext).ok()
+        let hash = self.import_bytes(&bytes, ext).ok()?;
+        let mut urls = self.url_hashes.lock().expect("asset store poisoned");
+        // distinct images per install are far below this; the clear is a
+        // safety valve so a pathological input cannot grow the map forever
+        if urls.len() >= 512 {
+            urls.clear();
+        }
+        urls.insert(fingerprint, hash.clone());
+        Some(hash)
     }
 
     pub fn get(&self, hash: &str) -> Option<Vec<u8>> {
@@ -72,6 +96,44 @@ impl AssetStore {
             .get(hash)
             .cloned()?;
         std::fs::read(self.dir.join(format!("{hash}.{ext}"))).ok()
+    }
+
+    /// What `GET /assets/<hash>` should respond with for the given
+    /// (optional) `Range` header value.
+    pub fn read_for_serving(&self, hash: &str, range: Option<&str>) -> std::io::Result<AssetBody> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let ext = self
+            .exts
+            .lock()
+            .expect("asset store poisoned")
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "unknown hash"))?;
+        let mut file = std::fs::File::open(self.dir.join(format!("{hash}.{ext}")))?;
+        let total = file.metadata()?.len();
+        let Some(spec) = range else {
+            let mut bytes = Vec::with_capacity(total as usize);
+            file.read_to_end(&mut bytes)?;
+            return Ok(AssetBody::Full(bytes));
+        };
+        let Some((start, end_incl)) = parse_byte_range(spec, total) else {
+            return Ok(AssetBody::Unsatisfiable(total));
+        };
+        file.seek(SeekFrom::Start(start))?;
+        let take = end_incl - start + 1;
+        let mut bytes = Vec::with_capacity(take as usize);
+        file.take(take).read_to_end(&mut bytes)?;
+        if bytes.is_empty() {
+            // the file shrank between metadata and read; refuse rather
+            // than answer with a broken window
+            return Ok(AssetBody::Unsatisfiable(total));
+        }
+        Ok(AssetBody::Window {
+            start,
+            end_incl: start + bytes.len() as u64 - 1,
+            total,
+            bytes,
+        })
     }
 
     pub fn content_type(&self, hash: &str) -> Option<&'static str> {
@@ -85,9 +147,73 @@ impl AssetStore {
     }
 }
 
+/// Body shape for an asset GET (see `read_for_serving`).
+#[derive(Debug, PartialEq)]
+pub enum AssetBody {
+    Full(Vec<u8>),
+    /// Satisfied single `bytes` range, inclusive bounds.
+    Window {
+        start: u64,
+        end_incl: u64,
+        total: u64,
+        bytes: Vec<u8>,
+    },
+    /// A range header was present but no candidate range fits the file.
+    Unsatisfiable(u64),
+}
+
+/// Parses a single-range `Range: bytes=...` header against a body of
+/// `total` bytes. Returns inclusive `(start, end)`. Multi-range requests
+/// are not supported (callers pass `None` and serve the full body); a
+/// syntactically valid but out-of-bounds range yields `None` (HTTP 416).
+pub fn parse_byte_range(spec: &str, total: u64) -> Option<(u64, u64)> {
+    let rest = spec.trim().strip_prefix("bytes=")?;
+    if rest.contains(',') {
+        return None; // multi-range: ignored by design
+    }
+    let (first, last) = rest.trim().split_once('-')?;
+    if first.is_empty() {
+        // suffix form: last N bytes
+        let n: u64 = last.trim().parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        let start = total.checked_sub(n)?;
+        return Some((start, total - 1));
+    }
+    let start: u64 = first.trim().parse().ok()?;
+    if start >= total {
+        return None;
+    }
+    let end = if last.trim().is_empty() {
+        total - 1
+    } else {
+        last.trim().parse::<u64>().ok()?.min(total - 1)
+    };
+    (end >= start).then_some((start, end))
+}
+
 /// sha-256 hex of stored assets; the route only serves these.
 pub fn is_valid_hash(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 128-bit fingerprint of a data URL: two independently seeded SipHash
+/// passes, used as the memo key so the multi-MB URL strings themselves
+/// never live in the cache. Deterministic within a process run, which is
+/// all the in-memory cache needs.
+fn url_fingerprint(url: &str) -> [u8; 16] {
+    use std::hash::{Hash, Hasher};
+    fn seeded(seed: u64, url: &str) -> [u8; 8] {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        seed.hash(&mut h);
+        url.hash(&mut h);
+        h.finish().to_be_bytes()
+    }
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&seeded(1, url));
+    out[8..].copy_from_slice(&seeded(2, url));
+    out
 }
 
 fn split_stem(file_name: &str) -> Option<(&str, &str)> {
@@ -177,6 +303,35 @@ mod tests {
     }
 
     #[test]
+    fn repeated_data_urls_hit_the_fingerprint_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AssetStore::open(dir.path().to_path_buf()).unwrap();
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(b"cache-me")
+        );
+        let hash = store.import_data_url(&url).unwrap();
+        // a garbage data URL cannot collide into the cached entry: the
+        // cache only ever holds successfully imported URLs
+        let garbage = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(b"other")
+        );
+        let _ = store.import_data_url(&garbage).unwrap();
+        assert_eq!(store.url_hashes.lock().unwrap().len(), 2);
+        // same URL again: same hash, no new cache entry, no decode work
+        assert_eq!(store.import_data_url(&url).unwrap(), hash);
+        assert_eq!(store.url_hashes.lock().unwrap().len(), 2);
+        // a URL that fails to import (bad mime) must not poison the cache
+        assert!(store.import_data_url("data:image/tiff;base64,Zm9v").is_none());
+        assert!(!store
+            .url_hashes
+            .lock()
+            .unwrap()
+            .contains_key(&url_fingerprint("data:image/tiff;base64,Zm9v")));
+    }
+
+    #[test]
     fn store_rebuilds_index_from_disk() {
         let dir = tempfile::tempdir().unwrap();
         {
@@ -187,5 +342,51 @@ mod tests {
         let hash = hex::encode(Sha256::digest(b"persist"));
         assert_eq!(reopened.get(&hash).unwrap(), b"persist");
         assert_eq!(reopened.content_type(&hash), Some("image/webp"));
+    }
+
+    #[test]
+    fn byte_range_parser_covers_the_header_forms() {
+        // "0123456789" (10 bytes)
+        assert_eq!(parse_byte_range("bytes=0-3", 10), Some((0, 3)));
+        assert_eq!(parse_byte_range("bytes=4-", 10), Some((4, 9)));
+        assert_eq!(parse_byte_range("bytes=-3", 10), Some((7, 9)));
+        // end past the body clamps to the last byte
+        assert_eq!(parse_byte_range("bytes=8-99", 10), Some((8, 9)));
+        // unsatisfiable / invalid forms
+        assert_eq!(parse_byte_range("bytes=10-", 10), None);
+        assert_eq!(parse_byte_range("bytes=-0", 10), None);
+        assert_eq!(parse_byte_range("bytes=5-2", 10), None);
+        assert_eq!(parse_byte_range("items=0-1", 10), None);
+        assert_eq!(parse_byte_range("bytes=0-1,3-4", 10), None); // multi-range: ignored
+    }
+
+    #[test]
+    fn read_for_serving_honors_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AssetStore::open(dir.path().to_path_buf()).unwrap();
+        let hash = store.import_bytes(b"0123456789", "png").unwrap();
+
+        let body = store.read_for_serving(&hash, None).unwrap();
+        assert_eq!(body, AssetBody::Full(b"0123456789".to_vec()));
+
+        match store.read_for_serving(&hash, Some("bytes=2-4")).unwrap() {
+            AssetBody::Window {
+                start,
+                end_incl,
+                total,
+                bytes,
+            } => {
+                assert_eq!((start, end_incl, total), (2, 4, 10));
+                assert_eq!(bytes, b"234");
+            }
+            other => panic!("expected a window, got {other:?}"),
+        }
+
+        match store.read_for_serving(&hash, Some("bytes=99-")).unwrap() {
+            AssetBody::Unsatisfiable(total) => assert_eq!(total, 10),
+            other => panic!("expected 416, got {other:?}"),
+        }
+
+        assert!(store.read_for_serving(&"0".repeat(64), None).is_err());
     }
 }

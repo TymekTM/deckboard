@@ -61,6 +61,7 @@ pub fn run() {
     if dirs::home_dir().is_some() {
         let log_dir = pulpit_db::data_dir().join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
+        prune_old_logs(&log_dir, "pulpit-desktop.log", 14);
         let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
             log_dir,
             "pulpit-desktop.log",
@@ -92,15 +93,19 @@ pub fn run() {
     // lifetime, so the owner is intentionally never dropped.
     std::mem::forget(runtime);
 
-    tauri::Builder::default()
-        // Must be the first plugin: a second launch would fight this instance
-        // for port 8500 and the SQLite file, so it only surfaces the window.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+    // Must be the first plugin: a second launch would fight this instance
+    // for port 8500 and the SQLite file, so it only surfaces the window.
+    // `PULPIT_NO_SINGLE_INSTANCE=1` opts out (profiling side-by-side
+    // builds against a copied database).
+    let builder = tauri::Builder::default();
+    let builder = if std::env::var_os("PULPIT_NO_SINGLE_INSTANCE").is_none() {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
         }))
+    } else {
+        builder
+    };
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -113,6 +118,10 @@ pub fn run() {
             // stays in charge of the real exit.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                HIDDEN_SINCE.store(
+                    pulpit_v2::unix_millis(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 let _ = window.hide();
             }
         })
@@ -122,6 +131,7 @@ pub fn run() {
 
             build_tray(app.handle())?;
             create_main_window(app.handle())?;
+            spawn_webview_teardown(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -149,8 +159,46 @@ pub fn run() {
             export_boards,
             import_boards,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // The idle sweep destroys the hidden WebView, which leaves the
+            // process window-less for a while; the default reaction to that
+            // (exit) would kill the server and the tray. Only an explicit
+            // exit carries a code - the tray's Quit Deckboard.
+            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+                api.prevent_exit();
+            }
+        });
+}
+
+/// Delete rotated log files older than `keep_days` (by modification
+/// time). Daily rotation with no cap grows forever; the app is a 24/7
+/// tray resident, so this runs once per launch. Best-effort: a failed
+/// delete only skips the file.
+fn prune_old_logs(log_dir: &std::path::Path, prefix: &str, keep_days: u64) {
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(keep_days * 86_400));
+    let Some(cutoff) = cutoff else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(prefix) || name == prefix {
+            continue; // only rotated files (prefix.<date>), not today's
+        }
+        let ok = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|modified| modified < cutoff)
+            .unwrap_or(false);
+        if ok {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                tracing::debug!(file = %name, error = %e, "could not prune old log");
+            }
+        }
+    }
 }
 
 /// Register one button-style source (extension input, Voicemeeter or
@@ -293,6 +341,25 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             v2.config.patch_interval,
         ));
     }
+    // Extension timers stretch to IDLE_TICK_FLOOR while no client is
+    // watching (see ExtManager::set_activity); keep the count current.
+    {
+        let ext = ext_manager.clone();
+        let hub = hub.clone();
+        let v2_hub = v2.as_ref().map(|v2| v2.hub.clone());
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let mut clients = hub.len().await;
+                if let Some(v2_hub) = &v2_hub {
+                    clients += v2_hub.count();
+                }
+                ext.set_activity(clients);
+            }
+        });
+    }
     // Extension pushes feed both protocols: the legacy app_status_update
     // broadcast (stock client) and one v2 channel per data key.
     fn feed_ext(engine: &pulpit_v2::StateEngine, data: &serde_json::Value) {
@@ -301,6 +368,23 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 engine.set(&format!("ext.{key}"), value.clone());
             }
         }
+    }
+
+    // Emit to the editor WebView only when its window can be seen: a
+    // tray-hidden window cannot render pushes, and every emit is an IPC
+    // round-trip with a second serialization of the payload. Tablets ride
+    // the hub broadcasts and are unaffected. Periodic lanes re-deliver on
+    // their next tick; change-gated callers must NOT advance their gate
+    // when this returns false, or the shown window keeps a stale value.
+    fn emit_if_visible(app: &AppHandle, event: &str, payload: &serde_json::Value) -> bool {
+        let visible = app
+            .get_webview_window("main")
+            .map(|w| w.is_visible().unwrap_or(false))
+            .unwrap_or(false);
+        if visible {
+            let _ = app.emit(event, payload);
+        }
+        visible
     }
 
     // extensions push custom values -> app_status_update, like the original
@@ -315,7 +399,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
                 hub.broadcast("app_status_update", Some(&payload.to_string()))
                     .await;
-                let _ = app.emit("app-status-update", &payload);
+                emit_if_visible(&app, "app-status-update", &payload);
             }
         });
     }
@@ -337,7 +421,45 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
                 hub.broadcast("app_status_update", Some(&payload.to_string()))
                     .await;
-                let _ = app.emit("app-status-update", &payload);
+                emit_if_visible(&app, "app-status-update", &payload);
+            }
+        });
+    }
+
+    // native AI dev-work source: declarations style the ai-* display tiles
+    // (plan limits, agent progress), and its poll loop feeds both protocols
+    // from local transcripts, agent sessions and configured plan APIs.
+    for (value, icon, color, mode) in pulpit_aidev::input_declarations() {
+        register_ext_input(value, Some(icon), Some(color), "fas", Some(mode), None);
+    }
+    {
+        // PULPIT_AIDEV_CONFIG overrides the aidev config location
+        // (profiling / hermetic runs), like PULPIT_DB for the database
+        let aidev_config = std::env::var_os("PULPIT_AIDEV_CONFIG")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("aidev.json"));
+        // the transcript sources live in the real user home, not the
+        // pulpitApp data dir
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let paths = pulpit_aidev::Paths {
+            config: aidev_config,
+            zcode_cli: home.join(".zcode").join("cli"),
+            claude_projects: home.join(".claude").join("projects"),
+            codex_sessions: home.join(".codex").join("sessions"),
+            opencode_db: home.join(".local").join("share").join("opencode").join("opencode.db"),
+            antigravity_conversations: home.join(".gemini").join("antigravity").join("conversations"),
+        };
+        let mut aidev_values = pulpit_aidev::spawn_push(paths);
+        let hub = hub.clone();
+        let app = app.clone();
+        let feed_v2 = feed_v2.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(data) = aidev_values.recv().await {
+                feed_ext(&feed_v2, &data);
+                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
+                hub.broadcast("app_status_update", Some(&payload.to_string()))
+                    .await;
+                emit_if_visible(&app, "app-status-update", &payload);
             }
         });
     }
@@ -345,7 +467,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // master audio status watcher: the original polls every 5 s and pushes
     // speaker-volume/speaker-muted; that is what flips mute tiles live.
     // The active output device rides along (THIRD_PARTY_APP, like the
-    // original) but only when it changed, so tablets are not spammed.
+    // original) but is read only every 6th cycle (~30 s, like the headless
+    // server) and pushed only when it changed, so tablets are not spammed.
+    // Volume/mute likewise broadcast only on change: the v2 engine dedupes
+    // anyway, the legacy lane and the WebView do not.
     {
         let hub = hub.clone();
         let app = app.clone();
@@ -355,16 +480,20 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut last_device: Option<String> = None;
+            let mut last_level: Option<f32> = None;
+            let mut last_muted: Option<bool> = None;
+            let mut tick: u32 = 0;
             loop {
+                tick = tick.wrapping_add(1);
+                let want_device = tick.is_multiple_of(6);
                 interval.tick().await;
                 // Speaker COM calls block; keep them off the runtime
                 // workers. The shared SqlBackend owns the lazy speaker
                 // instance, so exec switches and watcher reads agree.
+                // `speaker_snapshot` builds ONE COM chain for all values.
                 let snapshot_backend = backend.clone();
                 let snapshot = tauri::async_runtime::spawn_blocking(move || {
-                    let (volume, muted) = snapshot_backend.speaker_status();
-                    let device = snapshot_backend.speaker_device_id();
-                    (volume, muted, device)
+                    snapshot_backend.speaker_snapshot(want_device)
                 })
                 .await
                 .ok();
@@ -373,17 +502,23 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                     let level = (volume / 100.0 * 1000.0).round() / 1000.0;
                     feed_v2.set("speaker-volume", serde_json::json!(level));
                     feed_v2.set("speaker-muted", serde_json::json!(muted));
-                    let payload = serde_json::json!({
-                        "app": "APP_CUSTOM_VALUE",
-                        "data": {"speaker-volume": level, "speaker-muted": muted},
-                    });
-                    hub.broadcast("app_status_update", Some(&payload.to_string()))
-                        .await;
-                    let _ = app.emit("app-status-update", &payload);
+                    if last_level != Some(level) || last_muted != Some(muted) {
+                        let payload = serde_json::json!({
+                            "app": "APP_CUSTOM_VALUE",
+                            "data": {"speaker-volume": level, "speaker-muted": muted},
+                        });
+                        hub.broadcast("app_status_update", Some(&payload.to_string()))
+                            .await;
+                        // advance the gate only once the WebView got it; a
+                        // hidden window retries on the next tick (<= 5 s)
+                        if emit_if_visible(&app, "app-status-update", &payload) {
+                            last_level = Some(level);
+                            last_muted = Some(muted);
+                        }
+                    }
                 }
                 if let Some((_, _, Some(id))) = snapshot {
                     if last_device.as_deref() != Some(id.as_str()) {
-                        last_device = Some(id.clone());
                         feed_v2.set("speaker-device", serde_json::json!(id));
                         let payload = serde_json::json!({
                             "app": "THIRD_PARTY_APP",
@@ -391,7 +526,9 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                         });
                         hub.broadcast("app_status_update", Some(&payload.to_string()))
                             .await;
-                        let _ = app.emit("app-status-update", &payload);
+                        if emit_if_visible(&app, "app-status-update", &payload) {
+                            last_device = Some(id.clone());
+                        }
                     }
                 }
             }
@@ -408,6 +545,9 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         Some(v2) => pulpit_legacy::router(state.clone()).merge(pulpit_v2::router(v2.clone())),
         None => pulpit_legacy::router(state.clone()),
     };
+    let v2_reaper = v2
+        .as_ref()
+        .map(|v2| (v2.hub.clone(), v2.config.ping_interval));
     tauri::async_runtime::spawn(async move {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
         // A busy port must not cost the whole session: a leftover instance
@@ -431,6 +571,11 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 hub_reaper.reap(75).await;
             }
         });
+        if let Some((v2_hub, ping_interval)) = v2_reaper {
+            // v2: three missed pongs mean the peer is gone without a TCP
+            // close (see pulpit_v2::run_reaper)
+            tauri::async_runtime::spawn(pulpit_v2::run_reaper(v2_hub, ping_interval));
+        }
         if let Err(e) = axum::serve(
             listener,
             app_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -461,6 +606,83 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
 }
 
 // ---- tray + hotkey ---------------------------------------------------------
+
+/// Unix millis of the moment the main window was hidden; 0 means visible
+/// or not created. The teardown sweep below reads it.
+static HIDDEN_SINCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long the window may stay tray-hidden before its WebView is torn
+/// down. The WebView2 process tree costs ~60-150 MB resident around the
+/// clock; the embedded server, tray and tablets are unaffected. Showing
+/// the window again rebuilds the UI from scratch (the Vue app refetches
+/// everything on mount). `PULPIT_WEBVIEW_TEARDOWN_SECS` overrides the
+/// threshold (profiling / tests).
+fn webview_teardown_after() -> std::time::Duration {
+    std::env::var("PULPIT_WEBVIEW_TEARDOWN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(10 * 60))
+}
+
+/// Sweep: destroy the WebView once the window has been hidden longer
+/// than `WEBVIEW_TEARDOWN_AFTER`. Runs on the 30 s loop; the window is
+/// recreated by whatever shows it next (tray, second launch).
+fn spawn_webview_teardown(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let hidden_at = HIDDEN_SINCE.load(std::sync::atomic::Ordering::Relaxed);
+            if hidden_at == 0 {
+                continue;
+            }
+            let hidden_for = pulpit_v2::unix_millis().saturating_sub(hidden_at);
+            if hidden_for < webview_teardown_after().as_millis() as u64 {
+                continue;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                match window.is_visible() {
+                    Ok(false) => {
+                        tracing::info!(
+                            hidden_for_secs = hidden_for / 1000,
+                            "window hidden too long - tearing the WebView down"
+                        );
+                        HIDDEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
+                        let _ = window.destroy();
+                    }
+                    Ok(true) => {
+                        // raced a manual show; the flag is stale
+                        HIDDEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(_) => {}
+                }
+            } else {
+                HIDDEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+/// Show (or rebuild) the main window and clear the hidden flag.
+fn show_main_window(app: &AppHandle) {
+    HIDDEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
+    match app.get_webview_window("main") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        // torn down by the idle sweep: rebuild; the fresh Vue app
+        // refetches boards, settings and live state on mount
+        None => {
+            tracing::info!("rebuilding the main window WebView");
+            if let Err(e) = create_main_window(app) {
+                tracing::error!("could not rebuild the main window: {e}");
+            }
+        }
+    }
+}
 
 /// The main window is built here instead of `tauri.conf.json` because the
 /// WebView2 argument list is only reachable through the builder API, and a
@@ -537,11 +759,16 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
+            HIDDEN_SINCE.store(
+                pulpit_v2::unix_millis(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let _ = window.hide();
         } else {
-            let _ = window.show();
-            let _ = window.set_focus();
+            show_main_window(app);
         }
+    } else {
+        show_main_window(app);
     }
 }
 
@@ -825,12 +1052,15 @@ fn pairing_shape(ip: &str, port: u16, code: &str) -> String {
 async fn list_boards(state: State<'_, DesktopState>) -> Result<Vec<BoardWithButtons>, String> {
     let backend = state.backend()?;
     tauri::async_runtime::spawn_blocking(move || {
-        let boards = backend.get_boards();
-        Ok(boards
+        // one grouped query for every board's shortcuts (was: one SELECT
+        // per board); boards with no shortcuts get an empty vec
+        let buttons = backend.all_buttons_by_board();
+        Ok(backend
+            .get_boards()
             .into_iter()
-            .map(|board| {
-                let buttons = backend.get_buttons_by_board(board.id);
-                BoardWithButtons { board, buttons }
+            .map(|board| BoardWithButtons {
+                buttons: buttons.get(&board.id).cloned().unwrap_or_default(),
+                board,
             })
             .collect())
     })

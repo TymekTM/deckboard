@@ -113,10 +113,21 @@ async fn main() -> anyhow::Result<()> {
         value: "url-to-call".into(),
         icon: Some("link".into()),
         color: Some("#ff29df".into()),
-        font_icon: Some("fas".into()),
+        font_icon: Some("fas".to_string()),
         mode: None,
         command: None,
     });
+    // Native AI dev-work display tiles (plan limits, agent progress).
+    for (value, icon, color, mode) in pulpit_aidev::input_declarations() {
+        pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
+            value: value.to_string(),
+            icon: Some(icon.to_string()),
+            color: Some(color.to_string()),
+            font_icon: Some("fas".to_string()),
+            mode: Some(mode.to_string()),
+            command: None,
+        });
+    }
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -205,6 +216,34 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Native AI dev-work source: plan limits + agent progress, same channel.
+    // PULPIT_AIDEV_CONFIG overrides the config location (hermetic runs).
+    let aidev_config = std::env::var_os("PULPIT_AIDEV_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("aidev.json"));
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let aidev_paths = pulpit_aidev::Paths {
+        config: aidev_config,
+        zcode_cli: home.join(".zcode/cli"),
+        claude_projects: home.join(".claude/projects"),
+        codex_sessions: home.join(".codex/sessions"),
+        opencode_db: home.join(".local/share/opencode/opencode.db"),
+        antigravity_conversations: home.join(".gemini/antigravity/conversations"),
+    };
+    let mut aidev_values = pulpit_aidev::spawn_push(aidev_paths);
+    let feed = feed_v2.clone();
+    let hub_legacy = state.hub.clone();
+    tokio::spawn(async move {
+        while let Some(data) = aidev_values.recv().await {
+            feed(data.clone());
+            let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
+            let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+            hub_legacy
+                .broadcast("app_status_update", Some(&payload))
+                .await;
+        }
+    });
+
     // M2 speaker watcher: master volume + mute every 5s, default device
     // id every 6th cycle (30s) - the original speaker service cadence.
     {
@@ -220,15 +259,8 @@ async fn main() -> anyhow::Result<()> {
                 let backend = backend.clone();
                 // the original fetched the device id on the first fetch
                 // and every 6th cycle after that
-                let with_device = cycle == 1;
                 let snapshot = tokio::task::spawn_blocking(move || {
-                    let (volume, muted) = backend.speaker_status();
-                    let device = if with_device {
-                        backend.speaker_device_id()
-                    } else {
-                        None
-                    };
-                    (volume, muted, device)
+                    backend.speaker_snapshot(cycle == 1)
                 })
                 .await
                 .ok();
@@ -277,6 +309,29 @@ async fn main() -> anyhow::Result<()> {
             hub.reap(75).await;
         }
     });
+    // v2: same sweep for the typed protocol - three missed pongs mean the
+    // peer is gone without a TCP close (see pulpit_v2::run_reaper).
+    tokio::spawn(pulpit_v2::run_reaper(
+        v2.hub.clone(),
+        v2.config.ping_interval,
+    ));
+
+    // Extension timers stretch to IDLE_TICK_FLOOR while no client is
+    // watching (see ExtManager::set_activity); keep the count current.
+    {
+        let ext = ext_manager.clone();
+        let hub = state.hub.clone();
+        let v2_hub = v2.hub.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let clients = hub.len().await + v2_hub.count();
+                ext.set_activity(clients);
+            }
+        });
+    }
 
     // ConnectInfo is needed by the loopback guard on POST /v2/pair.
     let app = pulpit_legacy::router(state).merge(pulpit_v2::router(v2));

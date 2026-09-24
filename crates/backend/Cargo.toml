@@ -17,6 +17,7 @@ pulpit-vm = { path = "../vm" }
 pulpit-discord = { path = "../discord" }
 pulpit-os = { path = "../os" }
 pulpit-sysinfo = { path = "../sysinfo" }
+pulpit-aidev = { path = "../aidev" }
 ureq = "3"
 
 [dev-dependencies]

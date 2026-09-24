@@ -37,6 +37,9 @@ pub struct SqlBackend {
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
     speaker: Mutex<Option<Box<dyn pulpit_os::Speaker>>>,
+    /// Pooled HTTP client for fire-and-forget tiles; shared so repeat
+    /// calls reuse connections instead of paying TLS setup per press.
+    http_agent: ureq::Agent,
 }
 
 impl SqlBackend {
@@ -50,6 +53,10 @@ impl SqlBackend {
             discord_settings_path: None,
             discord_client: Mutex::new(None),
             speaker: Mutex::new(None),
+            http_agent: ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(10)))
+                .build()
+                .new_agent(),
         }
     }
 
@@ -219,6 +226,13 @@ impl Backend for SqlBackend {
         SqlBackend::speaker_device_id(self)
     }
 
+    fn speaker_snapshot(
+        &self,
+        want_device: bool,
+    ) -> (Option<f32>, Option<bool>, Option<String>) {
+        SqlBackend::speaker_snapshot(self, want_device)
+    }
+
     fn get_boards(&self) -> Vec<BoardRow> {
         match self.db.lock().unwrap().get_boards() {
             Ok(boards) => boards,
@@ -249,11 +263,31 @@ impl Backend for SqlBackend {
         }
     }
 
+    fn all_buttons_by_board(&self) -> std::collections::HashMap<i64, Vec<ButtonRow>> {
+        match self.db.lock().unwrap().get_buttons_grouped() {
+            Ok(grouped) => grouped,
+            Err(e) => {
+                tracing::error!("get_buttons_grouped failed: {e}");
+                std::collections::HashMap::new()
+            }
+        }
+    }
+
     fn get_button(&self, id: i64) -> Option<ButtonRow> {
         match self.db.lock().unwrap().get_button(id) {
             Ok(button) => button,
             Err(e) => {
                 tracing::error!("get_button({id}) failed: {e}");
+                None
+            }
+        }
+    }
+
+    fn get_button_meta(&self, id: i64) -> Option<ButtonRow> {
+        match self.db.lock().unwrap().get_button_meta(id) {
+            Ok(button) => button,
+            Err(e) => {
+                tracing::error!("get_button_meta({id}) failed: {e}");
                 None
             }
         }
@@ -274,6 +308,7 @@ impl Backend for SqlBackend {
         if !is_tap_start
             && (self.exec_extension(&cmd, None)
                 || self.exec_sysinfo(&cmd)
+                || self.exec_aidev(&cmd)
                 || self.exec_callurl(&cmd)
                 || self.exec_voicemeeter(&cmd, None)
                 || self.exec_discord(&cmd, sink)
@@ -296,6 +331,7 @@ impl Backend for SqlBackend {
         );
         if self.exec_extension(&cmd, Some(value))
             || self.exec_sysinfo(&cmd)
+            || self.exec_aidev(&cmd)
             || self.exec_callurl(&cmd)
             || self.exec_voicemeeter(&cmd, Some(value))
             || self.exec_speaker_volume(&cmd, value)
@@ -351,6 +387,17 @@ impl SqlBackend {
         true
     }
 
+    /// Native AI dev-work display tiles (plan limits, agent progress):
+    /// presses are claimed as no-ops so display tiles never fall through
+    /// to the macro dispatcher.
+    fn exec_aidev(&self, cmd: &pulpit_actions::Command) -> bool {
+        if !pulpit_aidev::is_aidev_action(&cmd.kind) {
+            return false;
+        }
+        pulpit_aidev::execute(&cmd.kind);
+        true
+    }
+
     /// Native url-to-call: a fire-and-forget GET, exactly what the JS
     /// package's `fetch(args.urlToCall)` did (response ignored).
     fn exec_callurl(&self, cmd: &pulpit_actions::Command) -> bool {
@@ -368,11 +415,7 @@ impl SqlBackend {
             });
         match url {
             Some(url) => {
-                let agent = ureq::Agent::config_builder()
-                    .timeout_global(Some(std::time::Duration::from_secs(10)))
-                    .build()
-                    .new_agent();
-                if let Err(e) = agent.get(&url).call() {
+                if let Err(e) = self.http_agent.get(&url).call() {
                     tracing::warn!(url = %url, error = %e, "url-to-call failed");
                 }
             }
@@ -461,6 +504,19 @@ impl SqlBackend {
     pub fn speaker_status(&self) -> (Option<f32>, Option<bool>) {
         self.with_speaker(|sp| (sp.volume().ok(), sp.muted().ok()))
             .unwrap_or((None, None))
+    }
+
+    /// Watcher snapshot in one COM pass: volume, mute and (optionally)
+    /// the default device id. The per-tick loops use this instead of the
+    /// three separate getters.
+    pub fn speaker_snapshot(
+        &self,
+        want_device: bool,
+    ) -> (Option<f32>, Option<bool>, Option<String>) {
+        self.with_speaker(|sp| sp.status(want_device).ok())
+            .flatten()
+            .map(|(volume, muted, device)| (Some(volume), Some(muted), device))
+            .unwrap_or((None, None, None))
     }
 
     pub fn speaker_device_id(&self) -> Option<String> {
