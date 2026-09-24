@@ -1,8 +1,10 @@
 # ROADMAP
 
-Rust rewrite of Deckboard: desktop core (Tauri 2 + Vue 3, M3+) with a
-Kotlin/Compose Android client (M4+), keeping the stock Android app working
-through a legacy compatibility layer until the new client ships.
+Pulpit: a Rust desktop core (Tauri 2 + Vue 3, M3+) with a Kotlin/Compose
+Android client (M4+), keeping the stock Deckboard Android app working
+through a legacy compatibility layer until the new client ships. Started
+as a Rust rewrite of Deckboard 3.x; owns its identity and data directory
+(`~/pulpitApp`) since the 2026-09-24 rebrand (ADR-011).
 
 ## Milestones
 
@@ -11,10 +13,10 @@ through a legacy compatibility layer until the new client ships.
       dispatching `exec_shortcut`/`exec_slider` for the system-level command
       subset. Acceptance: stock Deckboard Pro client connects over QR and
       renders boards.
-- [x] **M1 - proto v2**: typed schema in `deckboard-proto` (envelope, widget
+- [x] **M1 - proto v2**: typed schema in `pulpit-proto` (envelope, widget
       manifests, all messages) with ts-rs TypeScript bindings
       (`crates/proto/bindings/`) and golden JSON fixtures parsed by both the
-      Rust tests and a Kotlin unit test. Transport in `deckboard-v2`:
+      Rust tests and a Kotlin unit test. Transport in `pulpit-v2`:
       raw WebSocket `/v2/ws` on the shared port, one-time pairing codes
       (`POST /v2/pair`) + per-device tokens (`~/deckboard/devices.json`),
       `hello`/`welcome` with the live channel catalog, `boards.sync` +
@@ -27,7 +29,7 @@ through a legacy compatibility layer until the new client ships.
       and default-device switching via WASAPI + IPolicyConfig (no
       PowerShell dependency, unlike the original), `speaker-device` /
       `speaker-volume` commands live, screenshot as
-      `Deckboard_<UTC stamp>.png` (same-second captures get a `_N`
+      `Pulpit_<UTC stamp>.png` (same-second captures get a `_N`
       suffix instead of overwriting), `type` via clipboard paste with
       restore (unicode-safe). Status watcher pushes volume + mute every
       5 s and the device id every 30 s (the original's real cadence)
@@ -36,7 +38,7 @@ through a legacy compatibility layer until the new client ships.
       references in its bundle). Merge notes (2026-09-21): the desktop
       editor's watcher pushes the device on every detected change
       (5 s poll) instead of a fixed 30 s cadence; `play` (local audio
-      file via MCI, restart on press) lives in `deckboard-os` and the
+      file via MCI, restart on press) lives in `pulpit-os` and the
       shared `SqlBackend`; the switch survives COM-apartment teardown
       (`CoInitializeEx` S_FALSE means a pre-existing MTA we must not
       `CoUninitialize`). Linux support: the `Speaker` trait is
@@ -82,9 +84,15 @@ through a legacy compatibility layer until the new client ships.
   stock Android client, Free and Pro). Custom grids / web widgets / media
   come after MVP ships.
 - **Twitter removed** everywhere (commands, services, OAuth route).
+- **Rebrand to Pulpit (2026-09-24)**: own product name and data directory
+      instead of living in Deckboard's shadow. Data is copied, not moved:
+      `~/deckboard` stays intact for the original app, and every
+      wire-visible string the stock client or original extensions depend
+      on (protocol payloads, extension ids, settings keys) keeps the old
+      name. ADR-011.
 - **Single port 8500** for both protocols: legacy lives at
       `/socket.io/?EIO=3...`, protocol v2 at `/v2/ws` (plain WebSocket, JSON
-      frames, see `deckboard-proto`). The temporary 8501 split ended on
+      frames, see `pulpit-proto`). The temporary 8501 split ended on
       2026-09-22: the original desktop app was retired from daily use (its
       `deckboard.bat` autostart removed), 8500 is the default again, and the
       desktop editor is the daily driver (single instance, logs in
@@ -94,7 +102,7 @@ through a legacy compatibility layer until the new client ships.
   the client decodes natively (H.264/VP9 in WebView/Media3).
 - **Web widget foundation without full implementation**: the manifest
   schema (`WidgetKind::Web`, `web_package`, interactions, state refs) is
-  defined and versioned in `deckboard-proto` now, so boards authored later
+  defined and versioned in `pulpit-proto` now, so boards authored later
   never need a storage migration. The WebView runtime itself lands in M6.
 
 ## Testing

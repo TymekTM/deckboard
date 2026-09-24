@@ -2,7 +2,7 @@
 //! crates/legacy/src/mapping.rs - field names are contractual; the stock
 //! Android client renders exactly these).
 
-package app.deckboard.mobile.proto
+package app.pulpit.mobile.proto
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable

@@ -103,7 +103,7 @@ fn send(
         tracing::debug!("sysinfo push channel closed, stopping");
         return;
     }
-    tracing::debug!(target: "deckboard_sysinfo", load = load_pct, "pushed system-info values");
+    tracing::debug!(target: "pulpit_sysinfo", load = load_pct, "pushed system-info values");
 }
 
 // ------------------------------------------------------------ CPU sampling

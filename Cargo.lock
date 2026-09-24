@@ -1057,214 +1057,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deckboard-actions"
-version = "0.1.0"
-dependencies = [
- "deckboard-os",
- "enigo",
- "open",
- "serde_json",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "deckboard-backend"
-version = "0.1.0"
-dependencies = [
- "deckboard-actions",
- "deckboard-db",
- "deckboard-discord",
- "deckboard-ext",
- "deckboard-legacy",
- "deckboard-os",
- "deckboard-sysinfo",
- "deckboard-vm",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "ureq",
-]
-
-[[package]]
-name = "deckboard-db"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "deckboard-desktop"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "deckboard-actions",
- "deckboard-backend",
- "deckboard-db",
- "deckboard-discord",
- "deckboard-ext",
- "deckboard-legacy",
- "deckboard-proto",
- "deckboard-sysinfo",
- "deckboard-v2",
- "deckboard-vm",
- "dirs 5.0.1",
- "if-addrs",
- "qrcode",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-single-instance",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "deckboard-discord"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "ureq",
-]
-
-[[package]]
-name = "deckboard-ext"
-version = "0.1.0"
-dependencies = [
- "boa_engine",
- "dirs 5.0.1",
- "open",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "ureq",
-]
-
-[[package]]
-name = "deckboard-legacy"
-version = "0.1.0"
-dependencies = [
- "axum",
- "deckboard-actions",
- "deckboard-db",
- "futures-util",
- "rand 0.8.8",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tracing",
-]
-
-[[package]]
-name = "deckboard-os"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "image",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "windows 0.58.0",
-]
-
-[[package]]
-name = "deckboard-proto"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "ts-rs",
-]
-
-[[package]]
-name = "deckboard-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "deckboard-actions",
- "deckboard-backend",
- "deckboard-db",
- "deckboard-discord",
- "deckboard-ext",
- "deckboard-legacy",
- "deckboard-os",
- "deckboard-proto",
- "deckboard-sysinfo",
- "deckboard-v2",
- "deckboard-vm",
- "dirs 5.0.1",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "ureq",
-]
-
-[[package]]
-name = "deckboard-sysinfo"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "deckboard-v2"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64 0.23.1",
- "deckboard-actions",
- "deckboard-db",
- "deckboard-legacy",
- "deckboard-proto",
- "futures-util",
- "hex",
- "rand 0.8.8",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tracing",
-]
-
-[[package]]
-name = "deckboard-vm"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3783,6 +3575,214 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "pulpit-actions"
+version = "0.1.0"
+dependencies = [
+ "enigo",
+ "open",
+ "pulpit-os",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "pulpit-backend"
+version = "0.1.0"
+dependencies = [
+ "pulpit-actions",
+ "pulpit-db",
+ "pulpit-discord",
+ "pulpit-ext",
+ "pulpit-legacy",
+ "pulpit-os",
+ "pulpit-sysinfo",
+ "pulpit-vm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
+name = "pulpit-db"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "pulpit-desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "dirs 5.0.1",
+ "if-addrs",
+ "pulpit-actions",
+ "pulpit-backend",
+ "pulpit-db",
+ "pulpit-discord",
+ "pulpit-ext",
+ "pulpit-legacy",
+ "pulpit-proto",
+ "pulpit-sysinfo",
+ "pulpit-v2",
+ "pulpit-vm",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-single-instance",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pulpit-discord"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
+name = "pulpit-ext"
+version = "0.1.0"
+dependencies = [
+ "boa_engine",
+ "dirs 5.0.1",
+ "open",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
+name = "pulpit-legacy"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "pulpit-actions",
+ "pulpit-db",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
+name = "pulpit-os"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "image",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "windows 0.58.0",
+]
+
+[[package]]
+name = "pulpit-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
+name = "pulpit-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "dirs 5.0.1",
+ "pulpit-actions",
+ "pulpit-backend",
+ "pulpit-db",
+ "pulpit-discord",
+ "pulpit-ext",
+ "pulpit-legacy",
+ "pulpit-os",
+ "pulpit-proto",
+ "pulpit-sysinfo",
+ "pulpit-v2",
+ "pulpit-vm",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
+name = "pulpit-sysinfo"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "pulpit-v2"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.23.1",
+ "futures-util",
+ "hex",
+ "pulpit-actions",
+ "pulpit-db",
+ "pulpit-legacy",
+ "pulpit-proto",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
+name = "pulpit-vm"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

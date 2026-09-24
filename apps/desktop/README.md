@@ -1,4 +1,4 @@
-# Deckboard desktop editor
+# Pulpit desktop editor
 
 Tauri 2 + Vue 3 rewrite of the Deckboard 3.x desktop app: board/tile
 editor, touch-mode execution surface, and the legacy socket.io v2 server
@@ -19,7 +19,7 @@ Standalone binary (frontend embedded, no dev server):
 
 ```sh
 cd apps/desktop
-npx tauri build --no-bundle   # exe at ../../target/release/deckboard-desktop.exe
+npx tauri build --no-bundle   # exe at ../../target/release/pulpit-desktop.exe
 ```
 
 Run tests / lints from the repo root:
@@ -34,19 +34,20 @@ cd apps/desktop && npx vite build
 
 | Variable            | Default                    | Purpose                                   |
 | ------------------- | -------------------------- | ----------------------------------------- |
-| `DECKBOARD_PORT`    | `8500`                     | Legacy socket.io server port              |
-| `DECKBOARD_DB`      | `~/deckboard/database.db`  | Database location (profiling/hermetic runs) |
-| `DECKBOARD_EXT_DIR` | `~/deckboard/extensions`   | Extension directory                       |
+| `PULPIT_PORT`    | `8500`                     | Legacy socket.io server port              |
+| `PULPIT_DB`      | `~/pulpitApp/database.db`  | Database location (profiling/hermetic runs) |
+| `PULPIT_EXT_DIR` | `~/pulpitApp/extensions`   | Extension directory                       |
 
-The release build writes a daily-rotated log to `~/deckboard/logs/`
-(`deckboard-desktop.log.YYYY-MM-DD`); `RUST_LOG=debug` raises the level.
+The release build writes a daily-rotated log to `~/pulpitApp/logs/`
+(`pulpit-desktop.log.YYYY-MM-DD`); `RUST_LOG=debug` raises the level.
 
-The original Deckboard app must be closed while this one runs on the real
-database (ADR-001: single writer). To evaluate side by side with the
-original, point `DECKBOARD_DB` at a copy and pick a free port:
+Pulpit keeps its own copy of the data in `~/pulpitApp` (migrated from
+`~/deckboard` on first run, ADR-011), so the original Deckboard app can
+stay installed and running. To pin a separate database for evaluation,
+point `PULPIT_DB` at a copy and pick a free port:
 
 ```sh
-DECKBOARD_DB=/tmp/deckboard-eval.db DECKBOARD_PORT=8520 deckboard-desktop.exe
+PULPIT_DB=/tmp/pulpit-eval.db PULPIT_PORT=8520 pulpit-desktop.exe
 ```
 
 ## Editor notes
@@ -60,7 +61,7 @@ DECKBOARD_DB=/tmp/deckboard-eval.db DECKBOARD_PORT=8520 deckboard-desktop.exe
   board into the execution surface: taps run actions, sliders drag, and
   dual-state tiles flip on live state pushes (`app_status_update`) or tap.
 - The touch-mode hotkey is validated and persisted to
-  `~/deckboard/editor.json`; autostart writes the standard HKCU Run entry.
+  `~/pulpitApp/editor.json`; autostart writes the standard HKCU Run entry.
 - Extensions load from the extension directory and declare their own
   inputs - the New Button dialog renders those fields (selects, text,
   folders) instead of raw command JSON.

@@ -1,13 +1,13 @@
-//! Deckboard desktop editor: Tauri 2 shell that embeds the legacy socket.io
+//! Pulpit desktop editor: Tauri 2 shell that embeds the legacy socket.io
 //! v2 server (so the stock Android client keeps working) and adds the board
 //! editor write path on top of the shared [`SqlBackend`].
 
 use std::sync::Arc;
 
-use deckboard_backend::SqlBackend;
-use deckboard_db::{BoardRow, ButtonRow};
-use deckboard_ext::ExtManager;
-use deckboard_legacy::{AppState, Backend, EditorBroadcaster, Hub};
+use pulpit_backend::SqlBackend;
+use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_ext::ExtManager;
+use pulpit_legacy::{AppState, Backend, EditorBroadcaster, Hub};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -21,10 +21,10 @@ struct DesktopState {
     ext: Option<Arc<ExtManager>>,
     /// Protocol v2 pairing codes; `None` when the v2 stack failed to start
     /// (bad devices.json or asset store) - the UI then hides pairing.
-    pairing: Option<Arc<deckboard_v2::Pairing>>,
+    pairing: Option<Arc<pulpit_v2::Pairing>>,
     /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
     hotkey: std::sync::Mutex<String>,
-    /// `deckboard/editor.json` - editor-local settings (hotkey), kept
+    /// `pulpitApp/editor.json` - editor-local settings (hotkey), kept
     /// separate from the original app's settings.json.
     settings_path: Option<std::path::PathBuf>,
 }
@@ -53,17 +53,17 @@ struct BoardWithButtons {
 
 pub fn run() {
     // The release build is a windowed binary with no console, so logs go to
-    // a daily-rotated file next to the rest of the deckboard data (only
+    // a daily-rotated file next to the rest of the pulpitApp data (only
     // `RUST_LOG` needs stderr for development). A missing home directory
     // keeps the stdout fallback rather than blocking startup.
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    if let Some(home) = dirs::home_dir() {
-        let log_dir = home.join("deckboard/logs");
+    if dirs::home_dir().is_some() {
+        let log_dir = pulpit_db::data_dir().join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
         let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
             log_dir,
-            "deckboard-desktop.log",
+            "pulpit-desktop.log",
         ));
         // The guard owns the flush-worker thread; dropping it would lose the
         // tail of the log, and the writer must outlive `run()` anyway.
@@ -109,7 +109,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
             // The embedded server keeps the tablets connected; closing the
-            // window only hides it. The tray (Show / Hide, Quit Deckboard)
+            // window only hides it. The tray (Show / Hide, Quit Pulpit)
             // stays in charge of the real exit.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -163,7 +163,7 @@ fn register_ext_input(
     mode: Option<&str>,
     command: Option<&str>,
 ) {
-    deckboard_legacy::props::register_extension_input(deckboard_legacy::props::ExtInput {
+    pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
         value: value.to_string(),
         icon: icon.map(str::to_string),
         color: color.map(str::to_string),
@@ -178,15 +178,15 @@ fn register_ext_input(
 /// keeps the UI alive with `backend: None` so the window can explain why.
 fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // Port 8500 is what the stock Android client hardcodes (and the original
-    // app's default); `DECKBOARD_PORT` overrides it for side-by-side runs.
-    let port: u16 = std::env::var("DECKBOARD_PORT")
+    // app's default); `PULPIT_PORT` overrides it for side-by-side runs.
+    let port: u16 = std::env::var("PULPIT_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8500);
 
-    // DECKBOARD_DB overrides the database location (profiling / hermetic runs)
-    let db_path = std::env::var_os("DECKBOARD_DB").map(std::path::PathBuf::from);
-    let db = deckboard_db::Db::open_read_write(db_path.as_deref());
+    // PULPIT_DB overrides the database location (profiling / hermetic runs)
+    let db_path = std::env::var_os("PULPIT_DB").map(std::path::PathBuf::from);
+    let db = pulpit_db::Db::open_read_write(db_path.as_deref());
     if let Err(e) = &db {
         tracing::error!("cannot open database read-write: {e}");
         return DesktopState {
@@ -202,15 +202,15 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     }
     let db = db.unwrap();
 
-    let home = dirs::home_dir().expect("home directory");
-    let settings_path = home.join("deckboard/editor.json");
-    let settings: serde_json::Value = std::fs::read_to_string(home.join("deckboard/settings.json"))
+    let data_dir = pulpit_db::data_dir();
+    let settings_path = data_dir.join("editor.json");
+    let settings: serde_json::Value = std::fs::read_to_string(data_dir.join("settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
-    let ext_dir = std::env::var_os("DECKBOARD_EXT_DIR")
+    let ext_dir = std::env::var_os("PULPIT_EXT_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| home.join("deckboard/extensions"));
+        .unwrap_or_else(|| data_dir.join("extensions"));
     // Native system-info and callurl replace their JS packages (the JS
     // runtimes were the heaviest part of the extension fleet); the manager
     // must not load them. Mirrors the headless server.
@@ -235,10 +235,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             input.command.as_deref(),
         );
     }
-    for (value, icon, font_icon, color) in deckboard_vm::input_declarations() {
+    for (value, icon, font_icon, color) in pulpit_vm::input_declarations() {
         register_ext_input(value, icon, Some(color), font_icon, None, None);
     }
-    for (value, icon, color, mode) in deckboard_discord::input_declarations() {
+    for (value, icon, color, mode) in pulpit_discord::input_declarations() {
         register_ext_input(value, Some(icon), Some(color), "fas", mode, None);
     }
 
@@ -246,8 +246,8 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
             .with_discord(
-                deckboard_discord::DiscordConfig::from_settings(&settings),
-                home.join("deckboard/settings.json"),
+                pulpit_discord::DiscordConfig::from_settings(&settings),
+                data_dir.join("settings.json"),
             ),
     );
 
@@ -257,23 +257,23 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
     // /v2/pair. Shares the backend with the legacy layer; a broken devices
     // list or asset store only disables v2, never the whole editor.
-    let feed_v2 = Arc::new(deckboard_v2::StateEngine::new(deckboard_proto::SERIES_CAP));
+    let feed_v2 = Arc::new(pulpit_v2::StateEngine::new(pulpit_proto::SERIES_CAP));
     let v2 = {
-        let devices = deckboard_v2::DeviceStore::load(home.join("deckboard/devices.json"));
-        let assets = deckboard_v2::AssetStore::open(home.join("deckboard/assets"));
+        let devices = pulpit_v2::DeviceStore::load(data_dir.join("devices.json"));
+        let assets = pulpit_v2::AssetStore::open(data_dir.join("assets"));
         match (devices, assets) {
             (Ok(devices), Ok(assets)) => {
                 tracing::info!("protocol v2 ready on the shared port");
-                Some(Arc::new(deckboard_v2::V2State {
-                    hub: Arc::new(deckboard_v2::V2Hub::new()),
+                Some(Arc::new(pulpit_v2::V2State {
+                    hub: Arc::new(pulpit_v2::V2Hub::new()),
                     backend: backend.clone() as Arc<dyn Backend>,
                     devices: Arc::new(devices),
-                    pairing: Arc::new(deckboard_v2::Pairing::new()),
+                    pairing: Arc::new(pulpit_v2::Pairing::new()),
                     assets: Arc::new(assets),
                     engine: feed_v2.clone(),
-                    generation: deckboard_v2::Generation::starting_at(1),
+                    generation: pulpit_v2::Generation::starting_at(1),
                     boards_cache: Default::default(),
-                    config: deckboard_v2::V2Config {
+                    config: pulpit_v2::V2Config {
                         public_port: port,
                         ..Default::default()
                     },
@@ -287,7 +287,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     };
     // v2 background task: coalesced state patches.
     if let Some(v2) = &v2 {
-        tauri::async_runtime::spawn(deckboard_v2::run_flusher(
+        tauri::async_runtime::spawn(pulpit_v2::run_flusher(
             v2.engine.clone(),
             v2.hub.clone(),
             v2.config.patch_interval,
@@ -295,7 +295,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     }
     // Extension pushes feed both protocols: the legacy app_status_update
     // broadcast (stock client) and one v2 channel per data key.
-    fn feed_ext(engine: &deckboard_v2::StateEngine, data: &serde_json::Value) {
+    fn feed_ext(engine: &pulpit_v2::StateEngine, data: &serde_json::Value) {
         if let Some(map) = data.as_object() {
             for (key, value) in map {
                 engine.set(&format!("ext.{key}"), value.clone());
@@ -309,7 +309,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         let app = app.clone();
         let feed_v2 = feed_v2.clone();
         tauri::async_runtime::spawn(async move {
-            while let Some(deckboard_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
+            while let Some(pulpit_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
                 tracing::debug!(keys = ?data.as_object().map(|o| o.keys().collect::<Vec<_>>()), "extension value push");
                 feed_ext(&feed_v2, &data);
                 let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
@@ -323,11 +323,11 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // native system-info: declarations style si-* tiles like the JS package
     // did, and its push loop feeds CPU/RAM and friends to both protocols on
     // the original cadence (the JS runtime itself was dropped in M2).
-    for (value, icon, font_icon, color, mode) in deckboard_sysinfo::input_declarations() {
+    for (value, icon, font_icon, color, mode) in pulpit_sysinfo::input_declarations() {
         register_ext_input(value, Some(icon), Some(color), font_icon, Some(mode), None);
     }
     {
-        let mut sysinfo_values = deckboard_sysinfo::spawn_push();
+        let mut sysinfo_values = pulpit_sysinfo::spawn_push();
         let hub = hub.clone();
         let app = app.clone();
         let feed_v2 = feed_v2.clone();
@@ -405,8 +405,8 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // one router for both protocols; ConnectInfo is needed by the loopback
     // guard on POST /v2/pair
     let app_router = match &v2 {
-        Some(v2) => deckboard_legacy::router(state.clone()).merge(deckboard_v2::router(v2.clone())),
-        None => deckboard_legacy::router(state.clone()),
+        Some(v2) => pulpit_legacy::router(state.clone()).merge(pulpit_v2::router(v2.clone())),
+        None => pulpit_legacy::router(state.clone()),
     };
     tauri::async_runtime::spawn(async move {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
@@ -469,7 +469,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
 /// no component updates, capped HTTP disk cache).
 fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
-        .title("Deckboard")
+        .title("Pulpit")
         .inner_size(1280.0, 800.0)
         .min_inner_size(900.0, 600.0)
         .theme(Some(tauri::Theme::Dark))
@@ -496,12 +496,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         app.autolaunch().is_enabled().unwrap_or(false),
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Deckboard", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Pulpit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_hide, &touch, &launch, &quit])?;
 
     tauri::tray::TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().expect("app icon").clone())
-        .tooltip("Deckboard")
+        .tooltip("Pulpit")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show-hide" => toggle_main_window(app),
@@ -546,7 +546,7 @@ fn toggle_main_window(app: &AppHandle) {
 }
 
 /// Register the touch-mode hotkey. The combo is user-configurable
-/// (`deckboard/editor.json`, default Ctrl+Alt+D - the original's
+/// (`pulpitApp/editor.json`, default Ctrl+Alt+D - the original's
 /// `toggleTouchMode` concept); an unusable stored combo falls back to the
 /// default with a warning.
 fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) {
@@ -624,7 +624,7 @@ fn list_known_inputs(state: State<'_, DesktopState>) -> Vec<serde_json::Value> {
             }));
         }
     }
-    for (value, icon, _font_icon, color) in deckboard_vm::input_declarations() {
+    for (value, icon, _font_icon, color) in pulpit_vm::input_declarations() {
         out.push(serde_json::json!({
             "value": value,
             "icon": icon,
@@ -634,7 +634,7 @@ fn list_known_inputs(state: State<'_, DesktopState>) -> Vec<serde_json::Value> {
             "source": "device",
         }));
     }
-    for (value, icon, color, mode) in deckboard_discord::input_declarations() {
+    for (value, icon, color, mode) in pulpit_discord::input_declarations() {
         out.push(serde_json::json!({
             "value": value,
             "icon": icon,
@@ -751,7 +751,7 @@ fn list_lan_addresses() -> Vec<LanAddress> {
 }
 
 /// A minted one-time pairing code plus the per-address QR for the v2
-/// client (`deckboard://<ip>:<port>?pair=<code>`, docs/protocol-v2.md).
+/// client (`pulpit://<ip>:<port>?pair=<code>`, docs/protocol-v2.md).
 #[derive(Serialize)]
 struct PairingOffer {
     code: String,
@@ -811,14 +811,14 @@ mod tests {
     #[test]
     fn pairing_url_matches_the_protocol_doc() {
         let url = pairing_shape("192.168.0.97", 8500, "ABCD2345");
-        assert_eq!(url, "deckboard://192.168.0.97:8500?pair=ABCD2345");
+        assert_eq!(url, "pulpit://192.168.0.97:8500?pair=ABCD2345");
     }
 }
 
 /// The QR payload for pairing, kept separate so the command body stays
-/// thin and the exact `deckboard://` shape is pinned by a test.
+/// thin and the exact `pulpit://` shape is pinned by a test.
 fn pairing_shape(ip: &str, port: u16, code: &str) -> String {
-    format!("deckboard://{ip}:{port}?pair={code}")
+    format!("pulpit://{ip}:{port}?pair={code}")
 }
 
 #[tauri::command]
@@ -942,7 +942,7 @@ async fn exec_button(
     state: State<'_, DesktopState>,
     id: i64,
 ) -> Result<(), String> {
-    use deckboard_actions::EventSink;
+    use pulpit_actions::EventSink;
 
     let backend = state.backend()?;
     let Some(button) = backend.get_button(id) else {

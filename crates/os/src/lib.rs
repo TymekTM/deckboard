@@ -79,12 +79,12 @@ mod tests {
     #[test]
     fn screenshot_filename_matches_original_shape() {
         // original: UTC ISO stamp with separators stripped, e.g.
-        // Deckboard_20260914142233.png
+        // Pulpit_20260914142233.png
         let name = capture::screenshot_filename(
             chrono::DateTime::parse_from_rfc3339("2026-09-14T14:22:33Z")
                 .unwrap()
                 .into(),
         );
-        assert_eq!(name, "Deckboard_20260914142233.png");
+        assert_eq!(name, "Pulpit_20260914142233.png");
     }
 }

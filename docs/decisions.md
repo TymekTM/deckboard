@@ -5,14 +5,15 @@ Newest at the bottom.
 
 ## ADR-001: Desktop is the single source of truth; one writer owns the DB
 
-The desktop owns `~/deckboard/database.db` and all board/command state.
+The desktop owns `~/pulpitApp/database.db` and all board/command state.
 Tablets are live renderers with an offline cache; they never write.
 
-Consequence: **the original Deckboard desktop app must be closed while
-deckboard-server runs** (both would write the same file and both want port
-8500). M0 additionally opens the DB in SQLite read-only mode, so a careless
-double-start can corrupt nothing - the server just reads stale-but-valid
-data while the original app runs.
+Consequence: within Pulpit, one process writes the database at a time.
+Historically this also meant the original Deckboard app had to be closed
+(same file, same port 8500); since the 2026-09-24 rebrand Pulpit keeps its
+own copy in `~/pulpitApp` (ADR-011) and the two no longer share state. The
+headless server still opens the DB in SQLite read-only mode, so a careless
+double-start can corrupt nothing.
 
 ## ADR-002: Legacy protocol is a permanent, tested fallback layer
 
@@ -36,7 +37,7 @@ open packet, `\x1e`-separated polling batches, websocket transport with
 
 ## ADR-004: Protocol v2 is typed once, in Rust
 
-`deckboard-proto` defines frames, widget manifests and state channels with
+`pulpit-proto` defines frames, widget manifests and state channels with
 serde; TypeScript and Kotlin types are generated from it (codegen lands
 with M1). JSON on the wire for debuggability; assets (photos, videos, web
 widget bundles) are served by hash from the desktop instead of being
@@ -46,7 +47,7 @@ inlined as data URLs (the original inlined everything).
 
 All web widgets of a board render in ONE WebView (one JS context) to keep
 memory flat. That means widgets can touch each other; the sandbox protects
-the OS and the desktop, not widget-vs-widget. `deckboard.fetch` goes
+the OS and the desktop, not widget-vs-widget. `pulpit.fetch` goes
 through the desktop proxy, which is why the proxy only allows configured
 hosts per widget (manifest `net` permission) - this closes the LAN-SSRF
 hole but does not make widgets mutually isolated. If widgets are ever
@@ -76,11 +77,11 @@ controller" silently dies with the screen off.
 The legacy layer stays unauthenticated (LAN trust, like the original) - do
 not tunnel it through the internet. Protocol v2 authenticates at the
 WebSocket upgrade: pairing mints a one-time code (8 chars, 5 min, loopback
-`POST /v2/pair`, QR `deckboard://host:port?pair=<code>`); the tablet
+`POST /v2/pair`, QR `pulpit://host:port?pair=<code>`); the tablet
 connects with it, sends `hello`, and the desktop shows a "trust this
 device?" prompt (M1 headless: auto-accept with a warning log; the prompt
 ships with the desktop UI). Trusting creates a per-device entry in
-`~/deckboard/devices.json` (`{id, name, token, created, last_seen}`);
+`~/pulpitApp/devices.json` (`{id, name, token, created, last_seen}`);
 every later connect uses `?token=...`. Revoking a device = deleting its
 entry, so a leaked token never widens beyond one tablet. The tablet keeps
 its token in EncryptedSharedPreferences.
@@ -97,3 +98,21 @@ structured logs was the reviewer's pointed warning - accepted.
 Media normalization (downscale, H.264 baseline transcode) runs only when a
 `ffmpeg` binary is found in PATH. Without it, assets are served as-is and
 clients use their native decoders. No build-time dependency, ever.
+
+## ADR-011: Own identity, copied data (the Pulpit rebrand)
+
+The project ships under its own name (`Pulpit`, `pulpit-*` crates, env
+prefix `PULPIT_*`, deep link `pulpit://`) with its own data directory
+`~/pulpitApp`. On first start `pulpit_db::data_dir` copies a legacy
+`~/deckboard` directory (database, settings, editor config, paired
+devices, extensions, assets; logs excluded) instead of moving it.
+
+Consequence: the original app keeps working from its own directory, the
+upgrade cannot lose data (copy, per-item resumable), and every
+wire-visible identifier the stock client or original extensions depend
+on keeps the Deckboard name: the socket.io v2 protocol, `.boardjson`
+format, extension ids (`deckboard-system-info`, `deckboard-callurl`,
+`discord-deckboard` settings keys) and the extension JS API
+(`DeckboardExtension`). The Tauri identifier change (`app.pulpit.desktop`)
+means the NSIS bundle installs next to, not over, the old build - a
+one-time manual uninstall.

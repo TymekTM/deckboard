@@ -1,5 +1,5 @@
 //! Content-addressed asset store (docs/protocol-v2.md §7):
-//! `~/deckboard/assets/<sha256-hex>.<ext>`. Imports are idempotent by
+//! `~/pulpitApp/assets/<sha256-hex>.<ext>`. Imports are idempotent by
 //! hash; legacy DB data URLs convert into the same store when boards are
 //! built. Served from `GET /assets/<hash>?token=...` with immutable cache
 //! headers.

@@ -1,5 +1,5 @@
 [package]
-name = "deckboard-backend"
+name = "pulpit-backend"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,14 +9,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-deckboard-db = { path = "../db" }
-deckboard-actions = { path = "../actions" }
-deckboard-legacy = { path = "../legacy" }
-deckboard-ext = { path = "../ext" }
-deckboard-vm = { path = "../vm" }
-deckboard-discord = { path = "../discord" }
-deckboard-os = { path = "../os" }
-deckboard-sysinfo = { path = "../sysinfo" }
+pulpit-db = { path = "../db" }
+pulpit-actions = { path = "../actions" }
+pulpit-legacy = { path = "../legacy" }
+pulpit-ext = { path = "../ext" }
+pulpit-vm = { path = "../vm" }
+pulpit-discord = { path = "../discord" }
+pulpit-os = { path = "../os" }
+pulpit-sysinfo = { path = "../sysinfo" }
 ureq = "3"
 
 [dev-dependencies]

@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "app.deckboard.mobile"
+    namespace = "app.pulpit.mobile"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "app.deckboard.mobile"
+        applicationId = "app.pulpit.mobile"
         // the target tablet (SM-T561, LineageOS) runs Android 7.1 (API 25)
         minSdk = 24
         targetSdk = 34

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Mutex;
 
-use deckboard_proto::{ChannelInfo, ChannelValue, StateShape, StateSync};
+use pulpit_proto::{ChannelInfo, ChannelValue, StateShape, StateSync};
 
 /// The one place that knows how pushed keys map to channels: everything
 /// extension/native producers push lands under `ext.<key>` (the key being

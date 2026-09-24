@@ -1,5 +1,5 @@
 [package]
-name = "deckboard-sysinfo"
+name = "pulpit-sysinfo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,9 +1,9 @@
 [package]
-name = "deckboard-desktop"
+name = "pulpit-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Deckboard desktop editor"
+description = "Pulpit desktop editor"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -24,15 +24,15 @@ tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
-deckboard-db = { path = "../../../crates/db" }
-deckboard-backend = { path = "../../../crates/backend" }
-deckboard-actions = { path = "../../../crates/actions" }
-deckboard-legacy = { path = "../../../crates/legacy" }
-deckboard-ext = { path = "../../../crates/ext" }
-deckboard-vm = { path = "../../../crates/vm" }
-deckboard-discord = { path = "../../../crates/discord" }
-deckboard-sysinfo = { path = "../../../crates/sysinfo" }
-deckboard-proto = { path = "../../../crates/proto" }
-deckboard-v2 = { path = "../../../crates/v2" }
+pulpit-db = { path = "../../../crates/db" }
+pulpit-backend = { path = "../../../crates/backend" }
+pulpit-actions = { path = "../../../crates/actions" }
+pulpit-legacy = { path = "../../../crates/legacy" }
+pulpit-ext = { path = "../../../crates/ext" }
+pulpit-vm = { path = "../../../crates/vm" }
+pulpit-discord = { path = "../../../crates/discord" }
+pulpit-sysinfo = { path = "../../../crates/sysinfo" }
+pulpit-proto = { path = "../../../crates/proto" }
+pulpit-v2 = { path = "../../../crates/v2" }
 if-addrs = "0.15.0"
 qrcode = "0.14.1"

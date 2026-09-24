@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "deckboard-mobile"
+rootProject.name = "pulpit-mobile"
 include(":app")

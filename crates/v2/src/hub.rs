@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use deckboard_proto::Frame;
+use pulpit_proto::Frame;
 use tokio::sync::mpsc;
 
 use crate::devices::DeviceEntry;
@@ -149,7 +149,7 @@ mod tests {
         // Unauthenticated sessions (created but not attached) are outside
         // the fan-out; only attach brings a socket into the broadcast set.
         hub.broadcast_frame(&Frame::push(
-            deckboard_proto::TYPE_BOARD_OPEN,
+            pulpit_proto::TYPE_BOARD_OPEN,
             serde_json::json!({"board": 0}),
         ));
         assert!(
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(hub.count(), 2);
 
         hub.broadcast_frame(&Frame::push(
-            deckboard_proto::TYPE_BOARD_OPEN,
+            pulpit_proto::TYPE_BOARD_OPEN,
             serde_json::json!({"board": 3}),
         ));
         let WsOut::Text(text) = rx_a.blocking_recv().unwrap() else {

@@ -44,11 +44,11 @@ fn write_ext(dir: &std::path::Path, name: &str, js: &str) {
 }
 
 /// Read the next `SetValue` payload from the manager's event stream.
-fn next_push(events: &mut tokio::sync::mpsc::UnboundedReceiver<deckboard_ext::ExtEvent>) -> u32 {
+fn next_push(events: &mut tokio::sync::mpsc::UnboundedReceiver<pulpit_ext::ExtEvent>) -> u32 {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         match events.try_recv() {
-            Ok(deckboard_ext::ExtEvent::SetValue(v)) => {
+            Ok(pulpit_ext::ExtEvent::SetValue(v)) => {
                 return v
                     .get("calls")
                     .and_then(serde_json::Value::as_u64)
@@ -68,7 +68,7 @@ fn stateless_extension_reloads_between_actions() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_ext(dir.path(), "stateless-test", STATELESS_JS);
 
-    let (manager, mut events) = deckboard_ext::ExtManager::load(dir.path(), &json!(null), &[]);
+    let (manager, mut events) = pulpit_ext::ExtManager::load(dir.path(), &json!(null), &[]);
     assert!(manager.has_action("lazy-echo"), "action not registered");
 
     manager.execute("lazy-echo", None).expect("first execute");
@@ -89,7 +89,7 @@ fn timed_extension_keeps_state_between_actions() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_ext(dir.path(), "live-test", LIVE_JS);
 
-    let (manager, mut events) = deckboard_ext::ExtManager::load(dir.path(), &json!(null), &[]);
+    let (manager, mut events) = pulpit_ext::ExtManager::load(dir.path(), &json!(null), &[]);
     assert!(manager.has_action("live-echo"), "action not registered");
 
     manager.execute("live-echo", None).expect("first execute");

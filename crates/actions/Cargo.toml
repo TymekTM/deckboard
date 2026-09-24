@@ -1,11 +1,11 @@
 [package]
-name = "deckboard-actions"
+name = "pulpit-actions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-deckboard-os = { path = "../os" }
+pulpit-os = { path = "../os" }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 enigo = { workspace = true }

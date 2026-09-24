@@ -117,8 +117,8 @@ mod tests {
     #[ignore = "live: replaces the real clipboard, restoring it after"]
     fn live_clipboard_round_trip() {
         let original = get_text().expect("read");
-        set_text("deckboard-m2-四十二").expect("write");
-        assert_eq!(get_text().expect("read back"), "deckboard-m2-四十二");
+        set_text("pulpit-m2-四十二").expect("write");
+        assert_eq!(get_text().expect("read back"), "pulpit-m2-四十二");
         if original.is_empty() {
             set_text(" ").ok(); // keep unicode text, cannot restore empty
         } else {

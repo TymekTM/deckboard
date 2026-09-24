@@ -1,5 +1,5 @@
 [package]
-name = "deckboard-proto"
+name = "pulpit-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

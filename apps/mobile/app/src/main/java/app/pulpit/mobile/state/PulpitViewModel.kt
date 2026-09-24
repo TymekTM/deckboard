@@ -2,18 +2,18 @@
 //! custom values. Reconnects with backoff; every (re)connect pulls a full
 //! `get_shortcuts` snapshot (the reconnect rule from ADR-006).
 
-package app.deckboard.mobile.state
+package app.pulpit.mobile.state
 
 import android.app.Application
 import android.content.Context
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import app.deckboard.mobile.net.ConnState
-import app.deckboard.mobile.net.DeckEvent
-import app.deckboard.mobile.net.DeckboardClient
-import app.deckboard.mobile.proto.Board
-import app.deckboard.mobile.proto.Shortcut
+import app.pulpit.mobile.net.ConnState
+import app.pulpit.mobile.net.DeckEvent
+import app.pulpit.mobile.net.PulpitClient
+import app.pulpit.mobile.proto.Board
+import app.pulpit.mobile.proto.Shortcut
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,11 +27,11 @@ import kotlinx.serialization.json.jsonPrimitive
 
 data class ServerConfig(val host: String, val port: Int, val accessKey: String)
 
-class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
+class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    private val prefs = app.getSharedPreferences("deckboard", Context.MODE_PRIVATE)
+    private val prefs = app.getSharedPreferences("pulpit", Context.MODE_PRIVATE)
 
     private val _config = MutableStateFlow(
         ServerConfig(
@@ -71,7 +71,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     private val _serverVersion = MutableStateFlow("")
     val serverVersion: StateFlow<String> = _serverVersion
 
-    private var client: DeckboardClient? = null
+    private var client: PulpitClient? = null
     private var eventJob: Job? = null
     private var reconnectAttempts = 0
 
@@ -97,7 +97,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         connectGeneration++
         disconnect()
         val cfg = _config.value
-        val c = DeckboardClient(cfg.host, cfg.port, cfg.accessKey)
+        val c = PulpitClient(cfg.host, cfg.port, cfg.accessKey)
         client = c
         observeEvents(c)
         c.connect()
@@ -119,7 +119,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         disconnect()
     }
 
-    private fun observeEvents(client: DeckboardClient) {
+    private fun observeEvents(client: PulpitClient) {
         eventJob = viewModelScope.launch {
             launch {
                 client.state.collect { st ->
@@ -263,7 +263,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
-        private const val TAG = "DeckboardViewModel"
+        private const val TAG = "PulpitViewModel"
         private const val MAX_RECONNECT = 10
         /** The original app's PRO handshake key: full grid instead of 4x3. */
         const val PRO_ACCESS_KEY = "DCKBRD_PRO_1_3_0"

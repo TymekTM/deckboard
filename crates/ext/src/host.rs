@@ -100,7 +100,7 @@ impl ExtRuntime {
             .cloned()
             .unwrap_or_default();
 
-        // inject user configs from ~/deckboard/settings.json
+        // inject user configs from ~/pulpitApp/settings.json
         let cfg = serde_json::to_string(configs).unwrap_or_else(|_| "{}".into());
         run(
             &mut context,
@@ -500,10 +500,10 @@ native!(host_log, |args, _ctx| {
     let level = arg_str(args, 0);
     let msg = arg_str(args, 1);
     match level.as_str() {
-        "warn" => tracing::warn!(target: "deckboard_ext", "{msg}"),
-        "error" => tracing::error!(target: "deckboard_ext", "{msg}"),
-        "debug" => tracing::debug!(target: "deckboard_ext", "{msg}"),
-        _ => tracing::info!(target: "deckboard_ext", "{msg}"),
+        "warn" => tracing::warn!(target: "pulpit_ext", "{msg}"),
+        "error" => tracing::error!(target: "pulpit_ext", "{msg}"),
+        "debug" => tracing::debug!(target: "pulpit_ext", "{msg}"),
+        _ => tracing::info!(target: "pulpit_ext", "{msg}"),
     }
     Ok(JsValue::undefined())
 });

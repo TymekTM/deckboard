@@ -3,7 +3,7 @@
 //! modules 5981/8742/2836). Field names and defaults are contractual:
 //! the stock Android client renders exactly these fields.
 
-use deckboard_db::{BoardRow, ButtonRow};
+use pulpit_db::{BoardRow, ButtonRow};
 use serde_json::{json, Map, Value};
 
 use crate::props::{Props, StyleResolver, FALLBACK_COLOR};

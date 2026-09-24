@@ -4,10 +4,10 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-use deckboard_actions::EventSink;
-use deckboard_db::{BoardRow, ButtonRow};
-use deckboard_legacy::{router, AppState, Backend, Hub};
 use futures_util::{SinkExt, StreamExt};
+use pulpit_actions::EventSink;
+use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_legacy::{router, AppState, Backend, Hub};
 use tokio_tungstenite::tungstenite::Message;
 
 /// Records exec calls instead of touching the OS.
@@ -325,7 +325,7 @@ async fn health_page_served() {
     let (addr, _) = spawn_server().await;
     let (status, body) = http(addr, "GET", "/", None);
     assert_eq!(status, 200);
-    assert!(body.contains("Deckboard Server is live"));
+    assert!(body.contains("Pulpit server is live"));
 }
 
 async fn recv_text(

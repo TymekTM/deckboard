@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Deckboard",
+  "productName": "Pulpit",
   "version": "0.1.0",
-  "identifier": "app.deckboard.desktop",
+  "identifier": "app.pulpit.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",

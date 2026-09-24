@@ -2,7 +2,7 @@
 //! the original app's default (8500); the access key defaults to the PRO
 //! handshake so the full grid renders.
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -27,11 +27,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import app.deckboard.mobile.net.ConnState
-import app.deckboard.mobile.state.DeckboardViewModel
+import app.pulpit.mobile.net.ConnState
+import app.pulpit.mobile.state.PulpitViewModel
 
 @Composable
-fun ConnectScreen(vm: DeckboardViewModel, onConnected: () -> Unit) {
+fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
     val cfg by vm.config.collectAsState()
     val conn by vm.connState.collectAsState()
 
@@ -47,7 +47,7 @@ fun ConnectScreen(vm: DeckboardViewModel, onConnected: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = "Deckboard",
+            text = "Pulpit",
             style = MaterialTheme.typography.headlineMedium,
             color = androidx.compose.ui.graphics.Color.White,
         )

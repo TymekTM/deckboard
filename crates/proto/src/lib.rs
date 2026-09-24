@@ -1,6 +1,6 @@
 //! Protocol v2 types - the single source of truth for the wire format
 //! (ADR-004). TypeScript bindings are generated into `bindings/` by
-//! `cargo test -p deckboard-proto`; the golden fixtures in
+//! `cargo test -p pulpit-proto`; the golden fixtures in
 //! `tests/fixtures/` pin the exact JSON the Kotlin client parses too.
 //!
 //! Boards are data, not code: every tile carries a widget manifest the

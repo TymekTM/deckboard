@@ -544,11 +544,11 @@ impl Input for EnigoInput {
         // Non-text clipboard content (images) cannot be restored by this
         // text-only path - the original app behaves the same; restore is
         // text-only and best-effort.
-        let previous = deckboard_os::clipboard::get_text()
+        let previous = pulpit_os::clipboard::get_text()
             .ok()
             .filter(|s| !s.is_empty());
-        deckboard_os::clipboard::set_text(text).map_err(|e| ActionError::Input(e.to_string()))?;
-        let seq_after_set = deckboard_os::clipboard::sequence_number();
+        pulpit_os::clipboard::set_text(text).map_err(|e| ActionError::Input(e.to_string()))?;
+        let seq_after_set = pulpit_os::clipboard::sequence_number();
         let pasted = self.key_tap(&[KeyName::Control, KeyName::Char('v')]);
         if let Some(previous) = previous {
             // give the focused app a beat to read the paste before the
@@ -557,8 +557,8 @@ impl Input for EnigoInput {
             // Restore only if the clipboard still holds OUR paste: when
             // the user (or any app) copied something meanwhile, that
             // content wins and must not be clobbered by the restore.
-            if deckboard_os::clipboard::sequence_number() == seq_after_set {
-                let _ = deckboard_os::clipboard::set_text(&previous);
+            if pulpit_os::clipboard::sequence_number() == seq_after_set {
+                let _ = pulpit_os::clipboard::set_text(&previous);
             }
         }
         pasted
@@ -566,7 +566,7 @@ impl Input for EnigoInput {
 
     #[cfg(windows)]
     fn screenshot(&mut self, dir: &str) -> Result<()> {
-        deckboard_os::capture::screenshot_to_dir(dir)
+        pulpit_os::capture::screenshot_to_dir(dir)
             .map(|_| ())
             .map_err(|e| ActionError::Input(e.to_string()))
     }

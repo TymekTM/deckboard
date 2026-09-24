@@ -33,7 +33,7 @@ const VM_TOGGLE_BUS_PARAMS = vmSelect(["Mono", "Mute", "EQ.on"]);
 const VM_SLIDER_BUS_PARAMS = vmSelect(["Gain"]);
 
 export const CATALOG = [
-  { header: "Deckboard" },
+  { header: "Pulpit" },
   {
     value: "board",
     label: "Switch Board",
@@ -192,7 +192,7 @@ export const CATALOG = [
   },
   { divider: true },
   { header: "Voicemeeter" },
-  // native deckboard_vm actions; the JS extension that declared these
+  // native pulpit_vm actions; the JS extension that declared these
   // fields fails to load in the embedded runtime, so they are declared here
   {
     value: "vm-set-strip",
@@ -210,6 +210,7 @@ export const CATALOG = [
     label: "Toggle Strip Parameter",
     icon: "microphone-slash",
     color: "#171A21",
+    dual: true,
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_STRIP_PARAMS },
       { key: "number", kind: "select", label: "Index", options: VM_INDEX },
@@ -253,6 +254,7 @@ export const CATALOG = [
     label: "Toggle Bus Parameter",
     icon: "volume-mute",
     color: "#171A21",
+    dual: true,
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_BUS_PARAMS },
       { key: "number", kind: "select", label: "Index", options: VM_INDEX },

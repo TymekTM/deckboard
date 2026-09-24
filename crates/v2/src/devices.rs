@@ -1,4 +1,4 @@
-//! Paired devices (`~/deckboard/devices.json`) and one-time pairing codes
+//! Paired devices (`~/pulpitApp/devices.json`) and one-time pairing codes
 //! (docs/protocol-v2.md §3). One token per device: revoking a device is
 //! removing its entry; a leaked token never widens beyond one tablet.
 

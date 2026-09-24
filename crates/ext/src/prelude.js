@@ -182,11 +182,11 @@ var __fs = {
         return { isFile: function () { return __host_file_exists(String(p)); }, isDirectory: function () { return false; } };
     },
     createReadStream: function () {
-        throw new Error("fs.createReadStream is not supported by deckboard-ext");
+        throw new Error("fs.createReadStream is not supported by pulpit-ext");
     },
     closeSync: function () {},
     close: function (fd, cb) { if (typeof cb === "function") cb(null); },
-    openSync: function () { throw new Error("fs.open is not supported by deckboard-ext"); },
+    openSync: function () { throw new Error("fs.open is not supported by pulpit-ext"); },
     constants: {},
     F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
     accessSync: function (p) {
@@ -203,7 +203,7 @@ var __fs = {
 function __fs_not_supported(name) {
     return function () {
         var cb = arguments[arguments.length - 1];
-        var err = new Error("fs." + name + " is not supported by deckboard-ext");
+        var err = new Error("fs." + name + " is not supported by pulpit-ext");
         if (typeof cb === "function") cb(err);
         else throw err;
     };
@@ -586,7 +586,7 @@ var __Buffer = {
     isBuffer: function () { return false; },
 };
 
-// -------------------------------------------------------------- deckboard-kit
+// -------------------------------------------------------------- pulpit-kit
 var __INPUT_METHOD = {
     INPUT_TEXT: "input:text",
     INPUT_KEY: "input:key",
@@ -634,7 +634,7 @@ var __kit_log = {
     debug: function () { __host_log("debug", __EXT_PACKAGE + ": " + Array.prototype.join.call(arguments, " ")); },
 };
 
-// deckboard-extension-kit API: constructor(name, inputs, execute)
+// pulpit-extension-kit API: constructor(name, inputs, execute)
 function __DeckboardExtension(moduleName, inputs, execute) {
     this.name = moduleName;
     this.inputs = inputs || [];
@@ -670,7 +670,7 @@ var __kit = {
 var __electron = {
     dialog: {
         showErrorBox: function (title, msg) { __host_dialog_error(String(title), String(msg)); },
-        showMessageBox: function (opts) { __host_dialog_error("Deckboard", JSON.stringify(opts)); },
+        showMessageBox: function (opts) { __host_dialog_error("Pulpit", JSON.stringify(opts)); },
         showOpenDialog: function () { __host_log("warn", __EXT_PACKAGE + ": electron dialog.showOpenDialog not supported"); },
     },
     app: { getPath: function () { return __EXT_ROOT; } },
@@ -791,9 +791,9 @@ function __resolve_module(spec, from_dir) {
     }
     // the real graceful-fs patches fs methods our shim does not have;
     // our builtin alias covers the API surface fs-extra actually uses.
-    // Same idea for deckboard-kit: extensions ship a copy that drags in
+    // Same idea for pulpit-kit: extensions ship a copy that drags in
     // electron-log, while our builtin shim is the intended interface.
-    if (spec === "graceful-fs" || spec === "deckboard-kit" || spec === "deckboard-extension-kit") return null;
+    if (spec === "graceful-fs" || spec === "pulpit-kit" || spec === "pulpit-extension-kit") return null;
     // node_modules lookup from the package root
     var nm = __EXT_ROOT + "/node_modules/" + spec;
     var pkg = nm + "/package.json";
@@ -910,8 +910,8 @@ __xml2js.Parser.prototype.parseString = function (xml, cb) {
 
 // ------------------------------------------------------------ module loader
 var __builtin_modules = {
-    "deckboard-kit": __kit,
-    "deckboard-extension-kit": __kit,
+    "pulpit-kit": __kit,
+    "pulpit-extension-kit": __kit,
     "child_process": __child_process,
     "node-fetch": __fetch,
     "electron": __electron,
@@ -1010,7 +1010,7 @@ function __load_module(abs_path) {
         var resolved = __resolve_module(spec, module_dir);
         if (resolved === null) {
             if (__builtin_modules[spec] !== undefined) return __builtin_modules[spec];
-            throw new Error("deckboard-ext: module '" + spec + "' is not available (package " + __EXT_PACKAGE + ")");
+            throw new Error("pulpit-ext: module '" + spec + "' is not available (package " + __EXT_PACKAGE + ")");
         }
         return __load_module(resolved);
     };

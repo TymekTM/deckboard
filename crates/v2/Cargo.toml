@@ -1,5 +1,5 @@
 [package]
-name = "deckboard-v2"
+name = "pulpit-v2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,10 +15,10 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 futures-util = { workspace = true }
-deckboard-proto = { path = "../proto" }
-deckboard-db = { path = "../db" }
-deckboard-actions = { path = "../actions" }
-deckboard-legacy = { path = "../legacy" }
+pulpit-proto = { path = "../proto" }
+pulpit-db = { path = "../db" }
+pulpit-actions = { path = "../actions" }
+pulpit-legacy = { path = "../legacy" }
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }
