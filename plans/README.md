@@ -88,19 +88,17 @@ Scope-adjacent (correctness, not perf - surfaced during the perf audit):
 
 ## Deferred (worth doing, deliberately not planned this round)
 
-- Finding 6 (extension idle cost): needs a product call on
-  extension-behavior parity (pausing timers changes what stock tiles show
-  after reconnect). Suggested shape: stretch timer intervals when the
-  legacy hub has zero clients and no v2 sessions; shutdown idle
-  `has_timers` runtimes after a timeout (the `Shutdown` message exists);
-  reduce stack size only with a recursion-depth test on the heaviest
-  real package.
-- Finding 7 (destroy WebView when hidden > N minutes, rebuild on tray
-  show): biggest single idle-RAM win but changes reopen latency and
-  interacts with touch mode living in the same window. Decide with the
-  product hat on.
-- Finding 8 (persist scanner offsets): serialize `{path → offset}` next
-  to the config; keep the torn-line rule. Best done after 001 lands (its
-  caches stay un-serialized).
-- Findings 9, 11, 12, 13: small, self-contained quick wins - fine to fold
-  into any convenient PR touching the same files.
+Update 2026-09-24, second round (`162079e`): findings 6, 7, 9, 11, 12, 13
+are implemented. Remaining context:
+
+- Finding 6: the CPU half landed (timer threads stretch to a 15 s floor
+  while zero clients are connected). The RAM half (thread exit / stack
+  size) stayed out: Boa's freed pages stay committed either way, and the
+  audit's own note requires a recursion-depth test on the heaviest real
+  package before shrinking the 64 MiB stacks.
+- Finding 7: landed at 10 minutes hidden; reopen latency is one WebView
+  boot, and the rebuilt app refetches everything on mount.
+- Finding 8 (persist scanner offsets): still open - aidev crate, owner
+  decision, blocked behind plan 001.
+- Findings 9, 11, 12, 13: landed as one commit; multi-range asset
+  requests deliberately still serve a full 200 body.
