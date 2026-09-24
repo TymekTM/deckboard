@@ -84,15 +84,18 @@ limits beat configured guesses.
   (default 15 min) ago: a permission prompt, a long build, or a finished
   turn waiting for review.
 - **done** - quiet for up to `agent_done_secs` (default 4 h), then the
-  session drops off. A provider whose sessions are all done is hidden:
-  nothing is running.
+  session drops off. Done sessions are never displayed: the tile carries
+  only what is running or waiting, so a provider whose sessions are all
+  done disappears entirely.
 
 Rows are grouped under an uppercase project header (the session's
 working-directory basename), freshest and most urgent project first, up
 to 2 sessions per project. Every session row carries its provider glyph.
 When the tile cannot fit the detail (small tile, too many rows) the
-renderer switches to the producer's `compact` list: one line per active
-provider with glyph and counts (`2 working · 1 done`), no titles.
+renderer switches to the producer's `compact` view: a vertical stack of
+provider logos, each with a dot and the number of working or waiting
+sessions below it (the dot turns amber when any session needs
+attention).
 
 ## Token accounting
 

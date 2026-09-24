@@ -122,10 +122,10 @@ function graphLast(tile) {
 }
 
 // StatusButton: the producer pushes {title, rows:[{label, value, state,
-// percent?, provider?}], compact:[{provider, value}], summary} under the
-// tile's command (or type) - a live list that replaces itself wholesale
-// (see mergeCustomValues). Rows arrive display-ready so this stays a dumb
-// renderer.
+// percent?, provider?}], compact:[{provider, count, state}], summary}
+// under the tile's command (or type) - a live list that replaces itself
+// wholesale (see mergeCustomValues). Rows arrive display-ready so this
+// stays a dumb renderer.
 function statusData(tile) {
   if (tile.mode !== "status") return null;
   const v = props.customValues[tile.command || tile.type];
@@ -136,16 +136,21 @@ function statusData(tile) {
 }
 
 // When the tile cannot fit the detail (small tile, or more rows than the
-// height can hold) the producer's compact per-provider counts take over -
-// logo plus "N working · M done", no chat titles.
-function statusRows(tile) {
+// height can hold) the producer's compact per-provider counts take over:
+// a vertical stack of logos, each with a dot and the number of active or
+// waiting sessions below it.
+function statusCompact(tile) {
   const data = statusData(tile);
   if (!data) return [];
   const compact = data.compact;
-  if (Array.isArray(compact) && compact.length && (tile.h <= 1 || data.rows.length > tile.h * 4)) {
-    return compact.map((c) => ({ ...c, state: "compact" }));
-  }
-  return data.rows;
+  if (!Array.isArray(compact) || !compact.length) return [];
+  if (tile.h <= 1 || data.rows.length > tile.h * 4) return compact;
+  return [];
+}
+
+function statusRows(tile) {
+  const data = statusData(tile);
+  return data ? data.rows : [];
 }
 
 // Monochrome brand marks (24x24, currentColor) for the agent providers:
@@ -162,7 +167,7 @@ const PROVIDER_GLYPHS = {
 function providerSvg(provider) {
   const path = PROVIDER_GLYPHS[provider];
   if (!path) return "";
-  return `<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="${path}"/></svg>`;
+  return `<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="${path}"/></svg>`;
 }
 
 // polyline points over the tile, y normalized to the sample range
@@ -489,31 +494,48 @@ function onGridClick(event) {
               />
             </svg>
           </template>
-          <div v-if="tile.mode === 'status' && statusData(tile)" class="tile-status">
-            <div
-              v-for="(row, i) in statusRows(tile)"
-              :key="i"
-              class="status-row"
-              :class="['s-' + (row.state || 'off'), { 'is-header': row.state === 'header' }]"
-            >
-              <span v-if="row.state !== 'header' && row.state !== 'compact'" class="status-dot"></span>
-              <span
-                v-if="row.provider && providerSvg(row.provider)"
-                class="provider-glyph"
-                v-html="providerSvg(row.provider)"
-              ></span>
-              <span v-if="row.label" class="status-label">{{ row.label }}</span>
-              <span v-if="row.value" class="status-val">{{ row.value }}</span>
-              <span v-if="row.percent != null" class="status-bar">
-                <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
-              </span>
-            </div>
-            <div
-              v-if="statusData(tile).summary && !statusRows(tile).some((r) => r.state === 'compact')"
-              class="status-summary"
-            >
-              {{ statusData(tile).summary }}
-            </div>
+          <div
+            v-if="tile.mode === 'status' && statusData(tile)"
+            class="tile-status"
+            :class="{ 'is-compact': statusCompact(tile).length }"
+          >
+            <template v-if="statusCompact(tile).length">
+              <div
+                v-for="(c, i) in statusCompact(tile)"
+                :key="i"
+                class="compact-provider"
+                :class="'s-' + (c.state || 'working')"
+              >
+                <span class="provider-glyph" v-html="providerSvg(c.provider)"></span>
+                <span class="compact-under">
+                  <span class="status-dot"></span>
+                  <span class="compact-count">{{ c.count }}</span>
+                </span>
+              </div>
+            </template>
+            <template v-else>
+              <div
+                v-for="(row, i) in statusRows(tile)"
+                :key="i"
+                class="status-row"
+                :class="['s-' + (row.state || 'off'), { 'is-header': row.state === 'header' }]"
+              >
+                <span v-if="row.state !== 'header'" class="status-dot"></span>
+                <span
+                  v-if="row.provider && providerSvg(row.provider)"
+                  class="provider-glyph"
+                  v-html="providerSvg(row.provider)"
+                ></span>
+                <span v-if="row.label" class="status-label">{{ row.label }}</span>
+                <span v-if="row.value" class="status-val">{{ row.value }}</span>
+                <span v-if="row.percent != null" class="status-bar">
+                  <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
+                </span>
+              </div>
+              <div v-if="statusData(tile).summary" class="status-summary">
+                {{ statusData(tile).summary }}
+              </div>
+            </template>
           </div>
           <span
             v-if="boardTileTitle(tile)"
@@ -791,10 +813,36 @@ function onGridClick(event) {
   align-items: center;
   color: rgba(255, 255, 255, 0.72);
 }
-/* compact fallback rows: glyph left, counts right */
-.s-compact .status-val {
-  margin-left: auto;
+/* compact fallback: vertical provider stack, each logo with its dot and
+   the active+waiting count right below it */
+.tile-status.is-compact {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+}
+.compact-provider {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.compact-provider .provider-glyph svg {
+  width: 26px;
+  height: 26px;
+}
+.compact-provider .provider-glyph {
   color: rgba(255, 255, 255, 0.85);
+}
+.compact-under {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.compact-count {
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.9);
 }
 /* per-provider breakdown overlay on the hour graph tile */
 .tile-hour-rows {
