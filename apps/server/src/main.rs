@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use pulpit_backend::SqlBackend;
-use pulpit_legacy::{router, AppState, Hub};
+use pulpit_legacy::{AppState, Hub};
 use tracing_subscriber::EnvFilter;
 
 // current_thread: the workload is a couple of tablets doing tiny async IO;
