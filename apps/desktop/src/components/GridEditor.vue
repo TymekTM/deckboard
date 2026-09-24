@@ -22,14 +22,10 @@ function metaOf(tile) {
   return props.typeMeta?.[tile.type] || {};
 }
 
-// dual-state tiles flip to their second state when tapped, like the
-// tablet client; the toggle lives for the editor session only
+// tiles whose stored mode is "toggle" flip to their second state when
+// tapped, exactly like the tablet client; the flip lives for the editor
+// session only (live state pushes win once they arrive)
 const activeTiles = reactive(new Set());
-function isDual(tile) {
-  return Boolean(
-    tile.color2 || tile.icon2 || tile.img2 || metaOf(tile).dual
-  );
-}
 
 // Whether the tile renders its second state. A known live state wins
 // (original ToggleButton isActive); otherwise the session tap flip.
@@ -241,7 +237,7 @@ function startDrag(tile, mode, event) {
 function onTileTap(tile) {
   if (!props.touch) return;
   if (tile.mode === "slider") return;
-  if (isDual(tile)) {
+  if (tile.mode === "toggle") {
     // flip to the second state like the tablet client does
     if (activeTiles.has(tile.id)) activeTiles.delete(tile.id);
     else activeTiles.add(tile.id);

@@ -142,6 +142,7 @@ const isKnownType = computed(() => catalogEntry.value !== null);
 const showDual = computed(
   () =>
     Boolean(catalogEntry.value?.dual) ||
+    form.mode === "toggle" ||
     Boolean(form.color2 || form.icon2 || form.img2)
 );
 const stepConfig = computed(() => catalogEntry.value?.stepEditor || null);
@@ -427,7 +428,7 @@ function colorOr(val, fallback) {
                   <template v-else-if="row[0] === 'title_position'">
                     {{ ["Bottom", "Center", "Top"][form.title_position ?? 0] }}
                   </template>
-                  <template v-else-if="row[0] === 'mode'">{{ form.mode || "button" }}</template>
+                  <template v-else-if="row[0] === 'mode'">{{ prettify(form.mode || "button") }}</template>
                   <template v-else-if="row[0] === 'icon'">
                     <i v-if="form.icon || effIcon" class="fas" :class="'fa-' + (form.icon || effIcon)"></i>
                     <template v-else>N/A</template>
@@ -470,6 +471,7 @@ function colorOr(val, fallback) {
                   <!-- tile mode -->
                   <div v-else-if="row[0] === 'mode'" class="opt-row">
                     <button class="opt" :class="{ on: (form.mode || 'button') === 'button' }" @click="form.mode = 'button'; closeProps()">Button</button>
+                    <button class="opt" :class="{ on: form.mode === 'toggle' }" @click="form.mode = 'toggle'; closeProps()">Toggle</button>
                     <button class="opt" :class="{ on: form.mode === 'slider' }" @click="form.mode = 'slider'; closeProps()">Slider</button>
                   </div>
 

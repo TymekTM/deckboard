@@ -76,7 +76,7 @@ function mergeAppState(name, data) {
   appStates[name] = { ...(appStates[name] || {}), ...data };
 }
 
-// type -> {icon, color, mode, dual} fallbacks: static catalog + extensions
+// type -> {icon, color, mode} fallbacks: static catalog + extensions
 const typeMeta = computed(() => {
   const map = {};
   for (const e of CATALOG) {
@@ -85,7 +85,6 @@ const typeMeta = computed(() => {
         icon: e.icon || "",
         color: e.color || "",
         mode: e.mode || "",
-        dual: Boolean(e.dual),
       };
     }
   }
@@ -94,7 +93,6 @@ const typeMeta = computed(() => {
       icon: i.icon || "",
       color: i.color || "",
       mode: i.mode || "",
-      dual: (i.mode || "").includes("toggle"),
     };
   }
   return map;
