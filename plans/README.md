@@ -54,6 +54,16 @@ Scope-adjacent (correctness, not perf - surfaced during the perf audit):
   board edits and the boards cache never invalidates. Only the
   integration test calls it. Deserves its own fix; interacts with
   finding 2's rebuild frequency once wired.
+- Flaky pre-existing race (reproduced on base `b4013a8`, unchanged by the
+  perf-fixes branch): `token_connect_delivers_full_snapshot` intermittently
+  receives `state.patch` before `welcome`/`boards.sync`. The session
+  attaches to the hub at `session.rs:204` (before the welcome frames are
+  queued, deliberately per the comment there), so the 10 Hz state flusher
+  can queue a dirty-channel patch in that window. Real clients dispatch by
+  frame kind so it is harmless in production; the test's ordered
+  `next_frame` expectation is what breaks. Fix ideas: skip patches for
+  sessions that have not been welcomed yet, or make the handshake helper
+  tolerate out-of-order pushes.
 
 ## Dependency notes
 
