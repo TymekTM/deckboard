@@ -469,6 +469,9 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         Some(v2) => deckboard_legacy::router(state.clone()).merge(deckboard_v2::router(v2.clone())),
         None => deckboard_legacy::router(state.clone()),
     };
+    let v2_reaper = v2
+        .as_ref()
+        .map(|v2| (v2.hub.clone(), v2.config.ping_interval));
     tauri::async_runtime::spawn(async move {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
         // A busy port must not cost the whole session: a leftover instance
@@ -492,6 +495,19 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 hub_reaper.reap(75).await;
             }
         });
+        if let Some((v2_hub, ping_interval)) = v2_reaper {
+            // v2: pings every `ping_interval`; a healthy client pongs each
+            // one, so three missed intervals mean the peer is gone without
+            // a TCP close (queue-bounded hub tears the rest down)
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                let max_silent = 3 * ping_interval.as_millis() as u64;
+                loop {
+                    interval.tick().await;
+                    v2_hub.reap_silent(max_silent);
+                }
+            });
+        }
         if let Err(e) = axum::serve(
             listener,
             app_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),

@@ -1,11 +1,15 @@
 //! Connected v2 clients. One `V2Session` per WebSocket; outbound frames go
-//! through an unbounded channel drained by the connection's pump task, so
+//! through a bounded channel drained by the connection's pump task, so
 //! `broadcast_frame` is a cheap synchronous fan-out the editor's write
-//! path can call from anywhere.
+//! path can call from anywhere. A peer whose queue overflows (it stopped
+//! reading) is closed by the hub, and the hosts' reaper drops sessions
+//! silent past the ping timeout - an unbounded queue on a stalled peer
+//! would otherwise grow for the process lifetime.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use deckboard_proto::Frame;
 use tokio::sync::mpsc;
@@ -26,13 +30,14 @@ impl V2Hub {
     /// Builds the session without hub membership; `attach` adds it once the
     /// hello/auth handshake succeeded. Until then broadcasts must skip the
     /// socket entirely - an unauthenticated peer must not receive pushes.
-    pub fn create(&self, out: mpsc::UnboundedSender<super::session::WsOut>) -> Arc<V2Session> {
+    pub fn create(&self, out: mpsc::Sender<super::session::WsOut>) -> Arc<V2Session> {
         Arc::new(V2Session {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             out,
             device: Mutex::new(None),
             last_seen: AtomicU64::new(crate::unix_millis()),
             holds: Mutex::new(HashMap::new()),
+            pump: Mutex::new(None),
         })
     }
 
@@ -46,7 +51,7 @@ impl V2Hub {
 
     pub fn remove(&self, id: u64) {
         if let Some(session) = self.sessions.lock().expect("v2 hub poisoned").remove(&id) {
-            session.abort_holds();
+            session.shutdown();
         }
     }
 
@@ -54,34 +59,108 @@ impl V2Hub {
         self.sessions.lock().expect("v2 hub poisoned").len()
     }
 
-    /// Serializes once and pushes to every live session. Send errors mean a
-    /// dying connection; its own loop notices and cleans up.
+    /// Serializes once and pushes to every live session. A full or closed
+    /// queue means the peer stopped reading: that session is torn down
+    /// via the dead list (removal must not happen under the map lock).
     pub fn broadcast_frame(&self, frame: &Frame) {
         let Ok(text) = serde_json::to_string(frame) else {
             return;
         };
-        for session in self.sessions.lock().expect("v2 hub poisoned").values() {
-            let _ = session.out.send(super::session::WsOut::Text(text.clone()));
+        let mut dead = Vec::new();
+        {
+            let sessions = self.sessions.lock().expect("v2 hub poisoned");
+            for session in sessions.values() {
+                if session
+                    .try_send(super::session::WsOut::Text(text.clone()))
+                    .is_err()
+                {
+                    dead.push(session.id);
+                }
+            }
+        }
+        for id in dead {
+            tracing::info!(session = id, "v2 session closed: outbound queue full");
+            self.remove(id);
+        }
+    }
+
+    /// Drops sessions whose last inbound frame (text or pong) is older
+    /// than `max_silent_ms`. The pump's pings keep a healthy client's
+    /// pong arriving every `ping_interval`, so silence past the grace
+    /// window means the peer is gone without a TCP close.
+    pub fn reap_silent(&self, max_silent_ms: u64) {
+        let mut dead = Vec::new();
+        {
+            let sessions = self.sessions.lock().expect("v2 hub poisoned");
+            for session in sessions.values() {
+                if session.silent_for_ms() > max_silent_ms {
+                    dead.push(session.id);
+                }
+            }
+        }
+        for id in dead {
+            tracing::info!(session = id, "v2 session reaped: silent past ping timeout");
+            self.remove(id);
         }
     }
 }
 
 pub struct V2Session {
     pub id: u64,
-    out: mpsc::UnboundedSender<super::session::WsOut>,
+    out: mpsc::Sender<super::session::WsOut>,
     device: Mutex<Option<DeviceEntry>>,
     last_seen: AtomicU64,
     /// Tile id -> running hold-repeat loop; aborted by `press-end`,
     /// disconnect or the cap (loop-internal).
     holds: Mutex<HashMap<i64, tokio::task::JoinHandle<()>>>,
+    /// The connection's outbound pump; owned here so hub teardown can
+    /// abort a pump stuck on a send that will never complete.
+    pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl V2Session {
     pub fn send_frame(&self, frame: &Frame) -> bool {
         match serde_json::to_string(frame) {
-            Ok(text) => self.out.send(super::session::WsOut::Text(text)).is_ok(),
+            Ok(text) => self.try_send(super::session::WsOut::Text(text)).is_ok(),
             Err(_) => false,
         }
+    }
+
+    fn try_send(
+        &self,
+        msg: super::session::WsOut,
+    ) -> Result<(), mpsc::error::TrySendError<super::session::WsOut>> {
+        self.out.try_send(msg)
+    }
+
+    pub fn set_pump(&self, handle: tokio::task::JoinHandle<()>) {
+        *self.pump.lock().expect("session poisoned") = Some(handle);
+    }
+
+    fn take_pump(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.pump.lock().expect("session poisoned").take()
+    }
+
+    /// Waits for the pump to flush queued frames and finish within `grace`.
+    pub async fn finish_pump(&self, grace: Duration) {
+        if let Some(handle) = self.take_pump() {
+            let _ = tokio::time::timeout(grace, handle).await;
+        }
+    }
+
+    pub fn abort_pump(&self) {
+        if let Some(handle) = self.take_pump() {
+            handle.abort();
+        }
+    }
+
+    /// Teardown from the hub side (queue overflow, silence watchdog):
+    /// stop hold loops, ask the pump to close (a full queue means the
+    /// socket is wedged anyway) and abort the pump.
+    pub fn shutdown(&self) {
+        self.abort_holds();
+        let _ = self.try_send(super::session::WsOut::Close);
+        self.abort_pump();
     }
 
     pub fn set_device(&self, device: DeviceEntry) {
@@ -104,6 +183,13 @@ impl V2Session {
     /// Milliseconds since the last inbound frame.
     pub fn silent_for_ms(&self) -> u64 {
         crate::unix_millis().saturating_sub(self.last_seen.load(Ordering::Relaxed))
+    }
+
+    /// Test hook: age the liveness stamp as if the peer went quiet.
+    #[cfg(test)]
+    pub fn age_last_seen_by(&self, ms: u64) {
+        self.last_seen
+            .store(crate::unix_millis().saturating_sub(ms), Ordering::Relaxed);
     }
 
     pub fn insert_hold(&self, tile: i64, handle: tokio::task::JoinHandle<()>) {
@@ -139,19 +225,24 @@ impl V2Session {
 mod tests {
     use super::*;
     use crate::session::WsOut;
+    use tokio::sync::mpsc;
+
+    fn frame() -> Frame {
+        Frame::push(
+            deckboard_proto::TYPE_BOARD_OPEN,
+            serde_json::json!({"board": 0}),
+        )
+    }
 
     #[test]
     fn broadcast_reaches_sessions_and_remove_cleans_up() {
         let hub = V2Hub::new();
-        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
-        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let (tx_a, mut rx_a) = mpsc::channel(4);
+        let (tx_b, _rx_b) = mpsc::channel(4);
         let a = hub.create(tx_a);
         // Unauthenticated sessions (created but not attached) are outside
         // the fan-out; only attach brings a socket into the broadcast set.
-        hub.broadcast_frame(&Frame::push(
-            deckboard_proto::TYPE_BOARD_OPEN,
-            serde_json::json!({"board": 0}),
-        ));
+        hub.broadcast_frame(&frame());
         assert!(
             rx_a.try_recv().is_err(),
             "pre-auth session must not receive broadcasts"
@@ -160,16 +251,48 @@ mod tests {
         hub.attach(&hub.create(tx_b));
         assert_eq!(hub.count(), 2);
 
-        hub.broadcast_frame(&Frame::push(
-            deckboard_proto::TYPE_BOARD_OPEN,
-            serde_json::json!({"board": 3}),
-        ));
+        hub.broadcast_frame(&frame());
         let WsOut::Text(text) = rx_a.blocking_recv().unwrap() else {
             panic!("text")
         };
         assert!(text.contains("board.open"));
 
         hub.remove(a.id);
+        assert_eq!(hub.count(), 1);
+    }
+
+    #[test]
+    fn overflowing_queue_closes_the_session() {
+        let hub = V2Hub::new();
+        // receiver never drained: a peer that stopped reading
+        let (tx, _rx) = mpsc::channel(4);
+        let session = hub.create(tx);
+        hub.attach(&session);
+        assert_eq!(hub.count(), 1);
+        // broadcast well past any plausible queue bound; the hub must
+        // remove the wedged session instead of queueing forever
+        for _ in 0..1024 {
+            hub.broadcast_frame(&frame());
+            if hub.count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(hub.count(), 0, "wedged session must be closed");
+    }
+
+    #[test]
+    fn reap_silent_drops_stale_and_keeps_fresh_sessions() {
+        let hub = V2Hub::new();
+        let (tx_stale, _rx_stale) = mpsc::channel(4);
+        let (tx_fresh, _rx_fresh) = mpsc::channel(4);
+        let stale = hub.create(tx_stale);
+        let fresh = hub.create(tx_fresh);
+        hub.attach(&stale);
+        hub.attach(&fresh);
+        stale.age_last_seen_by(10 * 60_000);
+        hub.reap_silent(180_000);
+        assert_eq!(hub.count(), 1, "fresh session survives the reap");
+        hub.broadcast_frame(&frame());
         assert_eq!(hub.count(), 1);
     }
 }

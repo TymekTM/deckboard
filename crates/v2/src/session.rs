@@ -1,6 +1,9 @@
 //! One authenticated WebSocket session: hello handshake, welcome + full
 //! syncs, interaction dispatch (incl. server-side hold-to-repeat loops)
-//! and the ping/watchdog keepalive (docs/protocol-v2.md §1, §3, §6).
+//! and the ping/queue keepalive (docs/protocol-v2.md §1, §3, §6): the
+//! pump owns pings, the outbound queue is bounded (a peer that stops
+//! reading closes the session instead of growing the queue forever) and
+//! the hosts' reaper drops sessions silent past the ping timeout.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +22,11 @@ use crate::hub::V2Session;
 use crate::service::{Auth, V2State};
 use crate::state::{ext_channel, StateEngine};
 
+/// Outbound queue bound. Generous against current push rates (a healthy
+/// client drains it well under a second); overflow means the peer stopped
+/// reading, which closes the session.
+const QUEUE_CAP: usize = 256;
+
 /// Messages queued for the connection's outbound pump.
 pub enum WsOut {
     Text(String),
@@ -29,14 +37,14 @@ pub enum WsOut {
 
 pub(super) async fn run(state: Arc<V2State>, socket: WebSocket, auth: Auth) {
     let (mut sink, mut stream) = socket.split();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<WsOut>();
+    let (out_tx, mut out_rx) = mpsc::channel::<WsOut>(QUEUE_CAP);
     let session = state.hub.create(out_tx.clone());
     tracing::info!(session = session.id, "v2 session open");
 
     // Outbound pump: frames from anywhere (session handlers, broadcasts)
     // plus the protocol-level pings. The first interval tick fires
     // immediately, so consume it.
-    let pump = {
+    let pump: tokio::task::JoinHandle<()> = {
         let ping_interval = state.config.ping_interval;
         tokio::spawn(async move {
             let mut ping = tokio::time::interval(ping_interval);
@@ -70,6 +78,9 @@ pub(super) async fn run(state: Arc<V2State>, socket: WebSocket, auth: Auth) {
             }
         })
     };
+    // The hub's teardown path (overflow, silence watchdog) aborts the pump
+    // through the session; the handle lives there, not in a local.
+    session.set_pump(pump);
 
     if run_session(&state, &session, &mut stream, &out_tx, auth)
         .await
@@ -77,10 +88,10 @@ pub(super) async fn run(state: Arc<V2State>, socket: WebSocket, auth: Auth) {
     {
         // Fatal: let the pump flush the queued error frames, then close
         // politely - an abort would drop them.
-        let _ = out_tx.send(WsOut::Close);
-        let _ = tokio::time::timeout(Duration::from_millis(500), pump).await;
+        let _ = out_tx.try_send(WsOut::Close);
+        session.finish_pump(Duration::from_millis(500)).await;
     } else {
-        pump.abort();
+        session.abort_pump();
     }
     state.hub.remove(session.id);
     tracing::info!(session = session.id, "v2 session closed");
@@ -107,7 +118,7 @@ async fn run_session(
     state: &Arc<V2State>,
     session: &Arc<V2Session>,
     stream: &mut futures_util::stream::SplitStream<WebSocket>,
-    out_tx: &mpsc::UnboundedSender<WsOut>,
+    out_tx: &mpsc::Sender<WsOut>,
     auth: Auth,
 ) -> End {
     // 1) hello within the timeout, or the connection dies.
@@ -246,7 +257,7 @@ async fn run_session(
             }
             Ok(Message::Ping(payload)) => {
                 session.touch();
-                let _ = out_tx.send(WsOut::Pong(payload));
+                let _ = out_tx.try_send(WsOut::Pong(payload));
             }
             Ok(Message::Pong(_)) => session.touch(),
             Ok(Message::Close(_)) => return End::Closed,
