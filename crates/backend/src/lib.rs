@@ -30,6 +30,10 @@ pub struct SqlBackend {
     /// plus the settings path, so fresh tokens can be persisted.
     discord: Mutex<Option<DiscordConfig>>,
     discord_settings_path: Option<std::path::PathBuf>,
+    /// Keep-alive Discord connection actor, built on first use: one
+    /// authenticated pipe for the process lifetime instead of a fresh
+    /// ~450 ms session per click.
+    discord_client: Mutex<Option<pulpit_discord::DiscordClient>>,
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
     speaker: Mutex<Option<Box<dyn pulpit_os::Speaker>>>,
@@ -44,6 +48,7 @@ impl SqlBackend {
             voicemeeter: Mutex::new(VoicemeeterState::new()),
             discord: Mutex::new(None),
             discord_settings_path: None,
+            discord_client: Mutex::new(None),
             speaker: Mutex::new(None),
         }
     }
@@ -489,10 +494,11 @@ impl SqlBackend {
         true
     }
 
-    /// Run one Discord action over the local RPC pipe. On an expired token
-    /// a silent refresh is tried first; without a refresh token Discord's
-    /// consent popup shows on the desktop and the new tokens are saved to
-    /// settings.json. Returns true when the action kind belongs to Discord.
+    /// Run one Discord action over the kept-alive local RPC connection.
+    /// On an expired token a silent refresh is tried first; without a
+    /// refresh token Discord's consent popup shows on the desktop and the
+    /// new tokens are saved to settings.json. Returns true when the action
+    /// kind belongs to Discord.
     fn exec_discord(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
         if !pulpit_discord::is_discord_action(&cmd.kind) {
             return false;
@@ -502,17 +508,26 @@ impl SqlBackend {
             return true;
         };
         let args = Self::command_args(cmd);
-        let result = pulpit_discord::execute(&config, &cmd.kind, &args, |key, value| {
-            sink.app_value(&key, &value);
-        });
-        let result = match result {
+        // The client lock is held for the whole action on purpose: Discord
+        // actions queue up instead of racing the pipe. Worst case is a
+        // consent-popup re-authorization blocking later actions until it
+        // resolves - the same blocking the popup itself imposes.
+        let mut clients = self.discord_client.lock().unwrap();
+        let client = clients.get_or_insert_with(pulpit_discord::DiscordClient::spawn);
+        let mut run = |config: &DiscordConfig| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            client.execute(config, &cmd.kind, &args, deadline).inspect(|o| {
+                if let Some(o) = o {
+                    sink.app_value(&o.key, &o.label);
+                }
+            })
+        };
+        let result = match run(&config) {
             Err(pulpit_discord::DiscordError::AuthRejected) => {
                 match self.reauthorize_discord(&config) {
                     Ok(fresh) => {
                         tracing::info!("discord re-authorized, retrying action");
-                        pulpit_discord::execute(&fresh, &cmd.kind, &args, |key, value| {
-                            sink.app_value(&key, &value);
-                        })
+                        run(&fresh)
                     }
                     Err(e) => Err(e),
                 }
