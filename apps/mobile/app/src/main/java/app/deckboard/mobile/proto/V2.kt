@@ -37,6 +37,8 @@ object V2 {
     const val TYPE_STATE_SYNC = "state.sync"
     const val TYPE_STATE_PATCH = "state.patch"
     const val TYPE_INTERACTION = "interaction"
+    /** Server-to-client only: the server is exiting on purpose. */
+    const val TYPE_SERVER_SHUTDOWN = "server.shutdown"
 
     // widget kinds (unknown degrades to button)
     const val KIND_BUTTON = "button"

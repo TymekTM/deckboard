@@ -379,9 +379,16 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
         Interaction::PressStart => {
             ack_ok();
             exec_once(state, button.clone(), true);
-            let params: Value = serde_json::from_str(button.options.as_deref().unwrap_or("")).unwrap_or(Value::Null);
+            let params: Value = serde_json::from_str(button.options.as_deref().unwrap_or(""))
+                .unwrap_or(Value::Null);
             if let Some((delay_ms, interval_ms)) = crate::boards::hold_repeat_config(&params) {
-                start_hold(state, session.clone(), button.clone(), delay_ms, interval_ms);
+                start_hold(
+                    state,
+                    session.clone(),
+                    button.clone(),
+                    delay_ms,
+                    interval_ms,
+                );
             }
         }
         Interaction::PressEnd => {
@@ -407,7 +414,13 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
     }
 }
 
-fn start_hold(state: &Arc<V2State>, session: Arc<V2Session>, button: ButtonRow, delay_ms: u64, interval_ms: u64) {
+fn start_hold(
+    state: &Arc<V2State>,
+    session: Arc<V2Session>,
+    button: ButtonRow,
+    delay_ms: u64,
+    interval_ms: u64,
+) {
     let engine = state.engine.clone();
     let hub = state.hub.clone();
     let backend = state.backend.clone();
@@ -514,7 +527,10 @@ mod tests {
             Some((400, 120))
         );
         assert_eq!(parse(r#"{"hold":{}}"#), None);
-        assert_eq!(parse(r#"{"hold":{"repeat":{"delay_ms":0,"interval_ms":5}}}"#), None);
+        assert_eq!(
+            parse(r#"{"hold":{"repeat":{"delay_ms":0,"interval_ms":5}}}"#),
+            None
+        );
         assert_eq!(parse("{}"), None);
     }
 

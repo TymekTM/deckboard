@@ -61,6 +61,17 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     private val _connState = MutableStateFlow<ConnState>(ConnState.Disconnected)
     val connState: StateFlow<ConnState> = _connState
 
+    /** True once the server announced its shutdown: the goodbye overlay is
+     *  up, the normal retry loop is suspended, and reconnects happen only
+     *  silently (foreground probe) or on a tap. Cleared by any successful
+     *  connect or by [reconnectFromShutdown]. */
+    private val _serverDown = MutableStateFlow(false)
+    val serverDown: StateFlow<Boolean> = _serverDown
+
+    /** Tracks the Activity's STARTED/STOPPED so the silent probe sleeps
+     *  with the screen: no connect attempts while the tablet is dozing. */
+    @Volatile private var foreground = false
+
     /** Reconnect attempts since the last successful session; the banner
      *  shows it so the retry loop is visible instead of mysterious. */
     private val _reconnectAttempt = MutableStateFlow(0)
@@ -116,6 +127,19 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         // to enter a fresh code.
         if (!_config.value.token.isNullOrBlank()) {
             connect()
+        }
+        // The silent probe: while the shutdown overlay is up and the app is
+        // foreground, poke the server every PROBE_SECONDS so a restarted
+        // machine picks the deck back up without a tap. Background = dark
+        // screen = no attempts at all.
+        scope.launch {
+            while (true) {
+                delay(PROBE_SECONDS * 1000L)
+                if (foreground && _serverDown.value) {
+                    Log.i(TAG, "shutdown probe: trying the server again")
+                    connect()
+                }
+            }
         }
     }
 
@@ -223,6 +247,23 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         _bitmaps.value = emptyMap()
     }
 
+    /** The user tapped the shutdown overlay: leave the standby state and
+     *  retry immediately, with the normal reconnecting banner visible. */
+    fun reconnectFromShutdown() {
+        _serverDown.value = false
+        reconnectAttempts = 1
+        _reconnectAttempt.value = 1
+        connect()
+    }
+
+    fun onAppForeground() {
+        foreground = true
+    }
+
+    fun onAppBackground() {
+        foreground = false
+    }
+
     private fun observeEvents(client: V2Client) {
         eventJob = scope.launch {
             launch {
@@ -232,8 +273,16 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
                         is ConnState.Connected -> {
                             reconnectAttempts = 0
                             _reconnectAttempt.value = 0
+                            _serverDown.value = false
                         }
-                        is ConnState.Failed, is ConnState.Disconnected -> scheduleReconnect()
+                        is ConnState.ServerDown -> {
+                            Log.i(TAG, "server announced shutdown - retry loop suspended")
+                            _serverDown.value = true
+                        }
+                        // While the overlay is up the probe owns reconnects:
+                        // failures are expected and stay invisible.
+                        is ConnState.Failed, is ConnState.Disconnected ->
+                            if (!_serverDown.value) scheduleReconnect()
                         else -> {}
                     }
                 }
@@ -385,6 +434,9 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         private const val TAG = "DeckboardViewModel"
 
         private const val ASSET_RETRIES = 3
+
+        /** Shutdown-overlay probe cadence; see the init loop. */
+        private const val PROBE_SECONDS = 30L
 
         /** Decode cap for tile images: tiles render around 150px, so a
          *  512px sample is plenty even on a 2x2-tile widget. */

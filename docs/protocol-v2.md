@@ -39,7 +39,8 @@ covers v2.
 - `type`: dotted, kebab-case names. Reserved control types: `hello`,
   `welcome`, `error`. Domain types: `boards.sync`, `boards.delta`,
   `board.open`, `state.sync`, `state.patch`, `interaction`. Reserved for
-  future use: `widget.event`, `boards.write`.
+  future use: `widget.event`, `boards.write`. Control, server-to-client
+  only: `server.shutdown` (see section 9).
 - `payload`: omitted when empty.
 - Unknown inbound `type`: if the frame carries an `id`, answer
   `error {code: "unknown-type"}`; otherwise ignore and log.
@@ -283,7 +284,27 @@ Two-step widget flows (confirm, prompt) and web-widget messaging (M6) will
 use `widget.event` frames with a `request_id` correlation. Nothing before
 M6 needs it; the name is reserved so M1 clients can safely ignore it.
 
-## 9. Versioning and evolution
+## 9. server.shutdown (server -> client, on exit)
+
+When the server exits on purpose (user quits the app, or the machine is
+shutting down), it sends one `server.shutdown` frame to every attached
+session, immediately followed by a WebSocket close:
+
+```json
+{ "v": 2, "type": "server.shutdown", "payload": {} }
+```
+
+The frame is the signal that the exit is deliberate: a conforming client
+stops reconnecting (it may show an idle/offline state instead) and can
+drop any keep-awake behavior. A plain disconnect without the frame keeps
+its usual meaning - transient loss, retry. Clients that predate the type
+ignore the unknown frame and behave as before.
+
+The frame is a courtesy, not a guarantee: if the process is killed hard
+or the flush loses the race with process teardown, the client sees a bare
+disconnect and retries as usual.
+
+## 10. Versioning and evolution
 
 - Additive changes (new message types, new optional fields, new enum
   values) never bump `v` and never break a conforming client: unknown
@@ -295,7 +316,7 @@ M6 needs it; the name is reserved so M1 clients can safely ignore it.
   (`crates/proto/tests/fixtures/*.json`): Rust round-trips them and the
   Kotlin unit test parses the same files. Both must stay green.
 
-## 10. Codegen
+## 11. Codegen
 
 - Types are defined once in Rust (`crates/proto`, serde) - ADR-004.
 - TypeScript: generated with ts-rs into `crates/proto/bindings/` by
@@ -305,7 +326,7 @@ M6 needs it; the name is reserved so M1 clients can safely ignore it.
   (`proto/Models.kt` grows v2 types with the M4 client), validated against
   the same fixtures by a JVM unit test.
 
-## 11. Coexistence with legacy
+## 12. Coexistence with legacy
 
 Both protocols live on one port: legacy under `/socket.io/` (frozen,
 stock client) and health on `/`, v2 under `/v2/ws` and `/assets/`,

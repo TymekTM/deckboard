@@ -1,4 +1,4 @@
-//! Golden fixture contract (docs/protocol-v2.md §9): every wire message
+//! Golden fixture contract (docs/protocol-v2.md §10): every wire message
 //! has one committed example that must (a) parse into its typed payload
 //! and (b) re-serialize to JSON equal to the file, envelope included. The
 //! Kotlin unit test parses the same files, so wire drift fails both builds.

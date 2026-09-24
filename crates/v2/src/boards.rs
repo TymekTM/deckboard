@@ -123,7 +123,11 @@ fn apply_implicit_params(row: &ButtonRow, params: &mut Value) {
     }
     let obj = params.as_object_mut().expect("just made an object");
     obj.insert("widget".into(), Value::String("clock".into()));
-    let format = if row.command.as_deref() == Some("clock-12h") { "12h" } else { "24h" };
+    let format = if row.command.as_deref() == Some("clock-12h") {
+        "12h"
+    } else {
+        "24h"
+    };
     obj.insert("clock_format".into(), Value::String(format.into()));
 }
 
@@ -150,7 +154,11 @@ fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>
             let press_pair = matches!(row.kind.as_str(), "key" | "advance-key")
                 || hold_repeat_config(&params).is_some();
             let interactions = if press_pair {
-                vec![Interaction::Tap, Interaction::PressStart, Interaction::PressEnd]
+                vec![
+                    Interaction::Tap,
+                    Interaction::PressStart,
+                    Interaction::PressEnd,
+                ]
             } else {
                 vec![Interaction::Tap]
             };
@@ -306,12 +314,19 @@ mod tests {
         let tile = build_tile(&row("key", "button", Some("A")), &assets, &engine);
         assert_eq!(
             tile.manifest.interactions,
-            vec![Interaction::Tap, Interaction::PressStart, Interaction::PressEnd]
+            vec![
+                Interaction::Tap,
+                Interaction::PressStart,
+                Interaction::PressEnd
+            ]
         );
         let mut r = row("vol", "button", Some("vol_down"));
         r.options = Some(r#"{"hold":{"repeat":{"delay_ms":400,"interval_ms":120}}}"#.into());
         let tile = build_tile(&r, &assets, &engine);
-        assert!(tile.manifest.interactions.contains(&Interaction::PressStart));
+        assert!(tile
+            .manifest
+            .interactions
+            .contains(&Interaction::PressStart));
     }
 
     #[test]
@@ -337,7 +352,10 @@ mod tests {
         let tile = build_tile(&r, &assets, &engine);
         let style = tile.manifest.style.unwrap();
         assert_eq!(style.icon_family.as_deref(), Some("fas"));
-        assert!(style.icon2.is_some(), "icon2 resolved from the icon2 column");
+        assert!(
+            style.icon2.is_some(),
+            "icon2 resolved from the icon2 column"
+        );
         assert_eq!(style.color2.as_deref(), Some("#ED4245"));
     }
 

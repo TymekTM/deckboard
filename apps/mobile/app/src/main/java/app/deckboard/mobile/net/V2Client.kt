@@ -42,6 +42,9 @@ sealed class ConnState {
     data class Connecting(val host: String, val port: Int) : ConnState()
     data class Connected(val host: String, val port: Int) : ConnState()
     data class Failed(val reason: String) : ConnState()
+    /** The server sent `server.shutdown`: the exit is deliberate, and
+     *  reconnecting would be pointless until it comes back. */
+    data object ServerDown : ConnState()
 }
 
 /** One decoded server frame, ready for the ViewModel. */
@@ -148,6 +151,15 @@ class V2Client(
 
     private fun nextRequestId(): String = "c${requestCounter++}"
 
+    /** The server's goodbye (docs/protocol-v2.md §9): the exit is
+     *  deliberate. Surface the terminal state, then close politely so the
+     *  server's teardown sees an acked peer. */
+    private fun onServerShutdown() {
+        Log.i(TAG, "server is shutting down - standing down")
+        _state.value = ConnState.ServerDown
+        webSocket?.close(1000, "server shutdown acknowledged")
+    }
+
     private fun sendFrame(frame: Frame) {
         val text = json.encodeToString(Frame.serializer(), frame)
         if (webSocket?.send(text) != true) {
@@ -178,17 +190,29 @@ class V2Client(
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.i(TAG, "closed: $reason")
-            _state.value = ConnState.Disconnected
+            // Our own close after `server.shutdown` must not downgrade the
+            // terminal state back to a retryable disconnect.
+            if (_state.value !is ConnState.ServerDown) {
+                _state.value = ConnState.Disconnected
+            }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.w(TAG, "failure: ${t.message}")
-            _state.value = ConnState.Failed(t.message ?: "connection failed")
+            if (_state.value !is ConnState.ServerDown) {
+                _state.value = ConnState.Failed(t.message ?: "connection failed")
+            }
         }
     }
 
     private fun handleFrame(text: String) {
         val frame = json.decodeFromString(Frame.serializer(), text)
+        // The shutdown notice must land even if a future server sends it
+        // without a payload - it carries nothing worth parsing anyway.
+        if (frame.type == V2.TYPE_SERVER_SHUTDOWN) {
+            onServerShutdown()
+            return
+        }
         // Dispatch on the frame type first: acks ECHO the request's type
         // (the welcome that confirms the hello and interaction acks carry
         // `ack` too), so matching on `ack` alone would swallow them.
@@ -223,6 +247,7 @@ class V2Client(
                 )
                 _events.trySend(V2Event.Patch(patch.changes))
             }
+            V2.TYPE_SERVER_SHUTDOWN -> onServerShutdown()
             V2.TYPE_ERROR -> {
                 val error = json.decodeFromJsonElement(ErrorPayload.serializer(), payload)
                 Log.w(TAG, "server error: ${error.code} ${error.message.orEmpty()}")

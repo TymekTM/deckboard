@@ -858,7 +858,13 @@ mod tests {
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
         // editor JSON form and the bare-id form both resolve
-        run_command(&mut input, &mut sink, &cmd("board", Some(r#"{"id":3}"#)), false).unwrap();
+        run_command(
+            &mut input,
+            &mut sink,
+            &cmd("board", Some(r#"{"id":3}"#)),
+            false,
+        )
+        .unwrap();
         run_command(&mut input, &mut sink, &cmd("board", Some("7")), false).unwrap();
         assert_eq!(sink.boards, vec![3, 7]);
         assert!(input.effects.is_empty());

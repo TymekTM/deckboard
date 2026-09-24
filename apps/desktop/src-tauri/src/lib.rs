@@ -22,6 +22,8 @@ struct DesktopState {
     /// Protocol v2 pairing codes; `None` when the v2 stack failed to start
     /// (bad devices.json or asset store) - the UI then hides pairing.
     pairing: Option<Arc<pulpit_v2::Pairing>>,
+    /// Protocol v2 session fan-out; receives the shutdown goodbye on quit.
+    v2_hub: Option<Arc<pulpit_v2::V2Hub>>,
     /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
     hotkey: std::sync::Mutex<String>,
     /// `pulpitApp/editor.json` - editor-local settings (hotkey), kept
@@ -149,8 +151,16 @@ pub fn run() {
             export_boards,
             import_boards,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Covers exits outside the tray menu (OS shutdown, logoff) when
+            // Tauri surfaces them; the once-guard keeps the tray quit from
+            // paying the flush wait twice.
+            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                goodbye_v2(app);
+            }
+        });
 }
 
 /// Register one button-style source (extension input, Voicemeeter or
@@ -196,6 +206,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             ext: None,
             port,
             pairing: None,
+            v2_hub: None,
             hotkey: std::sync::Mutex::new("Ctrl+Alt+D".to_string()),
             settings_path: None,
         };
@@ -454,13 +465,38 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         hub: Some(hub),
         ext: Some(ext_manager),
         port,
-        pairing: v2.map(|v| v.pairing.clone()),
+        pairing: v2.as_ref().map(|v| v.pairing.clone()),
+        v2_hub: v2.as_ref().map(|v| v.hub.clone()),
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
     }
 }
 
 // ---- tray + hotkey ---------------------------------------------------------
+
+/// Tells connected v2 tablets this exit is deliberate (docs/protocol-v2.md
+/// §9): one `server.shutdown` frame per session, then a WS close. Without
+/// it a quit looks like a network drop and tablets retry into the void.
+/// Best effort by design - the process exits either way.
+fn goodbye_v2(app: &AppHandle) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Some(hub) = app
+        .try_state::<DesktopState>()
+        .and_then(|state| state.v2_hub.clone())
+    else {
+        return;
+    };
+    hub.shutdown(&pulpit_proto::Frame::push(
+        pulpit_proto::TYPE_SERVER_SHUTDOWN,
+        serde_json::json!({}),
+    ));
+    // The session pumps write the frame + close asynchronously; give them
+    // a beat before `exit` tears the process down.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
 
 /// The main window is built here instead of `tauri.conf.json` because the
 /// WebView2 argument list is only reachable through the builder API, and a
@@ -518,7 +554,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     launch.enable()
                 };
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                goodbye_v2(app);
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

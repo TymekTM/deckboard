@@ -589,9 +589,8 @@ impl Pipe {
                 unsafe { pipe::CloseHandle(event) };
                 return Err(DiscordError::Call("WriteFile"));
             }
-            let wait = unsafe {
-                pipe::WaitForSingleObject(event, WRITE_TIMEOUT.as_millis() as u32)
-            };
+            let wait =
+                unsafe { pipe::WaitForSingleObject(event, WRITE_TIMEOUT.as_millis() as u32) };
             if wait != pipe::WAIT_OBJECT_0 {
                 // wedged Discord must not hang the actor forever: abandon
                 // the write and let the connection die
@@ -603,7 +602,8 @@ impl Pipe {
                 return Err(DiscordError::Call("WriteFile timeout"));
             }
         }
-        let ok = unsafe { pipe::GetOverlappedResult(self.handle, &mut overlapped, &mut written, 1) };
+        let ok =
+            unsafe { pipe::GetOverlappedResult(self.handle, &mut overlapped, &mut written, 1) };
         unsafe { pipe::CloseHandle(event) };
         if ok == 0 {
             return Err(DiscordError::Call("GetOverlappedResult(write)"));
@@ -780,7 +780,11 @@ impl Conn {
             if now >= deadline {
                 return Ok(None);
             }
-            if self.pipe.read_some(&mut self.buf, cap.min(deadline - now))? > 0 {
+            if self
+                .pipe
+                .read_some(&mut self.buf, cap.min(deadline - now))?
+                > 0
+            {
                 self.inbox.extend(extract_frames(&mut self.buf));
             }
         }
@@ -792,7 +796,8 @@ impl Conn {
         match classify(op, &frame, nonce) {
             Incoming::Reply => Ok(Some(frame)),
             Incoming::Ping(v) => {
-                self.pipe.write_all(&encode_frame(OP_PONG, &v.to_string()))?;
+                self.pipe
+                    .write_all(&encode_frame(OP_PONG, &v.to_string()))?;
                 Ok(None)
             }
             Incoming::VoiceSettings(v) => {
@@ -1102,11 +1107,7 @@ fn run_exec(
     outcome
 }
 
-fn run_connected(
-    conn: &mut Conn,
-    what: &Plan,
-    deadline: Instant,
-) -> Result<Option<ExecOutcome>> {
+fn run_connected(conn: &mut Conn, what: &Plan, deadline: Instant) -> Result<Option<ExecOutcome>> {
     match what {
         Plan::ConnectChannel(id) => {
             let reply = conn.request_until(
@@ -1216,11 +1217,9 @@ mod tests {
         let reply = json!({"cmd":"SET_VOICE_SETTINGS","nonce":"dk-7","data":{"mute":false}});
         assert_eq!(classify(OP_FRAME, &reply, Some("dk-7")), Incoming::Reply);
         // error frames carry our nonce too: the caller inspects evt
-        let error = json!({"cmd":"AUTHENTICATE","evt":"ERROR","nonce":"dk-2","data":{"message":"bad"}});
-        assert_eq!(
-            classify(OP_FRAME, &error, Some("dk-2")),
-            Incoming::Reply
-        );
+        let error =
+            json!({"cmd":"AUTHENTICATE","evt":"ERROR","nonce":"dk-2","data":{"message":"bad"}});
+        assert_eq!(classify(OP_FRAME, &error, Some("dk-2")), Incoming::Reply);
         let push = json!({"cmd":"DISPATCH","evt":"VOICE_SETTINGS_UPDATE","data":{"mute":true}});
         match classify(OP_FRAME, &push, None) {
             Incoming::VoiceSettings(v) => assert_eq!(v["mute"], true),
@@ -1374,8 +1373,8 @@ mod tests {
     #[ignore = "talks to the real Discord pipe"]
     fn live_authenticate() {
         let config = saved_config();
-        let conn = Conn::connect(&config, Instant::now() + Duration::from_secs(8))
-            .expect("auth failed");
+        let conn =
+            Conn::connect(&config, Instant::now() + Duration::from_secs(8)).expect("auth failed");
         drop(conn);
         println!("authenticated ok");
     }

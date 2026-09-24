@@ -64,6 +64,20 @@ impl V2Hub {
             let _ = session.out.send(super::session::WsOut::Text(text.clone()));
         }
     }
+
+    /// The exit path: one last frame to every attached session, then a WS
+    /// close. Each pump drains its queue in order, so the frame is on the
+    /// wire before the close - clients that understand it know the exit is
+    /// deliberate, not a network drop.
+    pub fn shutdown(&self, frame: &Frame) {
+        let text = serde_json::to_string(frame).ok();
+        for session in self.sessions.lock().expect("v2 hub poisoned").values() {
+            if let Some(text) = &text {
+                let _ = session.out.send(super::session::WsOut::Text(text.clone()));
+            }
+            let _ = session.out.send(super::session::WsOut::Close);
+        }
+    }
 }
 
 pub struct V2Session {
@@ -171,5 +185,24 @@ mod tests {
 
         hub.remove(a.id);
         assert_eq!(hub.count(), 1);
+    }
+
+    #[test]
+    fn shutdown_sends_frame_then_close() {
+        let hub = V2Hub::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let a = hub.create(tx);
+        hub.attach(&a);
+
+        hub.shutdown(&Frame::push(
+            pulpit_proto::TYPE_SERVER_SHUTDOWN,
+            serde_json::json!({}),
+        ));
+
+        let WsOut::Text(text) = rx.blocking_recv().unwrap() else {
+            panic!("goodbye frame first")
+        };
+        assert!(text.contains("server.shutdown"));
+        assert!(matches!(rx.blocking_recv().unwrap(), WsOut::Close));
     }
 }

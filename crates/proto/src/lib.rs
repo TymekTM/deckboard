@@ -9,7 +9,7 @@
 //! shared WebView layer; `Photo`/`Video` reference hashed assets served by
 //! the desktop (`/assets/<hash>`), never inline dataURLs.
 //!
-//! Evolution rules (docs/protocol-v2.md §9): additive changes never break a
+//! Evolution rules (docs/protocol-v2.md §10): additive changes never break a
 //! conforming client - unknown message types are ignored, unknown fields
 //! dropped, unknown enum values degrade through the `#[serde(other)]`
 //! variants.
@@ -42,6 +42,9 @@ pub const TYPE_INTERACTION: &str = "interaction";
 pub const TYPE_WIDGET_EVENT: &str = "widget.event";
 /// Reserved for a future remote editor; the editor writes in-process.
 pub const TYPE_BOARDS_WRITE: &str = "boards.write";
+/// Server-to-client only: the server is exiting on purpose (app quit or
+/// machine shutdown). The client stops reconnecting; a WS close follows.
+pub const TYPE_SERVER_SHUTDOWN: &str = "server.shutdown";
 
 /// Error codes carried in `error` frames (docs/protocol-v2.md §2).
 pub mod error_code {
