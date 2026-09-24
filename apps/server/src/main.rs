@@ -307,21 +307,12 @@ async fn main() -> anyhow::Result<()> {
             hub.reap(75).await;
         }
     });
-    // v2: same sweep for the typed protocol - pings every `ping_interval`,
-    // a healthy client pongs each one, so three missed intervals mean the
-    // peer is gone without a TCP close (the queue-bounded hub tears down
-    // peers that stop reading on its own).
-    {
-        let v2_hub = v2.hub.clone();
-        let max_silent = 3 * v2.config.ping_interval.as_millis() as u64;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-            loop {
-                interval.tick().await;
-                v2_hub.reap_silent(max_silent);
-            }
-        });
-    }
+    // v2: same sweep for the typed protocol - three missed pongs mean the
+    // peer is gone without a TCP close (see deckboard_v2::run_reaper).
+    tokio::spawn(deckboard_v2::run_reaper(
+        v2.hub.clone(),
+        v2.config.ping_interval,
+    ));
 
     // ConnectInfo is needed by the loopback guard on POST /v2/pair.
     let app = deckboard_legacy::router(state).merge(deckboard_v2::router(v2));

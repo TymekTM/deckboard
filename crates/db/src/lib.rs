@@ -781,6 +781,44 @@ mod tests {
     }
 
     #[test]
+    fn button_meta_matches_get_button_except_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+        let board = db.insert_board("Board", "#2c3e50", 4, 3).unwrap();
+
+        let mut row = sample_button(board, 0, 0);
+        row.img2 = Some("data:image/png;base64,BBB".into());
+        let id = db.insert_button(&row).unwrap();
+
+        // the meta read skips the image columns; every other field must be
+        // identical to the full read (interaction lookups rely on it)
+        let full = db.get_button(id).unwrap().unwrap();
+        let meta = db.get_button_meta(id).unwrap().unwrap();
+        assert_eq!(meta.img.as_deref(), Some(""));
+        assert_eq!(meta.img2.as_deref(), Some(""));
+        assert_eq!(meta.id, full.id);
+        assert_eq!(meta.board_id, full.board_id);
+        assert_eq!(meta.kind, full.kind);
+        assert_eq!(meta.command, full.command);
+        assert_eq!(meta.title, full.title);
+        assert_eq!(meta.mode, full.mode);
+        assert_eq!(meta.options, full.options);
+        assert_eq!(meta.x, full.x);
+        assert_eq!(meta.y, full.y);
+        assert_eq!(meta.w, full.w);
+        assert_eq!(meta.h, full.h);
+        assert_eq!(meta.color, full.color);
+        assert_eq!(meta.color2, full.color2);
+        assert_eq!(meta.icon, full.icon);
+        assert_eq!(meta.icon2, full.icon2);
+        assert_eq!(meta.shape, full.shape);
+        assert_eq!(meta.shape2, full.shape2);
+        assert_eq!(meta.title_position, full.title_position);
+        assert_eq!(meta.title_position2, full.title_position2);
+        assert!(db.get_button_meta(999).unwrap().is_none());
+    }
+
+    #[test]
     fn clear_board_removes_only_that_boards_buttons() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();

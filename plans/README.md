@@ -13,10 +13,10 @@ when done.
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001 | aidev: mtime-keyed caches for immutable transcript facts | P1 | M | - | DEFERRED by owner - crate left as-is, see `crates/aidev/PERF_NOTES.txt` |
-| 002 | Images off the interaction/editor hot paths | P1 | M | - | DONE (branch `perf-fixes`, commit `947619b`) |
+| 002 | Images off the interaction/editor hot paths | P1 | M | - | DONE (branch `perf-fixes`, commit `947619b`; step 5 list_boards N+1 skipped as the plan allows; the app-value helper landed as `Mapper::app_value` in `crates/legacy/src/mapping.rs` + `Backend::get_button_meta` trait default instead of the plan's `legacy_app_marker` in v2/boards.rs - same oracle coverage, less duplication) |
 | 003 | Frontend: per-tile rendering + hidden gating | P1 | M | - | DONE (commits `4545a11`..`a055327`; TileCell extraction + hidden buffer + stable identity + pointercancel/plugin-fs) |
-| 004 | Quiet idle loops (COM chain, emit gating, change detection) | P2 | M | - | DONE (commit `f74fd6a`; aidev dedupe step dropped with plan 001) |
-| 005 | v2: bounded outbound queues + silence watchdog | P2 | M | - | DONE (commit `cf06cf5`) |
+| 004 | Quiet idle loops (COM chain, emit gating, change detection) | P2 | M | - | DONE (commit `f74fd6a`; aidev dedupe step dropped with plan 001; review follow-up: change-gates now advance only after the WebView emit succeeded, so a hidden window never loses its last speaker update) |
+| 005 | v2: bounded outbound queues + silence watchdog | P2 | M | - | DONE (commit `cf06cf5`; the non-reading-WS-client integration scenario was impractical to drive - the two hub unit tests `overflowing_queue_closes_the_session` and `reap_silent_drops_stale_and_keeps_fresh_sessions` are the acceptance bar, per the plan's own fallback clause) |
 
 Plans 002 and 004 both touch `apps/desktop/src-tauri/src/lib.rs` (different
 functions); land them in either order but not simultaneously. Plan 003

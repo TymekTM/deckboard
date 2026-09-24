@@ -302,4 +302,16 @@ mod tests {
         sp.set_active_device(&active).expect("same-device switch");
         assert_eq!(sp.active_device().expect("active after"), active);
     }
+
+    #[test]
+    #[ignore = "live: touches the real audio device"]
+    fn live_status_matches_the_legacy_getters() {
+        // status() must agree with the getter pair it fused: one COM chain
+        // in place of volume() + muted() + active_device()
+        let mut sp = WinSpeaker::new();
+        let (vol, muted, device) = sp.status(true).expect("status snapshot");
+        assert_eq!(vol, sp.volume().expect("volume getter"));
+        assert_eq!(muted, sp.muted().expect("mute getter"));
+        assert_eq!(device.as_deref(), Some(sp.active_device().expect("device getter").as_str()));
+    }
 }

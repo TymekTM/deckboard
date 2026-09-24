@@ -306,9 +306,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // Emit to the editor WebView only when its window can be seen: a
     // tray-hidden window cannot render pushes, and every emit is an IPC
     // round-trip with a second serialization of the payload. Tablets ride
-    // the hub broadcasts and are unaffected. On the next push (<= 15 s
-    // for the slowest lane) a re-shown window is current again.
-    fn emit_if_visible(app: &AppHandle, event: &str, payload: &serde_json::Value) {
+    // the hub broadcasts and are unaffected. Periodic lanes re-deliver on
+    // their next tick; change-gated callers must NOT advance their gate
+    // when this returns false, or the shown window keeps a stale value.
+    fn emit_if_visible(app: &AppHandle, event: &str, payload: &serde_json::Value) -> bool {
         let visible = app
             .get_webview_window("main")
             .map(|w| w.is_visible().unwrap_or(false))
@@ -316,6 +317,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         if visible {
             let _ = app.emit(event, payload);
         }
+        visible
     }
 
     // extensions push custom values -> app_status_update, like the original
@@ -431,20 +433,22 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                     feed_v2.set("speaker-volume", serde_json::json!(level));
                     feed_v2.set("speaker-muted", serde_json::json!(muted));
                     if last_level != Some(level) || last_muted != Some(muted) {
-                        last_level = Some(level);
-                        last_muted = Some(muted);
                         let payload = serde_json::json!({
                             "app": "APP_CUSTOM_VALUE",
                             "data": {"speaker-volume": level, "speaker-muted": muted},
                         });
                         hub.broadcast("app_status_update", Some(&payload.to_string()))
                             .await;
-                        emit_if_visible(&app, "app-status-update", &payload);
+                        // advance the gate only once the WebView got it; a
+                        // hidden window retries on the next tick (<= 5 s)
+                        if emit_if_visible(&app, "app-status-update", &payload) {
+                            last_level = Some(level);
+                            last_muted = Some(muted);
+                        }
                     }
                 }
                 if let Some((_, _, Some(id))) = snapshot {
                     if last_device.as_deref() != Some(id.as_str()) {
-                        last_device = Some(id.clone());
                         feed_v2.set("speaker-device", serde_json::json!(id));
                         let payload = serde_json::json!({
                             "app": "THIRD_PARTY_APP",
@@ -452,7 +456,9 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                         });
                         hub.broadcast("app_status_update", Some(&payload.to_string()))
                             .await;
-                        emit_if_visible(&app, "app-status-update", &payload);
+                        if emit_if_visible(&app, "app-status-update", &payload) {
+                            last_device = Some(id.clone());
+                        }
                     }
                 }
             }
@@ -496,17 +502,9 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             }
         });
         if let Some((v2_hub, ping_interval)) = v2_reaper {
-            // v2: pings every `ping_interval`; a healthy client pongs each
-            // one, so three missed intervals mean the peer is gone without
-            // a TCP close (queue-bounded hub tears the rest down)
-            tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                let max_silent = 3 * ping_interval.as_millis() as u64;
-                loop {
-                    interval.tick().await;
-                    v2_hub.reap_silent(max_silent);
-                }
-            });
+            // v2: three missed pongs mean the peer is gone without a TCP
+            // close (see deckboard_v2::run_reaper)
+            tauri::async_runtime::spawn(deckboard_v2::run_reaper(v2_hub, ping_interval));
         }
         if let Err(e) = axum::serve(
             listener,
