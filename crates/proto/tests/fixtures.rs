@@ -3,7 +3,7 @@
 //! and (b) re-serialize to JSON equal to the file, envelope included. The
 //! Kotlin unit test parses the same files, so wire drift fails both builds.
 
-use deckboard_proto::*;
+use pulpit_proto::*;
 use std::fs;
 use std::path::Path;
 
@@ -47,7 +47,7 @@ fn hello() {
     let (frame, hello) = pinned::<Hello>("hello", TYPE_HELLO);
     assert_eq!(frame.id.as_deref(), Some("h1"));
     assert_eq!(frame.ack, None);
-    assert_eq!(hello.client, "deckboard-mobile");
+    assert_eq!(hello.client, "pulpit-mobile");
     assert_eq!(hello.name.as_deref(), Some("Tablet salon"));
     assert_eq!(
         hello.capabilities,

@@ -1,5 +1,5 @@
 [package]
-name = "deckboard-os"
+name = "pulpit-os"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

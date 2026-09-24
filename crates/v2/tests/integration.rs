@@ -14,11 +14,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use deckboard_actions::EventSink;
-use deckboard_db::{BoardRow, ButtonRow};
-use deckboard_legacy::Backend;
-use deckboard_proto::*;
-use deckboard_v2::{
+use pulpit_actions::EventSink;
+use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_legacy::Backend;
+use pulpit_proto::*;
+use pulpit_v2::{
     AssetStore, DeviceStore, Generation, Pairing, StateEngine, V2Config, V2Hub, V2State,
 };
 
@@ -176,12 +176,12 @@ fn test_state(
 }
 
 async fn spawn_server(state: Arc<V2State>) -> SocketAddr {
-    tokio::spawn(deckboard_v2::run_flusher(
+    tokio::spawn(pulpit_v2::run_flusher(
         state.engine.clone(),
         state.hub.clone(),
         state.config.patch_interval,
     ));
-    let app = deckboard_v2::router(state);
+    let app = pulpit_v2::router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -350,7 +350,7 @@ async fn pre_auth_session_receives_no_broadcasts() {
         &Frame::request(
             TYPE_HELLO,
             "h1",
-            serde_json::json!({"client": "deckboard-mobile", "version": "0.2.0"}),
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0"}),
         ),
     )
     .await;
@@ -377,7 +377,7 @@ async fn pairing_flow_mints_welcome_and_device() {
         &Frame::request(
             TYPE_HELLO,
             "h9",
-            serde_json::json!({"client": "deckboard-mobile", "version": "0.2.0"}),
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0"}),
         ),
     )
     .await;
@@ -399,7 +399,7 @@ async fn pairing_flow_mints_welcome_and_device() {
     assert!(closed.is_ok(), "socket must close after pair-invalid");
 
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
-    let (welcome, _sync, _state_sync) = handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    let (welcome, _sync, _state_sync) = handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
     assert_eq!(welcome.device.name, "Test tablet");
     assert_eq!(welcome.protocol, PROTOCOL_VERSION);
     // The code burned on use: a second pairing with it fails on the socket.
@@ -409,7 +409,7 @@ async fn pairing_flow_mints_welcome_and_device() {
         &Frame::request(
             TYPE_HELLO,
             "h9",
-            serde_json::json!({"client": "deckboard-mobile", "version": "0.2.0"}),
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0"}),
         ),
     )
     .await;
@@ -435,7 +435,7 @@ async fn token_connect_delivers_full_snapshot() {
     let addr = spawn_server(state.clone()).await;
 
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    let (welcome, sync, state_sync) = handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    let (welcome, sync, state_sync) = handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
     assert_eq!(welcome.device.id, device.id);
     assert_eq!(welcome.generation, 1);
     // Tile channels registered during the boards build land in the catalog.
@@ -478,7 +478,7 @@ async fn hello_rename_lands_in_welcome_and_registry() {
     // hello.name renames the paired device; the welcome of THIS connection
     // must already carry the new name, and so must the persisted registry.
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    let (welcome, _sync, _state_sync) = handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    let (welcome, _sync, _state_sync) = handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
     assert_eq!(
         welcome.device.name, "Test tablet",
         "welcome must carry the renamed entry"
@@ -492,7 +492,7 @@ async fn state_changes_flow_as_patches() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     state.engine.set("ext.late", serde_json::json!("hello"));
     let frame = tokio::time::timeout(Duration::from_secs(2), async {
@@ -517,7 +517,7 @@ async fn interaction_acks_execs_and_reports_unknown_tiles() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     // Tap: ack with the request id, then the exec lands in the backend.
     send_frame(
@@ -574,7 +574,7 @@ async fn hold_repeat_runs_until_press_end() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     send_frame(
         &mut ws,
@@ -617,7 +617,7 @@ async fn duplicate_press_start_does_not_leak_a_repeat_loop() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     // Two press-starts for one tile: the second must replace (not join)
     // the first loop, so a single press-end stops everything.
@@ -668,7 +668,7 @@ async fn undeclared_interactions_are_rejected() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     // The slider tile (21) declares only `slide`; press-start is not in
     // its manifest, so it must not reach the backend.
@@ -692,7 +692,7 @@ async fn board_switch_pushes_board_open() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     send_frame(
         &mut ws,
@@ -715,7 +715,7 @@ async fn published_deltas_reach_clients() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     let op = BoardOp::TileRemove { board: 3, tile: 21 };
     let generation = state.publish_delta(vec![op]);
@@ -764,7 +764,7 @@ async fn server_pings_idle_clients() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     let ping = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(msg) = ws.next().await {
@@ -783,7 +783,7 @@ async fn oversized_frame_gets_typed_error_and_close() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     // 1 MiB + slack: above the protocol limit but below the wire cap, so
     // the app-level check (not tungstenite) classifies it - the spec
@@ -821,7 +821,7 @@ async fn outdated_clients_are_closed_after_hello() {
         &Frame::request(
             TYPE_HELLO,
             "h1",
-            serde_json::json!({"client": "deckboard-mobile", "version": "0.2.0"}),
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0"}),
         ),
     )
     .await;
@@ -853,7 +853,7 @@ async fn exec_side_values_land_on_ext_channels() {
     let device = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
-    handshake(&mut ws, "deckboard-mobile", "0.2.0").await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     send_frame(
         &mut ws,

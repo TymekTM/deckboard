@@ -2,7 +2,7 @@
 //! payload, FontAwesome unicode icons, dual-state toggles, drag sliders
 //! and custom-value/graph displays.
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -45,8 +45,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.times
-import app.deckboard.mobile.R
-import app.deckboard.mobile.proto.Shortcut
+import app.pulpit.mobile.R
+import app.pulpit.mobile.proto.Shortcut
 
 val FaBrands = FontFamily(Font(R.font.fa_brands_400))
 val FaSolid = FontFamily(Font(R.font.fa_solid_900))

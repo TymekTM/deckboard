@@ -1,4 +1,4 @@
-package app.deckboard.mobile.proto
+package app.pulpit.mobile.proto
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable

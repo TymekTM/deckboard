@@ -3,7 +3,7 @@
 //! board.height grid. No top bar: a small floating chip (board name) opens
 //! the board menu; live values come from merged APP_CUSTOM_VALUE data.
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -33,15 +33,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.deckboard.mobile.proto.Board
-import app.deckboard.mobile.state.DeckboardViewModel
+import app.pulpit.mobile.proto.Board
+import app.pulpit.mobile.state.PulpitViewModel
 
 private fun hex(color: String?, fallback: Color): Color =
     color?.let { runCatching { Color(android.graphics.Color.parseColor(it.trim())) }.getOrNull() }
         ?: fallback
 
 @Composable
-fun BoardScreen(vm: DeckboardViewModel) {
+fun BoardScreen(vm: PulpitViewModel) {
     val board by vm.currentBoard.collectAsState()
 
     Box(Modifier.fillMaxSize().background(DeckColors.background)) {
@@ -56,14 +56,14 @@ fun BoardScreen(vm: DeckboardViewModel) {
 
 /** Small translucent board switcher in the corner - replaces the top bar. */
 @Composable
-private fun BoardChip(vm: DeckboardViewModel) {
+private fun BoardChip(vm: PulpitViewModel) {
     val boards by vm.boards.collectAsState()
     val board by vm.currentBoard.collectAsState()
     var menuOpen by remember { mutableStateOf(false) }
 
     Box(Modifier.padding(10.dp)) {
         Text(
-            text = board?.name ?: "Deckboard",
+            text = board?.name ?: "Pulpit",
             fontSize = 12.sp,
             color = Color.White.copy(alpha = 0.75f),
             maxLines = 1,
@@ -96,7 +96,7 @@ private fun BoardChip(vm: DeckboardViewModel) {
 }
 
 @Composable
-private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) {
+private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
     val liveValues by vm.customValues.collectAsState()
     val liveScalars by vm.liveScalars.collectAsState()
     val histories by vm.valueHistory.collectAsState()

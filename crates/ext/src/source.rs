@@ -18,7 +18,7 @@ pub enum SourceError {
 /// Where an extension package lives. Everything is normalized to a plain
 /// directory before the JS host sees it: asar packages are extracted to a
 /// temp dir once at startup (the original desktop app did exactly the
-/// same - `os.tmpdir()/deckboard-extensions`).
+/// same - `os.tmpdir()/pulpit-extensions`).
 pub struct PackageSource {
     pub package: String,
     pub root: PathBuf,
@@ -64,7 +64,7 @@ impl PackageSource {
 
 /// Temp extraction root, mirroring the original app's layout.
 pub fn temp_ext_root() -> PathBuf {
-    std::env::temp_dir().join("deckboard-extensions")
+    std::env::temp_dir().join("pulpit-extensions")
 }
 
 fn temp_ext_dir(package: &str) -> PathBuf {

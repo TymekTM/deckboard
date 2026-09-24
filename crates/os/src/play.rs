@@ -39,19 +39,19 @@ pub fn play_audio(path: &str) -> Result<(), String> {
         return Ok(());
     }
     // single alias: a new press restarts instead of layering clips
-    let _ = mci("close deckboard_play");
+    let _ = mci("close pulpit_play");
     // mpegvideo covers mp3/wma; plain open handles wav if that fails
     let quoted = path.replace('"', "'");
     let ok = mci(&format!(
-        "open \"{quoted}\" type mpegvideo alias deckboard_play"
+        "open \"{quoted}\" type mpegvideo alias pulpit_play"
     )) == 0
-        || mci(&format!("open \"{quoted}\" alias deckboard_play")) == 0;
+        || mci(&format!("open \"{quoted}\" alias pulpit_play")) == 0;
     if !ok {
-        let _ = mci("close deckboard_play");
+        let _ = mci("close pulpit_play");
         return Err(format!("cannot open audio file: {path}"));
     }
-    if mci("play deckboard_play") != 0 {
-        let _ = mci("close deckboard_play");
+    if mci("play pulpit_play") != 0 {
+        let _ = mci("close pulpit_play");
         return Err(format!("cannot play audio file: {path}"));
     }
     Ok(())

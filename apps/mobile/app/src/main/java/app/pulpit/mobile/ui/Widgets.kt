@@ -5,7 +5,7 @@
 //! or implicitly for `mode: "graph"`, which the original app renders as a
 //! value history series.
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import android.content.Context
 import androidx.compose.foundation.Canvas
@@ -47,7 +47,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.deckboard.mobile.proto.Shortcut
+import app.pulpit.mobile.proto.Shortcut
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -78,7 +78,7 @@ data class WidgetManifest(val widget: String) {
     }
 }
 
-/** True for the deckboard-clock extension's display tile (`type` is its
+/** True for the pulpit-clock extension's display tile (`type` is its
  *  input value); we render the time locally instead of consuming the
  *  extension's minute pushes. */
 fun isClockTile(shortcut: Shortcut): Boolean = shortcut.type == "clock-display-time"
@@ -126,7 +126,7 @@ fun ClockTile(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val prefs = remember(shortcut.id) { context.getSharedPreferences("deckboard", Context.MODE_PRIVATE) }
+    val prefs = remember(shortcut.id) { context.getSharedPreferences("pulpit", Context.MODE_PRIVATE) }
     var style by remember(shortcut.id) {
         mutableStateOf(prefs.getString("clock_style_${shortcut.id}", "icon") ?: "icon")
     }

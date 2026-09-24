@@ -4,9 +4,9 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use deckboard_db::{BoardRow, ButtonRow};
-use deckboard_legacy::hub::WsOut;
-use deckboard_legacy::{router, AppState, Backend, EditorBroadcaster, Hub};
+use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_legacy::hub::WsOut;
+use pulpit_legacy::{router, AppState, Backend, EditorBroadcaster, Hub};
 
 struct MockBackend;
 
@@ -43,7 +43,7 @@ impl Backend for MockBackend {
         &self,
         _button: ButtonRow,
         _is_tap_start: bool,
-        _sink: &mut dyn deckboard_actions::EventSink,
+        _sink: &mut dyn pulpit_actions::EventSink,
     ) {
     }
 

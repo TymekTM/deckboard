@@ -6,12 +6,12 @@
 
 use std::sync::Mutex;
 
-use deckboard_actions::{EnigoInput, EventSink};
-use deckboard_db::{BoardRow, ButtonRow, Db};
-use deckboard_discord::DiscordConfig;
-use deckboard_ext::ExtManager;
-use deckboard_legacy::service::Backend;
-use deckboard_vm::VoicemeeterState;
+use pulpit_actions::{EnigoInput, EventSink};
+use pulpit_db::{BoardRow, ButtonRow, Db};
+use pulpit_discord::DiscordConfig;
+use pulpit_ext::ExtManager;
+use pulpit_legacy::service::Backend;
+use pulpit_vm::VoicemeeterState;
 
 /// SQLite-backed backend. Executions are synchronous (the original robotjs
 /// dispatch was too) and run inside `spawn_blocking` on the caller's side;
@@ -32,7 +32,7 @@ pub struct SqlBackend {
     discord_settings_path: Option<std::path::PathBuf>,
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
-    speaker: Mutex<Option<Box<dyn deckboard_os::Speaker>>>,
+    speaker: Mutex<Option<Box<dyn pulpit_os::Speaker>>>,
 }
 
 impl SqlBackend {
@@ -73,19 +73,19 @@ impl SqlBackend {
         background: &str,
         width: i64,
         height: i64,
-    ) -> deckboard_db::Result<i64> {
+    ) -> pulpit_db::Result<i64> {
         self.db
             .lock()
             .unwrap()
             .insert_board(name, background, width, height)
     }
 
-    pub fn update_board(&self, board: &BoardRow) -> deckboard_db::Result<()> {
+    pub fn update_board(&self, board: &BoardRow) -> pulpit_db::Result<()> {
         self.db.lock().unwrap().update_board(board)
     }
 
     /// Delete the board and its shortcuts.
-    pub fn delete_board(&self, board_id: i64) -> deckboard_db::Result<()> {
+    pub fn delete_board(&self, board_id: i64) -> pulpit_db::Result<()> {
         self.db.lock().unwrap().delete_board(board_id)
     }
 
@@ -97,7 +97,7 @@ impl SqlBackend {
         mode: &str,
         x: i64,
         y: i64,
-    ) -> deckboard_db::Result<i64> {
+    ) -> pulpit_db::Result<i64> {
         let row = ButtonRow {
             board_id,
             kind: kind.to_string(),
@@ -111,24 +111,24 @@ impl SqlBackend {
         self.db.lock().unwrap().insert_button(&row)
     }
 
-    pub fn update_button(&self, button: &ButtonRow) -> deckboard_db::Result<()> {
+    pub fn update_button(&self, button: &ButtonRow) -> pulpit_db::Result<()> {
         self.db.lock().unwrap().update_button(button)
     }
 
     /// Drag/resize from the editor grid.
-    pub fn move_button(&self, id: i64, x: i64, y: i64, w: i64, h: i64) -> deckboard_db::Result<()> {
+    pub fn move_button(&self, id: i64, x: i64, y: i64, w: i64, h: i64) -> pulpit_db::Result<()> {
         self.db
             .lock()
             .unwrap()
             .update_button_geometry(id, x, y, w, h)
     }
 
-    pub fn delete_button(&self, id: i64) -> deckboard_db::Result<()> {
+    pub fn delete_button(&self, id: i64) -> pulpit_db::Result<()> {
         self.db.lock().unwrap().delete_button(id)
     }
 
     /// Remove every shortcut of a board ("Clear board").
-    pub fn clear_board(&self, board_id: i64) -> deckboard_db::Result<()> {
+    pub fn clear_board(&self, board_id: i64) -> pulpit_db::Result<()> {
         self.db.lock().unwrap().clear_board(board_id)
     }
 
@@ -139,7 +139,7 @@ impl SqlBackend {
     /// rows (without `id`). Key names follow the DB columns (`type`, not
     /// `kind`), so files written by the original app import here and vice
     /// versa.
-    pub fn export_boards(&self, ids: &[i64]) -> deckboard_db::Result<Vec<serde_json::Value>> {
+    pub fn export_boards(&self, ids: &[i64]) -> pulpit_db::Result<Vec<serde_json::Value>> {
         let db = self.db.lock().unwrap();
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
@@ -152,7 +152,7 @@ impl SqlBackend {
                 .map(button_json)
                 .collect();
             let mut board_json = serde_json::to_value(&board)
-                .map_err(|e| deckboard_db::DbError::Serialize(e.to_string()))?;
+                .map_err(|e| pulpit_db::DbError::Serialize(e.to_string()))?;
             if let Some(obj) = board_json.as_object_mut() {
                 obj.remove("id");
             }
@@ -167,13 +167,13 @@ impl SqlBackend {
     /// re-parented to the freshly inserted boards, mirroring the original
     /// import. The whole file lands atomically; new board ids are returned
     /// in input order.
-    pub fn import_boards(&self, boards: &[serde_json::Value]) -> deckboard_db::Result<Vec<i64>> {
+    pub fn import_boards(&self, boards: &[serde_json::Value]) -> pulpit_db::Result<Vec<i64>> {
         let db = self.db.lock().unwrap();
         db.with_transaction(|conn_tx| {
             let mut ids = Vec::with_capacity(boards.len());
             for board_json in boards {
                 let mut board: BoardRow = serde_json::from_value(board_json.clone())
-                    .map_err(|e| deckboard_db::DbError::Corrupt(format!("bad board entry: {e}")))?;
+                    .map_err(|e| pulpit_db::DbError::Corrupt(format!("bad board entry: {e}")))?;
                 board.id = 0;
                 board.converted = 1;
                 let board_id = conn_tx.insert_board_full(&board)?;
@@ -181,7 +181,7 @@ impl SqlBackend {
                     for macro_json in macros {
                         let mut button: ButtonRow = serde_json::from_value(macro_json.clone())
                             .map_err(|e| {
-                                deckboard_db::DbError::Corrupt(format!("bad macro entry: {e}"))
+                                pulpit_db::DbError::Corrupt(format!("bad macro entry: {e}"))
                             })?;
                         button.id = 0;
                         button.board_id = board_id;
@@ -255,7 +255,7 @@ impl Backend for SqlBackend {
     }
 
     fn exec(&self, button: ButtonRow, is_tap_start: bool, sink: &mut dyn EventSink) {
-        let cmd = deckboard_actions::Command::from_row(
+        let cmd = pulpit_actions::Command::from_row(
             &button.kind,
             button.command.as_deref(),
             button.options.as_deref(),
@@ -278,12 +278,12 @@ impl Backend for SqlBackend {
             return;
         }
         self.with_input(|input| {
-            let _ = deckboard_actions::run_command(input, sink, &cmd, is_tap_start);
+            let _ = pulpit_actions::run_command(input, sink, &cmd, is_tap_start);
         });
     }
 
     fn slider(&self, button: ButtonRow, value: f64) {
-        let cmd = deckboard_actions::Command::from_row(
+        let cmd = pulpit_actions::Command::from_row(
             &button.kind,
             button.command.as_deref(),
             button.options.as_deref(),
@@ -298,7 +298,7 @@ impl Backend for SqlBackend {
             return;
         }
         self.with_input(|input| {
-            let _ = deckboard_actions::run_slider_command(input, &cmd, value);
+            let _ = pulpit_actions::run_slider_command(input, &cmd, value);
         });
     }
 }
@@ -308,7 +308,7 @@ impl SqlBackend {
     /// Returns true when handled (the builtin dispatcher is skipped,
     /// mirroring the original `runCommand` default case). Slider taps pass
     /// `{"value": v}` - that is what original slider extensions receive.
-    fn exec_extension(&self, cmd: &deckboard_actions::Command, slider_value: Option<f64>) -> bool {
+    fn exec_extension(&self, cmd: &pulpit_actions::Command, slider_value: Option<f64>) -> bool {
         let Some(ext) = &self.extensions else {
             return false;
         };
@@ -328,7 +328,7 @@ impl SqlBackend {
     }
 
     /// Parse a command's JSON arguments; unparseable or empty -> null.
-    fn command_args(cmd: &deckboard_actions::Command) -> serde_json::Value {
+    fn command_args(cmd: &pulpit_actions::Command) -> serde_json::Value {
         cmd.command
             .as_deref()
             .and_then(|c| serde_json::from_str(c).ok())
@@ -338,17 +338,17 @@ impl SqlBackend {
     /// Native system-info actions (si-cpu, si-ram). The replaced JS
     /// extension's execute() was an empty body - a claimed no-op keeps
     /// tile presses succeeding the same way.
-    fn exec_sysinfo(&self, cmd: &deckboard_actions::Command) -> bool {
-        if !deckboard_sysinfo::is_sysinfo_action(&cmd.kind) {
+    fn exec_sysinfo(&self, cmd: &pulpit_actions::Command) -> bool {
+        if !pulpit_sysinfo::is_sysinfo_action(&cmd.kind) {
             return false;
         }
-        deckboard_sysinfo::execute(&cmd.kind);
+        pulpit_sysinfo::execute(&cmd.kind);
         true
     }
 
     /// Native url-to-call: a fire-and-forget GET, exactly what the JS
     /// package's `fetch(args.urlToCall)` did (response ignored).
-    fn exec_callurl(&self, cmd: &deckboard_actions::Command) -> bool {
+    fn exec_callurl(&self, cmd: &pulpit_actions::Command) -> bool {
         if cmd.kind != "url-to-call" {
             return false;
         }
@@ -380,11 +380,11 @@ impl SqlBackend {
     /// None means the platform has no speaker support.
     fn with_speaker<R>(
         &self,
-        f: impl FnOnce(&mut (dyn deckboard_os::Speaker + 'static)) -> R,
+        f: impl FnOnce(&mut (dyn pulpit_os::Speaker + 'static)) -> R,
     ) -> Option<R> {
         let mut slot = self.speaker.lock().unwrap();
         if slot.is_none() {
-            *slot = Some(Box::new(deckboard_os::platform_speaker()));
+            *slot = Some(Box::new(pulpit_os::platform_speaker()));
         }
         slot.as_deref_mut().map(f)
     }
@@ -392,7 +392,7 @@ impl SqlBackend {
     /// `speaker-device` command: `{"speaker": "<endpoint id>"}` switches
     /// the default output, like the original `setActiveOutputDevice`.
     /// Returns true when the kind belongs to the speaker service.
-    fn exec_speaker(&self, cmd: &deckboard_actions::Command, sink: &mut dyn EventSink) -> bool {
+    fn exec_speaker(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
         if cmd.kind != "speaker-device" {
             return false;
         }
@@ -423,7 +423,7 @@ impl SqlBackend {
 
     /// Master volume from a `speaker-volume` slider, percent 0..=100 like
     /// the original `setVolume(100 * e)`.
-    fn exec_speaker_volume(&self, cmd: &deckboard_actions::Command, value: f64) -> bool {
+    fn exec_speaker_volume(&self, cmd: &pulpit_actions::Command, value: f64) -> bool {
         if cmd.kind != "speaker-volume" {
             return false;
         }
@@ -437,7 +437,7 @@ impl SqlBackend {
 
     /// `play` command: start a local audio file, like the original's HTML5
     /// Audio element (restart on every press). Returns true when claimed.
-    fn exec_play(&self, cmd: &deckboard_actions::Command) -> bool {
+    fn exec_play(&self, cmd: &pulpit_actions::Command) -> bool {
         if cmd.kind != "play" {
             return false;
         }
@@ -445,7 +445,7 @@ impl SqlBackend {
         if path.is_empty() {
             return true;
         }
-        if let Err(e) = deckboard_os::play_audio(path) {
+        if let Err(e) = pulpit_os::play_audio(path) {
             tracing::warn!(path = %path, error = %e, "play failed");
         }
         true
@@ -477,8 +477,8 @@ impl SqlBackend {
     /// Run `vm-*` actions against the Voicemeeter remote DLL. Only tried
     /// when no loaded JS extension claimed the action (the original
     /// voicemeeter-control extension cannot load in our host).
-    fn exec_voicemeeter(&self, cmd: &deckboard_actions::Command) -> bool {
-        if !deckboard_vm::is_vm_action(&cmd.kind) {
+    fn exec_voicemeeter(&self, cmd: &pulpit_actions::Command) -> bool {
+        if !pulpit_vm::is_vm_action(&cmd.kind) {
             return false;
         }
         let args = Self::command_args(cmd);
@@ -493,8 +493,8 @@ impl SqlBackend {
     /// a silent refresh is tried first; without a refresh token Discord's
     /// consent popup shows on the desktop and the new tokens are saved to
     /// settings.json. Returns true when the action kind belongs to Discord.
-    fn exec_discord(&self, cmd: &deckboard_actions::Command, sink: &mut dyn EventSink) -> bool {
-        if !deckboard_discord::is_discord_action(&cmd.kind) {
+    fn exec_discord(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
+        if !pulpit_discord::is_discord_action(&cmd.kind) {
             return false;
         }
         let Some(config) = self.discord.lock().unwrap().clone() else {
@@ -502,15 +502,15 @@ impl SqlBackend {
             return true;
         };
         let args = Self::command_args(cmd);
-        let result = deckboard_discord::execute(&config, &cmd.kind, &args, |key, value| {
+        let result = pulpit_discord::execute(&config, &cmd.kind, &args, |key, value| {
             sink.app_value(&key, &value);
         });
         let result = match result {
-            Err(deckboard_discord::DiscordError::AuthRejected) => {
+            Err(pulpit_discord::DiscordError::AuthRejected) => {
                 match self.reauthorize_discord(&config) {
                     Ok(fresh) => {
                         tracing::info!("discord re-authorized, retrying action");
-                        deckboard_discord::execute(&fresh, &cmd.kind, &args, |key, value| {
+                        pulpit_discord::execute(&fresh, &cmd.kind, &args, |key, value| {
                             sink.app_value(&key, &value);
                         })
                     }
@@ -530,10 +530,10 @@ impl SqlBackend {
     fn reauthorize_discord(
         &self,
         config: &DiscordConfig,
-    ) -> Result<DiscordConfig, deckboard_discord::DiscordError> {
-        let tokens = deckboard_discord::refresh(config).or_else(|_| {
+    ) -> Result<DiscordConfig, pulpit_discord::DiscordError> {
+        let tokens = pulpit_discord::refresh(config).or_else(|_| {
             tracing::info!("discord token refresh unavailable - showing consent popup (confirm it on the desktop)");
-            deckboard_discord::authorize(config, std::time::Instant::now() + std::time::Duration::from_secs(180))
+            pulpit_discord::authorize(config, std::time::Instant::now() + std::time::Duration::from_secs(180))
         })?;
         let fresh = DiscordConfig {
             access_token: tokens.access_token,
@@ -541,9 +541,9 @@ impl SqlBackend {
             ..config.clone()
         };
         if let Some(path) = &self.discord_settings_path {
-            if let Err(e) = deckboard_discord::save_tokens(
+            if let Err(e) = pulpit_discord::save_tokens(
                 path,
-                &deckboard_discord::AuthTokens {
+                &pulpit_discord::AuthTokens {
                     access_token: fresh.access_token.clone(),
                     refresh_token: fresh.refresh_token.clone(),
                 },
@@ -703,7 +703,7 @@ mod tests {
         let err = backend
             .import_boards(&[original_style_board(), bad])
             .unwrap_err();
-        assert!(matches!(err, deckboard_db::DbError::Corrupt(_)));
+        assert!(matches!(err, pulpit_db::DbError::Corrupt(_)));
         // the good board before the bad one was rolled back
         assert!(backend.get_boards().is_empty());
     }

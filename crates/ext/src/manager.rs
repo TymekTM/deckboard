@@ -1,4 +1,4 @@
-//! Extension manager: scans `~/deckboard/extensions`, loads every package
+//! Extension manager: scans `~/pulpitApp/extensions`, loads every package
 //! into its own JS runtime, dispatches `execute` calls and drives timers.
 //!
 //! Boa's interpreter is not `Send` (it uses `Rc` internally), so each
@@ -392,14 +392,14 @@ impl ExtManager {
     fn forward(tx: &tokio_mpsc::UnboundedSender<ExtEvent>, ev: HostEvent) {
         match ev {
             HostEvent::SetValue(v) => {
-                tracing::debug!(target: "deckboard_ext", value = %v, "setValue event forwarded");
+                tracing::debug!(target: "pulpit_ext", value = %v, "setValue event forwarded");
                 let _ = tx.send(ExtEvent::SetValue(v));
             }
             HostEvent::Log(level, msg) => match level.as_str() {
-                "warn" => warn!(target: "deckboard_ext", "{msg}"),
-                "error" => tracing::error!(target: "deckboard_ext", "{msg}"),
-                "debug" => tracing::debug!(target: "deckboard_ext", "{msg}"),
-                _ => tracing::info!(target: "deckboard_ext", "{msg}"),
+                "warn" => warn!(target: "pulpit_ext", "{msg}"),
+                "error" => tracing::error!(target: "pulpit_ext", "{msg}"),
+                "debug" => tracing::debug!(target: "pulpit_ext", "{msg}"),
+                _ => tracing::info!(target: "pulpit_ext", "{msg}"),
             },
             HostEvent::IntervalStart(..) | HostEvent::IntervalClear(_) => {}
         }
@@ -500,8 +500,8 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
     raw.iter()
         .filter_map(|i| {
             let value = i.get("value").and_then(Value::as_str)?.to_string();
-            // field declarations come as "inputs" (deckboard-extension-kit)
-            // or "input" (older deckboard-kit) - accept both spellings
+            // field declarations come as "inputs" (pulpit-extension-kit)
+            // or "input" (older pulpit-kit) - accept both spellings
             let fields = i
                 .get("inputs")
                 .or_else(|| i.get("input"))
@@ -769,7 +769,7 @@ struct MetadataCache {
 
 impl MetadataCache {
     fn load() -> Self {
-        let path = dirs::cache_dir().map(|d| d.join("deckboard-server").join("extmeta.json"));
+        let path = dirs::cache_dir().map(|d| d.join("pulpit-server").join("extmeta.json"));
         let entries = path
             .as_deref()
             .and_then(|p| std::fs::read(p).ok())

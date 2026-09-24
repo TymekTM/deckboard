@@ -19,17 +19,17 @@ use crate::mapping::Mapper;
 
 /// Storage + execution seam so the transport layer stays testable.
 pub trait Backend: Send + Sync + 'static {
-    fn get_boards(&self) -> Vec<deckboard_db::BoardRow>;
-    fn get_board(&self, board_id: i64) -> Option<deckboard_db::BoardRow>;
-    fn get_buttons_by_board(&self, board_id: i64) -> Vec<deckboard_db::ButtonRow>;
-    fn get_button(&self, id: i64) -> Option<deckboard_db::ButtonRow>;
+    fn get_boards(&self) -> Vec<pulpit_db::BoardRow>;
+    fn get_board(&self, board_id: i64) -> Option<pulpit_db::BoardRow>;
+    fn get_buttons_by_board(&self, board_id: i64) -> Vec<pulpit_db::ButtonRow>;
+    fn get_button(&self, id: i64) -> Option<pulpit_db::ButtonRow>;
     fn exec(
         &self,
-        button: deckboard_db::ButtonRow,
+        button: pulpit_db::ButtonRow,
         is_tap_start: bool,
-        sink: &mut dyn deckboard_actions::EventSink,
+        sink: &mut dyn pulpit_actions::EventSink,
     );
-    fn slider(&self, button: deckboard_db::ButtonRow, value: f64);
+    fn slider(&self, button: pulpit_db::ButtonRow, value: f64);
     /// M2 speaker watcher snapshots: master volume percent, muted flag.
     /// Defaults suit backends without speaker support.
     fn speaker_status(&self) -> (Option<f32>, Option<bool>) {
@@ -55,7 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn health_page() -> Html<String> {
     Html(
-        "<html><body><h3>Deckboard Server is live.</h3>\
+        "<html><body><h3>Pulpit server is live.</h3>\
          <p>Legacy socket.io v2 endpoint on /socket.io/.</p>\
          </body></html>"
             .into(),
@@ -234,7 +234,7 @@ fn arg_id(arg: &serde_json::Value) -> Option<i64> {
 
 /// SQLite tile lookup off the async workers; a panic in the read logs
 /// instead of vanishing into a swallowed JoinError.
-async fn get_button_blocking(state: &Arc<AppState>, id: i64) -> Option<deckboard_db::ButtonRow> {
+async fn get_button_blocking(state: &Arc<AppState>, id: i64) -> Option<pulpit_db::ButtonRow> {
     let backend = state.backend.clone();
     match tokio::task::spawn_blocking(move || backend.get_button(id)).await {
         Ok(button) => button,
@@ -308,7 +308,7 @@ async fn handle_event(
                 tokio::sync::mpsc::UnboundedSender<(String, String)>,
                 tokio::sync::mpsc::UnboundedSender<(String, String)>,
             );
-            impl deckboard_actions::EventSink for Sink {
+            impl pulpit_actions::EventSink for Sink {
                 fn change_board(&mut self, board_id: i64) {
                     let _ = self.0.send(board_id);
                 }

@@ -10,9 +10,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use deckboard_actions::EventSink;
-use deckboard_db::ButtonRow;
-use deckboard_proto::*;
+use pulpit_actions::EventSink;
+use pulpit_db::ButtonRow;
+use pulpit_proto::*;
 
 use crate::devices::PairError;
 use crate::hub::V2Session;
@@ -460,7 +460,7 @@ fn exec_once(state: &Arc<V2State>, button: ButtonRow, is_tap_start: bool) {
 }
 
 fn exec_blocking(
-    backend: &Arc<dyn deckboard_legacy::Backend>,
+    backend: &Arc<dyn pulpit_legacy::Backend>,
     engine: &Arc<StateEngine>,
     hub: &Arc<crate::hub::V2Hub>,
     button: ButtonRow,

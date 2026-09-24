@@ -32,7 +32,7 @@ pub enum DiscordError {
 
 pub type Result<T> = std::result::Result<T, DiscordError>;
 
-/// Credentials read from `~/deckboard/settings.json` (the original app's
+/// Credentials read from `~/pulpitApp/settings.json` (the original app's
 /// config fields for the discord-deckboard package).
 #[derive(Debug, Clone, Default)]
 pub struct DiscordConfig {
@@ -285,7 +285,7 @@ pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Resu
     let mut field = |name: &str, value: &str| {
         let entry = package.entry(name.to_string()).or_insert_with(|| {
             json!({
-                "descriptions": "Discord OAuth token (managed by deckboard-server)",
+                "descriptions": "Discord OAuth token (managed by pulpit-server)",
                 "name": name,
                 "type": "text",
                 "value": "",
@@ -959,7 +959,7 @@ mod tests {
 
     /// Live probe: reads the saved token from settings.json and runs
     /// handshake + AUTHENTICATE only (no state changes). Run explicitly:
-    /// `cargo test -p deckboard-discord -- --ignored`
+    /// `cargo test -p pulpit-discord -- --ignored`
     #[test]
     #[ignore = "talks to the real Discord pipe"]
     fn live_authenticate() {
@@ -982,7 +982,7 @@ mod tests {
 
         // now the real credentials
         let home = std::env::var("USERPROFILE").unwrap();
-        let raw = std::fs::read_to_string(format!("{home}\\deckboard\\settings.json")).unwrap();
+        let raw = std::fs::read_to_string(format!("{home}\\pulpitApp\\settings.json")).unwrap();
         let settings: Value = serde_json::from_str(&raw).unwrap();
         let config = DiscordConfig::from_settings(&settings)
             .expect("no discord credentials in settings.json");
@@ -1001,7 +1001,7 @@ mod tests {
     #[ignore = "manual probe, prints settings fingerprints"]
     fn live_raw_real_id() {
         let home = std::env::var("USERPROFILE").unwrap();
-        let path = format!("{home}\\deckboard\\settings.json");
+        let path = format!("{home}\\pulpitApp\\settings.json");
         let raw = std::fs::read_to_string(&path).unwrap();
         let settings: Value = serde_json::from_str(&raw).unwrap();
         let config = DiscordConfig::from_settings(&settings).expect("no creds");

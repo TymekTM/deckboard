@@ -1,10 +1,10 @@
 //! socket.io v2 / Engine.IO v3 client over a plain WebSocket transport,
-//! wire-compatible with the original desktop server and deckboard-server.
+//! wire-compatible with the original desktop server and pulpit-server.
 //!
 //! Frames: engine packets ("0" open, "2"/"3" ping/pong, "4" message) with
 //! socket.io events inside ("40" connect, `42["event",args]`).
 
-package app.deckboard.mobile.net
+package app.pulpit.mobile.net
 
 import android.util.Log
 import kotlinx.coroutines.channels.BufferOverflow
@@ -42,7 +42,7 @@ sealed class DeckEvent {
     data class Other(val name: String, val args: JsonArray) : DeckEvent()
 }
 
-class DeckboardClient(
+class PulpitClient(
     private val host: String,
     private val port: Int,
     private val accessKey: String,
@@ -131,17 +131,17 @@ class DeckboardClient(
                     val ev = when (name) {
                         "get_shortcuts" -> DeckEvent.Shortcuts(arr.getOrNull(1) ?: JsonArray(emptyList()))
                         "change_board" -> DeckEvent.ChangeBoard(
-                            json.decodeFromJsonElement<app.deckboard.mobile.proto.BoardChange>(arr.getOrNull(1) ?: JsonObject(emptyMap())).boardId,
+                            json.decodeFromJsonElement<app.pulpit.mobile.proto.BoardChange>(arr.getOrNull(1) ?: JsonObject(emptyMap())).boardId,
                         )
                         "refresh_board" -> DeckEvent.RefreshBoard
                         "app_status_update" -> {
-                            val status = json.decodeFromJsonElement<app.deckboard.mobile.proto.AppStatus>(
+                            val status = json.decodeFromJsonElement<app.pulpit.mobile.proto.AppStatus>(
                                 arr.getOrNull(1) ?: JsonObject(emptyMap()),
                             )
                             DeckEvent.AppStatus(status.app, status.data)
                         }
                         "get_version" -> DeckEvent.Version(
-                            json.decodeFromJsonElement<app.deckboard.mobile.proto.VersionInfo>(
+                            json.decodeFromJsonElement<app.pulpit.mobile.proto.VersionInfo>(
                                 arr.getOrNull(1) ?: JsonObject(emptyMap()),
                             ).version,
                         )
@@ -207,13 +207,13 @@ class DeckboardClient(
             "client_capabilities",
             listOf(
                 json.parseToJsonElement(
-                    """{"client":"deckboard-mobile","version":"0.1.0","capabilities":["button","toggle","slider","knob","graph","list","custom-value"]}""",
+                    """{"client":"pulpit-mobile","version":"0.1.0","capabilities":["button","toggle","slider","knob","graph","list","custom-value"]}""",
                 ),
             ),
         )
     }
 
     companion object {
-        private const val TAG = "DeckboardClient"
+        private const val TAG = "PulpitClient"
     }
 }

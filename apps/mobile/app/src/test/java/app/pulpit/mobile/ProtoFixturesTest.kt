@@ -1,4 +1,4 @@
-package app.deckboard.mobile.proto
+package app.pulpit.mobile.proto
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -45,7 +45,7 @@ class ProtoFixturesTest {
         assertEquals("hello", frame.type)
         assertEquals("h1", frame.id)
         val hello = json.decodeFromString(Hello.serializer(), frame.payloadObject().toString())
-        assertEquals("deckboard-mobile", hello.client)
+        assertEquals("pulpit-mobile", hello.client)
         assertEquals("Tablet salon", hello.name)
         assertEquals(listOf("graph", "list"), hello.capabilities)
     }

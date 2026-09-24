@@ -1,4 +1,4 @@
-//! SQLite access for the Deckboard database (`~/deckboard/database.db`).
+//! SQLite access for the Pulpit database (`~/pulpitApp/database.db`).
 //!
 //! M0 opens the file read-only: the original desktop app stays the writer
 //! until the Rust core takes over persistence, so the two never fight over
@@ -128,7 +128,7 @@ pub struct Db {
 }
 
 impl Db {
-    /// Open the database read-only. Pass `None` to use `~/deckboard/database.db`.
+    /// Open the database read-only. Pass `None` to use `~/pulpitApp/database.db`.
     pub fn open_read_only(path: Option<&Path>) -> Result<Db> {
         let path = match path {
             Some(p) => p.to_path_buf(),
@@ -138,7 +138,7 @@ impl Db {
             return Err(DbError::NotFound(path));
         }
         let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        tracing::info!(path = %path.display(), "opened deckboard database (read-only)");
+        tracing::info!(path = %path.display(), "opened pulpitApp database (read-only)");
         Ok(Db { conn })
     }
 
@@ -215,7 +215,7 @@ impl Db {
             return Err(DbError::NotFound(path));
         }
         let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        tracing::info!(path = %path.display(), "opened deckboard database (read-write)");
+        tracing::info!(path = %path.display(), "opened pulpitApp database (read-write)");
         Ok(Db { conn })
     }
 
@@ -602,15 +602,120 @@ fn create_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// `~/deckboard/database.db` - the same file the original desktop app uses.
+/// `~/pulpitApp/database.db`; on first use this is a copy of the original
+/// Deckboard app's database (see [`data_dir`]).
 pub fn default_db_path() -> PathBuf {
+    data_dir().join("database.db")
+}
+
+/// Data directory root: `~/pulpitApp`. The first call copies a legacy
+/// `~/deckboard` directory (the original Deckboard app's data) into it, so
+/// upgrading needs no manual steps and the original app keeps its files.
+pub fn data_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join("deckboard").join("database.db")
+    let target = home.join("pulpitApp");
+    migrate_legacy_data(&home.join("deckboard"), &target);
+    target
+}
+
+const LEGACY_FILES: &[&str] = &[
+    "database.db",
+    "settings.json",
+    "editor.json",
+    "devices.json",
+];
+const LEGACY_DIRS: &[&str] = &["extensions", "assets"];
+
+/// One-time, best-effort copy from the original Deckboard data directory.
+/// No-op unless the legacy dir exists and the target does not; per-item
+/// skips let a partial migration resume on the next run. `logs/` is
+/// intentionally not carried over.
+fn migrate_legacy_data(legacy: &Path, target: &Path) {
+    if target.exists() || !legacy.is_dir() {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(target) {
+        tracing::warn!(error = %e, "cannot create data directory, skipping legacy migration");
+        return;
+    }
+    let mut copied: Vec<&str> = Vec::new();
+    for name in LEGACY_FILES.iter().chain(LEGACY_DIRS) {
+        let from = legacy.join(name);
+        let to = target.join(name);
+        let copied_ok = if from.is_dir() {
+            !to.exists() && copy_tree(&from, &to).is_ok()
+        } else if from.is_file() {
+            !to.exists() && std::fs::copy(&from, &to).is_ok()
+        } else {
+            false
+        };
+        if copied_ok {
+            copied.push(name);
+        }
+    }
+    if !copied.is_empty() {
+        tracing::info!(
+            from = %legacy.display(),
+            to = %target.display(),
+            migrated = ?copied,
+            "migrated data from the original Deckboard app"
+        );
+    }
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
+        } else {
+            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_migration_copies_data_but_not_logs() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = home.path().join("deckboard");
+        let target = home.path().join("pulpitApp");
+        std::fs::create_dir_all(legacy.join("extensions/pkg")).unwrap();
+        std::fs::create_dir_all(legacy.join("logs")).unwrap();
+        std::fs::write(legacy.join("database.db"), b"db").unwrap();
+        std::fs::write(legacy.join("settings.json"), b"{}").unwrap();
+        std::fs::write(legacy.join("editor.json"), b"{}").unwrap();
+        std::fs::write(legacy.join("devices.json"), b"[]").unwrap();
+        std::fs::write(legacy.join("extensions/pkg/index.js"), b"module.exports").unwrap();
+        std::fs::write(legacy.join("logs/old.log"), b"x").unwrap();
+
+        migrate_legacy_data(&legacy, &target);
+
+        assert_eq!(std::fs::read(target.join("database.db")).unwrap(), b"db");
+        assert_eq!(
+            std::fs::read(target.join("extensions/pkg/index.js")).unwrap(),
+            b"module.exports"
+        );
+        assert!(!target.join("logs").exists(), "logs are not carried over");
+
+        // Second run is a no-op: newer data in the target must survive.
+        std::fs::write(target.join("database.db"), b"newer").unwrap();
+        migrate_legacy_data(&legacy, &target);
+        assert_eq!(std::fs::read(target.join("database.db")).unwrap(), b"newer");
+    }
+
+    #[test]
+    fn legacy_migration_skips_when_no_legacy_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("pulpitApp");
+        migrate_legacy_data(&home.path().join("deckboard"), &target);
+        assert!(!target.exists(), "nothing to migrate, nothing created");
+    }
 
     #[test]
     fn schema_and_queries_roundtrip() {
@@ -642,7 +747,7 @@ mod tests {
 
     #[test]
     fn missing_file_is_reported() {
-        let err = Db::open_read_only(Some(Path::new("Z:/nope/deckboard.db"))).unwrap_err();
+        let err = Db::open_read_only(Some(Path::new("Z:/nope/pulpit.db"))).unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
@@ -778,7 +883,7 @@ mod tests {
 
     #[test]
     fn open_read_write_rejects_missing_file() {
-        let err = Db::open_read_write(Some(Path::new("Z:/nope/deckboard.db"))).unwrap_err();
+        let err = Db::open_read_write(Some(Path::new("Z:/nope/pulpit.db"))).unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 

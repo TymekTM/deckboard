@@ -13,10 +13,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
-use deckboard_proto::{Board, BoardsSync, Frame, MAX_FRAME_BYTES, TYPE_BOARDS_SYNC};
+use pulpit_proto::{Board, BoardsSync, Frame, MAX_FRAME_BYTES, TYPE_BOARDS_SYNC};
 use serde_json::json;
 
-use deckboard_legacy::Backend;
+use pulpit_legacy::Backend;
 
 use crate::assets::AssetStore;
 use crate::devices::{DeviceEntry, DeviceStore, Pairing};
@@ -118,7 +118,7 @@ async fn ws_connect(
 
 /// Mints a one-time pairing code. Loopback callers only: the server binds
 /// all interfaces, but codes are a local desktop decision. Building the
-/// QR payload (`deckboard://<host>:<port>?pair=<code>`) is a desktop-UI
+/// QR payload (`pulpit://<host>:<port>?pair=<code>`) is a desktop-UI
 /// concern - it knows the address the client should reach.
 async fn pair_create(
     State(state): State<Arc<V2State>>,
@@ -134,7 +134,7 @@ async fn pair_create(
         .await
         .unwrap_or_else(|| "127.0.0.1".to_string());
     tracing::info!(
-        url = %format!("deckboard://{}:{}?pair={}", host, state.config.public_port, code),
+        url = %format!("pulpit://{}:{}?pair={}", host, state.config.public_port, code),
         "pairing code minted - expires in 5 minutes"
     );
     Json(json!({
@@ -198,11 +198,11 @@ impl V2State {
     /// Publishes one committed write batch: bumps the generation and
     /// broadcasts `boards.delta`. Synchronous on purpose - the editor's
     /// write path calls this in-process right after its DB commit.
-    pub fn publish_delta(&self, ops: Vec<deckboard_proto::BoardOp>) -> u64 {
+    pub fn publish_delta(&self, ops: Vec<pulpit_proto::BoardOp>) -> u64 {
         let generation = self.generation.bump();
         let frame = Frame::push_typed(
-            deckboard_proto::TYPE_BOARDS_DELTA,
-            &deckboard_proto::BoardsDelta { generation, ops },
+            pulpit_proto::TYPE_BOARDS_DELTA,
+            &pulpit_proto::BoardsDelta { generation, ops },
         );
         self.hub.broadcast_frame(&frame);
         generation

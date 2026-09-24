@@ -441,7 +441,7 @@ mod tests {
     }
 
     /// Live check: reads the real Strip[2].A1 routing state. Run explicitly:
-    /// `cargo test -p deckboard-vm -- --ignored live_get`
+    /// `cargo test -p pulpit-vm -- --ignored live_get`
     #[test]
     #[ignore = "reads the live Voicemeeter state"]
     fn live_get_strip2_a1() {
@@ -475,7 +475,7 @@ mod tests {
     }
 
     /// Live test: touches the real Voicemeeter instance. Run explicitly:
-    /// `cargo test -p deckboard-vm -- --ignored`
+    /// `cargo test -p pulpit-vm -- --ignored`
     #[test]
     #[ignore = "fires Command.Restart on the live audio engine"]
     fn live_restart() {

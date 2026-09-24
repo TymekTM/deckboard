@@ -4,9 +4,9 @@
 //! derives state channels and converts legacy data-URL images into the
 //! asset store.
 
-use deckboard_db::{BoardRow, ButtonRow};
-use deckboard_legacy::{Backend, Mapper};
-use deckboard_proto::{
+use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_legacy::{Backend, Mapper};
+use pulpit_proto::{
     background_from_legacy, Board, Interaction, Placement, StateRef, StateShape, Style, Tile,
     WidgetKind, WidgetManifest,
 };
@@ -43,12 +43,12 @@ pub fn build_boards(
         .collect()
 }
 
-fn board_background(board: &BoardRow, assets: &AssetStore) -> Option<deckboard_proto::Background> {
+fn board_background(board: &BoardRow, assets: &AssetStore) -> Option<pulpit_proto::Background> {
     // A board image (data URL in the legacy column) wins over the color,
     // mirroring how the original app renders the image over the background.
     if !board.image.is_empty() {
         if let Some(hash) = assets.import_data_url(&board.image) {
-            return Some(deckboard_proto::Background::Asset { hash });
+            return Some(pulpit_proto::Background::Asset { hash });
         }
     }
     background_from_legacy(&board.background)

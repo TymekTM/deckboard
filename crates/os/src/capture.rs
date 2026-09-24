@@ -1,5 +1,5 @@
 //! Primary-screen capture saved as PNG, mirroring the original
-//! `takeScreenshot`: `Deckboard_<UTC timestamp>.png` inside the
+//! `takeScreenshot`: `Pulpit_<UTC timestamp>.png` inside the
 //! command's directory (default: the user's Pictures folder).
 
 use std::path::PathBuf;
@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use crate::{OsError, Result};
 
 /// Original naming: `new Date().toISOString()` with `-`, `:`, `T` and the
-/// fractional part stripped -> `Deckboard_20260914142233.png`.
+/// fractional part stripped -> `Pulpit_20260914142233.png`.
 pub(crate) fn screenshot_filename(stamp: chrono::DateTime<chrono::Utc>) -> String {
-    format!("Deckboard_{}.png", stamp.format("%Y%m%d%H%M%S"))
+    format!("Pulpit_{}.png", stamp.format("%Y%m%d%H%M%S"))
 }
 
 /// The stamp has second resolution, so two captures in one second would
@@ -56,7 +56,7 @@ fn default_dir() -> Result<PathBuf> {
     }
 }
 
-/// Capture the primary screen and write `Deckboard_<stamp>.png` into
+/// Capture the primary screen and write `Pulpit_<stamp>.png` into
 /// `dir` (empty means the Pictures folder). Returns the written path.
 pub fn screenshot_to_dir(dir: &str) -> Result<PathBuf> {
     let target = if dir.trim().is_empty() {
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     #[ignore = "live: captures the real screen"]
     fn live_screenshot_writes_png() {
-        let dir = std::env::temp_dir().join("deckboard-os-shot-test");
+        let dir = std::env::temp_dir().join("pulpit-os-shot-test");
         let path = screenshot_to_dir(dir.to_str().unwrap()).expect("screenshot");
         let bytes = std::fs::read(&path).expect("read back");
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a png");

@@ -543,7 +543,7 @@ function onKeydown(event) {
                     </div>
                   </div>
                   <div class="pop-row muted">
-                    Scan the QR in the new Deckboard client, or enter the code
+                    Scan the QR in the new Pulpit client, or enter the code
                     with the address {{ pairingOffer.addresses[0]?.ipv4 }}.
                   </div>
                 </template>

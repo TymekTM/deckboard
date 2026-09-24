@@ -59,8 +59,8 @@ impl EditorBroadcaster {
 }
 
 fn boards_payload(
-    boards: &[deckboard_db::BoardRow],
-    buttons: &[Vec<deckboard_db::ButtonRow>],
+    boards: &[pulpit_db::BoardRow],
+    buttons: &[Vec<pulpit_db::ButtonRow>],
     mapper: &Mapper,
     pro: bool,
 ) -> Vec<Value> {

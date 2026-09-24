@@ -1,6 +1,6 @@
 # Protocol v2 specification
 
-Deckboard protocol between the desktop server and its clients (tablet,
+Pulpit protocol between the desktop server and its clients (tablet,
 future remote surfaces). Status: **implemented for M1** in `crates/proto`
 (types), `crates/v2` (transport), generated TypeScript in
 `crates/proto/bindings/`. Decisions: `docs/decisions.md` (ADR-004/006/008).
@@ -64,7 +64,7 @@ Codes: `unauthorized`, `pair-invalid`, `pair-expired`, `outdated-client`,
 
 `GET /v2/ws?token=<device token>` - the token is checked at the upgrade.
 Invalid token: HTTP 401, no WebSocket. Devices and their tokens live in
-`~/deckboard/devices.json` (array of `{id, name, token, created,
+`~/pulpitApp/devices.json` (array of `{id, name, token, created,
 last_seen}`; `id` and `token` are random hex, 16 and 32 bytes).
 
 ### Pairing a new device
@@ -73,7 +73,7 @@ last_seen}`; `id` and `token` are random hex, 16 and 32 bytes).
    alphabet - A-Z minus I/O plus digits 2-7, so no 0/O, 1/I look-alikes;
    valid 5 minutes) via `POST /v2/pair` (loopback callers only).
    Response: `{"code": "ABCD2345", "expires_in": 300}`. The M1 headless
-   server logs the QR-able URL (`deckboard://<lan-ip>:<port>?pair=<CODE>`);
+   server logs the QR-able URL (`pulpit://<lan-ip>:<port>?pair=<CODE>`);
    the desktop UI prompt ships with the editor.
 2. Tablet connects `/v2/ws?pair=<CODE>` and sends `hello` within 5 s.
    Unknown or burned codes are answered on the socket with
@@ -89,7 +89,7 @@ last_seen}`; `id` and `token` are random hex, 16 and 32 bytes).
    Revoking a device (removing it from `devices.json` via future desktop
    UI) makes the next connect fail with `unauthorized`.
 
-QR payload: `deckboard://<host>:<port>?pair=<CODE>`.
+QR payload: `pulpit://<host>:<port>?pair=<CODE>`.
 
 ### hello / welcome
 
@@ -97,7 +97,7 @@ QR payload: `deckboard://<host>:<port>?pair=<CODE>`.
 
 ```json
 { "v": 2, "id": "h1", "type": "hello",
-  "payload": { "client": "deckboard-mobile", "version": "0.2.0",
+  "payload": { "client": "pulpit-mobile", "version": "0.2.0",
                "name": "Tablet salon", "capabilities": [] } }
 ```
 
@@ -253,8 +253,8 @@ Client → server, one frame per user gesture:
 
 ## 7. Assets
 
-- Store: `~/deckboard/assets/<sha256-hex>.<ext>` (env
-  `DECKBOARD_ASSETS`). Content-addressed, so imports are idempotent.
+- Store: `~/pulpitApp/assets/<sha256-hex>.<ext>` (env
+  `PULPIT_ASSETS`). Content-addressed, so imports are idempotent.
 - Endpoint: `GET /assets/<sha256-hex>?token=<device token>` -
   `Cache-Control: immutable, max-age=31536000`, content type from the
   stored extension. Wrong/missing token: 401. Unknown hash: 404.
@@ -287,7 +287,7 @@ M6 needs it; the name is reserved so M1 clients can safely ignore it.
 
 - Types are defined once in Rust (`crates/proto`, serde) - ADR-004.
 - TypeScript: generated with ts-rs into `crates/proto/bindings/` by
-  `cargo test -p deckboard-proto` (committed so the editor/Vue app can
+  `cargo test -p pulpit-proto` (committed so the editor/Vue app can
   consume them without a build step).
 - Kotlin: hand-written `@Serializable` mirrors in `apps/mobile`
   (`proto/Models.kt` grows v2 types with the M4 client), validated against
