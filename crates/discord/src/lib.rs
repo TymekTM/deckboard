@@ -8,9 +8,16 @@
 //! GET/SET_VOICE_SETTINGS and SELECT_VOICE_CHANNEL. Frames are
 //! `[i32 LE opcode][i32 LE length][json]`.
 //!
-//! A connection is opened per action and closed after it: cheap, and it
-//! keeps the backend stateless.
+//! One authenticated connection is kept alive for the process lifetime
+//! ([`DiscordClient`]). Opening a session costs ~400 ms inside Discord
+//! (handshake READY + AUTHENTICATE), which is why the earlier
+//! session-per-click design lagged; on an established connection an action
+//! is a single sub-millisecond round trip. The actor thread answers
+//! Discord's pings while idle and keeps a mute/deaf cache fed by
+//! VOICE_SETTINGS_UPDATE pushes, so toggles send SET straight away instead
+//! of GET-then-SET.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
@@ -181,12 +188,17 @@ pub fn authorize(config: &DiscordConfig, deadline: Instant) -> Result<AuthTokens
     };
 
     // step 2: AUTHORIZE over the pipe - Discord shows the consent popup
-    let mut pipe = Pipe::open()?;
-    pipe.write_all(&encode_frame(
+    let mut conn = Pipe::open()?;
+    conn.write_all(&encode_frame(
         OP_HANDSHAKE,
         &json!({ "v": 1, "client_id": config.client_id }).to_string(),
     ))?;
-    let mut session = Session { pipe, nonce: 0 };
+    let mut session = Conn {
+        pipe: conn,
+        nonce: 0,
+        buf: Vec::new(),
+        inbox: VecDeque::new(),
+    };
     session.wait_for_ready(deadline)?;
     let mut args = json!({
         "scopes": SCOPES,
@@ -196,7 +208,8 @@ pub fn authorize(config: &DiscordConfig, deadline: Instant) -> Result<AuthTokens
     if let Some(token) = &rpc_token {
         args["rpc_token"] = json!(token);
     }
-    let reply = session.request_until(deadline, "AUTHORIZE", args)?;
+    let mut no_cache = None;
+    let reply = session.request_until(deadline, "AUTHORIZE", args, &mut no_cache)?;
     if reply.get("evt").and_then(Value::as_str) == Some("ERROR") {
         let msg = reply
             .pointer("/data/message")
@@ -383,6 +396,52 @@ pub fn decode_frame(buf: &[u8]) -> Option<(u32, &[u8])> {
     Some((op as u32, &buf[8..8 + len]))
 }
 
+/// Pop every complete frame from the front of `buf`, parsed as JSON. An
+/// incomplete tail stays put; a frame whose payload is not JSON is dropped
+/// (it cannot participate in request/reply matching anyway).
+fn extract_frames(buf: &mut Vec<u8>) -> Vec<(u32, Value)> {
+    let mut frames = Vec::new();
+    while let Some((op, payload)) = decode_frame(buf) {
+        let payload = payload.to_vec();
+        buf.drain(..8 + payload.len());
+        match serde_json::from_slice(&payload) {
+            Ok(v) => frames.push((op, v)),
+            Err(_) => tracing::debug!(bytes = payload.len(), "dropping non-json discord frame"),
+        }
+    }
+    frames
+}
+
+/// What one inbound frame asks of the connection.
+#[derive(Debug, PartialEq)]
+enum Incoming {
+    /// Nonce-matched reply to a request we sent (successful or not - the
+    /// caller inspects `evt`).
+    Reply,
+    /// Discord pushed the current voice settings (mute/deaf changed,
+    /// including changes made inside Discord itself).
+    VoiceSettings(Value),
+    /// Keepalive ping; answered by echoing the payload back as a pong.
+    Ping(Value),
+    /// READY, activity dispatches, frames for other nonces: ignore.
+    Other,
+}
+
+fn classify(op: u32, frame: &Value, nonce: &str) -> Incoming {
+    if op == OP_PING {
+        return Incoming::Ping(frame.clone());
+    }
+    if frame.get("nonce").and_then(Value::as_str) == Some(nonce) {
+        return Incoming::Reply;
+    }
+    if frame["cmd"].as_str() == Some("DISPATCH")
+        && frame["evt"].as_str() == Some("VOICE_SETTINGS_UPDATE")
+    {
+        return Incoming::VoiceSettings(frame["data"].clone());
+    }
+    Incoming::Other
+}
+
 // ------------------------------------------------------------- pipe client
 
 #[cfg(windows)]
@@ -392,6 +451,33 @@ mod pipe {
     pub const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
     pub const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
     pub const OPEN_EXISTING: u32 = 3;
+    pub const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+    pub const ERROR_IO_PENDING: u32 = 997;
+    pub const WAIT_OBJECT_0: u32 = 0;
+    pub const WAIT_TIMEOUT: u32 = 258;
+    pub const INFINITE: u32 = 0xFFFF_FFFF;
+
+    /// Layout of the Win32 OVERLAPPED structure.
+    #[repr(C)]
+    pub struct Overlapped {
+        pub internal: usize,
+        pub internal_high: usize,
+        pub offset: u32,
+        pub offset_high: u32,
+        pub event: *mut c_void,
+    }
+
+    impl Overlapped {
+        pub fn zeroed(event: *mut c_void) -> Self {
+            Overlapped {
+                internal: 0,
+                internal_high: 0,
+                offset: 0,
+                offset_high: 0,
+                event,
+            }
+        }
+    }
 
     #[link(name = "kernel32")]
     extern "system" {
@@ -409,33 +495,51 @@ mod pipe {
             buffer: *mut u8,
             to_read: u32,
             read: *mut u32,
-            overlapped: *mut c_void,
+            overlapped: *mut Overlapped,
         ) -> i32;
         pub fn WriteFile(
             handle: *mut c_void,
             buffer: *const u8,
             to_write: u32,
             written: *mut u32,
-            overlapped: *mut c_void,
+            overlapped: *mut Overlapped,
         ) -> i32;
-        pub fn PeekNamedPipe(
+        pub fn GetOverlappedResult(
             handle: *mut c_void,
-            buffer: *mut u8,
-            buffer_size: u32,
-            read: *mut u32,
-            available: *mut u32,
-            left: *mut u32,
+            overlapped: *mut Overlapped,
+            bytes: *mut u32,
+            wait: i32,
         ) -> i32;
+        pub fn CancelIoEx(handle: *mut c_void, overlapped: *mut Overlapped) -> i32;
+        pub fn CreateEventW(
+            security: *mut c_void,
+            manual_reset: i32,
+            initial_state: i32,
+            name: *const u16,
+        ) -> *mut c_void;
         pub fn CloseHandle(handle: *mut c_void) -> i32;
+        pub fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        pub fn GetLastError() -> u32;
     }
 }
 
+/// A named-pipe handle opened for overlapped I/O, so reads can carry a
+/// timeout without a PeekNamedPipe poll loop (the poll's 20 ms sleep was
+/// the floor under every request/response).
 struct Pipe {
     handle: *mut c_void,
 }
 
-// SAFETY: the raw handle is owned exclusively by this struct.
+// SAFETY: the raw handle is owned exclusively by this struct and every
+// method takes &mut self, so calls never overlap.
 unsafe impl Send for Pipe {}
+
+/// Auto-reset, unnamed event: each wait consumes one completion. Created
+/// per I/O call because an event handed to a completed-synchronously
+/// operation stays signaled and would short-circuit the next wait.
+fn new_event() -> *mut c_void {
+    unsafe { pipe::CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null_mut()) }
+}
 
 impl Pipe {
     fn open() -> Result<Pipe> {
@@ -451,7 +555,7 @@ impl Pipe {
                     0,
                     std::ptr::null_mut(),
                     pipe::OPEN_EXISTING,
-                    0,
+                    pipe::FILE_FLAG_OVERLAPPED,
                     std::ptr::null_mut(),
                 )
             };
@@ -464,70 +568,107 @@ impl Pipe {
 
     fn write_all(&mut self, mut data: &[u8]) -> Result<()> {
         while !data.is_empty() {
-            let mut written = 0u32;
-            // SAFETY: buffer outlives the call, written is a valid out-param
-            let ok = unsafe {
-                pipe::WriteFile(
-                    self.handle,
-                    data.as_ptr(),
-                    data.len().min(u32::MAX as usize) as u32,
-                    &mut written,
-                    std::ptr::null_mut(),
-                )
-            };
-            if ok == 0 || written == 0 {
+            let written = self.write_once(data)?;
+            if written == 0 {
                 return Err(DiscordError::Call("WriteFile"));
             }
-            data = &data[written as usize..];
+            data = &data[written..];
         }
         Ok(())
     }
 
-    fn read_exact(&mut self, out: &mut [u8], deadline: Instant) -> Result<()> {
-        let mut done = 0;
-        while done < out.len() {
-            if Instant::now() > deadline {
-                return Err(DiscordError::Call("timeout"));
+    fn write_once(&self, data: &[u8]) -> Result<usize> {
+        let event = new_event();
+        if event.is_null() {
+            return Err(DiscordError::Call("CreateEventW"));
+        }
+        let mut overlapped = pipe::Overlapped::zeroed(event);
+        let mut written = 0u32;
+        // SAFETY: buffer outlives the call, overlapped owns the event
+        let ok = unsafe {
+            pipe::WriteFile(
+                self.handle,
+                data.as_ptr(),
+                data.len().min(u32::MAX as usize) as u32,
+                std::ptr::null_mut(),
+                &mut overlapped,
+            )
+        };
+        if ok == 0 {
+            let err = unsafe { pipe::GetLastError() };
+            if err != pipe::ERROR_IO_PENDING {
+                unsafe { pipe::CloseHandle(event) };
+                return Err(DiscordError::Call("WriteFile"));
             }
-            let mut available = 0u32;
-            // SAFETY: only the available count is consumed
-            let peek = unsafe {
-                pipe::PeekNamedPipe(
-                    self.handle,
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null_mut(),
-                    &mut available,
-                    std::ptr::null_mut(),
-                )
-            };
-            if peek == 0 {
-                return Err(DiscordError::Call("PeekNamedPipe"));
-            }
-            if available == 0 {
-                std::thread::sleep(Duration::from_millis(20));
-                continue;
-            }
-            let mut chunk = [0u8; 4096];
-            let want = out.len() - done;
-            let mut read = 0u32;
-            // SAFETY: chunk is a valid receive buffer, read the out-param
-            let ok = unsafe {
-                pipe::ReadFile(
-                    self.handle,
-                    chunk.as_mut_ptr(),
-                    chunk.len().min(want) as u32,
-                    &mut read,
-                    std::ptr::null_mut(),
-                )
-            };
-            if ok == 0 || read == 0 {
+            // writes are small and the pipe is local: the only wait is
+            // Discord draining its buffer, which is not worth a timeout
+            unsafe { pipe::WaitForSingleObject(event, pipe::INFINITE) };
+        }
+        let ok = unsafe { pipe::GetOverlappedResult(self.handle, &mut overlapped, &mut written, 1) };
+        unsafe { pipe::CloseHandle(event) };
+        if ok == 0 {
+            return Err(DiscordError::Call("GetOverlappedResult(write)"));
+        }
+        Ok(written as usize)
+    }
+
+    /// Wait up to `timeout` for the next bytes and append them to `buf`.
+    /// Ok(0) means nothing arrived in time (the read was cancelled and the
+    /// pipe stays usable); Err means the pipe is gone.
+    fn read_some(&mut self, buf: &mut Vec<u8>, timeout: Duration) -> Result<usize> {
+        let event = new_event();
+        if event.is_null() {
+            return Err(DiscordError::Call("CreateEventW"));
+        }
+        let mut overlapped = pipe::Overlapped::zeroed(event);
+        let mut chunk = [0u8; 4096];
+        let mut read = 0u32;
+        // SAFETY: chunk is a valid receive buffer, overlapped owns the event
+        let ok = unsafe {
+            pipe::ReadFile(
+                self.handle,
+                chunk.as_mut_ptr(),
+                chunk.len() as u32,
+                std::ptr::null_mut(),
+                &mut overlapped,
+            )
+        };
+        if ok == 0 {
+            let err = unsafe { pipe::GetLastError() };
+            if err != pipe::ERROR_IO_PENDING {
+                unsafe { pipe::CloseHandle(event) };
                 return Err(DiscordError::Call("ReadFile"));
             }
-            out[done..done + read as usize].copy_from_slice(&chunk[..read as usize]);
-            done += read as usize;
+            let wait = unsafe {
+                pipe::WaitForSingleObject(event, timeout.as_millis().min(u32::MAX as u128) as u32)
+            };
+            if wait == pipe::WAIT_TIMEOUT {
+                // cancel so the pipe is not stuck with a pending read; the
+                // GetOverlappedResult(wait) below drains the aborted call
+                unsafe {
+                    pipe::CancelIoEx(self.handle, &mut overlapped);
+                    pipe::GetOverlappedResult(self.handle, &mut overlapped, &mut read, 1);
+                    pipe::CloseHandle(event);
+                }
+                if read > 0 {
+                    // the operation finished with data right as we cancelled
+                    buf.extend_from_slice(&chunk[..read as usize]);
+                    return Ok(read as usize);
+                }
+                return Ok(0);
+            }
+            if wait != pipe::WAIT_OBJECT_0 {
+                unsafe { pipe::CloseHandle(event) };
+                return Err(DiscordError::Call("WaitForSingleObject"));
+            }
         }
-        Ok(())
+        let ok = unsafe { pipe::GetOverlappedResult(self.handle, &mut overlapped, &mut read, 1) };
+        unsafe { pipe::CloseHandle(event) };
+        if ok == 0 || read == 0 {
+            return Err(DiscordError::Call("GetOverlappedResult(read)"));
+        }
+        buf.extend_from_slice(&chunk[..read as usize]);
+        Ok(read as usize)
     }
 }
 
@@ -538,16 +679,21 @@ impl Drop for Pipe {
     }
 }
 
-// ------------------------------------------------------------------- calls
+// ------------------------------------------------------------- connection
 
-/// One authenticated Discord RPC session.
-pub struct Session {
+/// One authenticated Discord RPC connection: the pipe plus the frame
+/// assembly state. Not shared across threads - the actor owns it.
+struct Conn {
     pipe: Pipe,
     nonce: u64,
+    buf: Vec<u8>,
+    inbox: VecDeque<(u32, Value)>,
 }
 
-impl Session {
-    pub fn connect(config: &DiscordConfig) -> Result<Session> {
+impl Conn {
+    /// Handshake + authenticate. Returns the connection and Discord's
+    /// current voice settings, which seeds the caller's state cache.
+    fn connect(config: &DiscordConfig, deadline: Instant) -> Result<(Conn, Value)> {
         if config.client_id.is_empty() || config.client_secret.is_empty() {
             // no OAuth app configured - nothing to authenticate with
             return Err(DiscordError::BadPayload(
@@ -559,68 +705,41 @@ impl Session {
             // configured but never (re)authorized - the popup flow applies
             return Err(DiscordError::AuthRejected);
         }
-        let mut pipe = Pipe::open()?;
-        let deadline = Instant::now() + Duration::from_secs(8);
-        pipe.write_all(&encode_frame(
+        let mut conn = Conn {
+            pipe: Pipe::open()?,
+            nonce: 0,
+            buf: Vec::new(),
+            inbox: VecDeque::new(),
+        };
+        conn.pipe.write_all(&encode_frame(
             OP_HANDSHAKE,
             &json!({ "v": 1, "client_id": config.client_id }).to_string(),
         ))?;
-        let mut session = Session { pipe, nonce: 0 };
         // Discord ignores commands sent before READY was consumed, so read
         // the dispatch first
-        session.wait_for_ready(deadline)?;
-        let reply = session.request_until(
+        conn.wait_for_ready(deadline)?;
+        let mut no_cache = None;
+        let reply = conn.request_until(
             deadline,
             "AUTHENTICATE",
             json!({ "access_token": config.access_token }),
+            &mut no_cache,
         )?;
         if reply.get("evt").and_then(Value::as_str) == Some("ERROR") {
             return Err(DiscordError::AuthRejected);
         }
-        Ok(session)
+        let settings = conn.request_until(deadline, "GET_VOICE_SETTINGS", json!({}), &mut no_cache)?;
+        let settings = settings
+            .get("data")
+            .cloned()
+            .ok_or(DiscordError::Call("GET_VOICE_SETTINGS"))?;
+        Ok((conn, settings))
     }
 
-    fn next_nonce(&mut self) -> String {
-        self.nonce += 1;
-        format!("dk-{}", self.nonce)
-    }
-
-    /// Read one complete frame, answering pings on the way.
-    fn read_frame(&mut self, deadline: Instant) -> Result<(u32, Value)> {
-        let mut buf: Vec<u8> = Vec::new();
-        loop {
-            if let Some((op, payload)) = decode_frame(&buf) {
-                let payload = payload.to_vec();
-                let len = payload.len();
-                let parsed: Value = serde_json::from_slice(&payload)
-                    .map_err(|_| DiscordError::Call("bad json frame"))?;
-                buf.drain(..8 + len);
-                match op {
-                    OP_PING => {
-                        let text = String::from_utf8_lossy(&payload).into_owned();
-                        self.pipe.write_all(&encode_frame(OP_PONG, &text))?;
-                        continue;
-                    }
-                    OP_FRAME => return Ok((op, parsed)),
-                    _ => continue,
-                }
-            }
-            // incomplete frame: read the header first, then its payload
-            let need = if buf.len() < 8 {
-                8 - buf.len()
-            } else {
-                let len = i32::from_le_bytes(buf[4..8].try_into().unwrap()).max(0) as usize;
-                8 + len - buf.len()
-            };
-            let mut tmp = vec![0u8; need];
-            self.pipe.read_exact(&mut tmp, deadline)?;
-            buf.extend_from_slice(&tmp);
-        }
-    }
-
-    /// The first dispatch after the handshake (cmd DISPATCH, evt READY).
     fn wait_for_ready(&mut self, deadline: Instant) -> Result<()> {
-        let (op, frame) = self.read_frame(deadline)?;
+        let Some((op, frame)) = self.wait_frame(deadline, Duration::from_secs(1))? else {
+            return Err(DiscordError::Call("timeout"));
+        };
         let is_ready = op == OP_FRAME
             && frame["cmd"].as_str() == Some("DISPATCH")
             && frame["evt"].as_str() == Some("READY");
@@ -631,46 +750,78 @@ impl Session {
         }
     }
 
-    fn request_until(&mut self, deadline: Instant, cmd: &str, args: Value) -> Result<Value> {
+    fn next_nonce(&mut self) -> String {
+        self.nonce += 1;
+        format!("dk-{}", self.nonce)
+    }
+
+    /// Read frames until one complete frame is available or the deadline
+    /// passes. Ok(None) on deadline; single reads never block longer than
+    /// `cap`, so an already-passed deadline is noticed promptly.
+    fn wait_frame(&mut self, deadline: Instant, cap: Duration) -> Result<Option<(u32, Value)>> {
+        loop {
+            if let Some(frame) = self.inbox.pop_front() {
+                return Ok(Some(frame));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            if self.pipe.read_some(&mut self.buf, cap.min(deadline - now))? > 0 {
+                self.inbox.extend(extract_frames(&mut self.buf));
+            }
+        }
+    }
+
+    /// Send a command and wait for its nonce-matched reply (the full
+    /// frame - callers check `evt` and read `data` themselves), answering
+    /// pings and recording voice-settings pushes into `cache` on the way.
+    fn request_until(
+        &mut self,
+        deadline: Instant,
+        cmd: &str,
+        args: Value,
+        cache: &mut Option<Value>,
+    ) -> Result<Value> {
         let nonce = self.next_nonce();
         let frame = json!({ "cmd": cmd, "args": args, "nonce": nonce });
         self.pipe
             .write_all(&encode_frame(OP_FRAME, &frame.to_string()))?;
         loop {
-            let (op, v) = self.read_frame(deadline)?;
-            if op == OP_FRAME && v.get("nonce").and_then(Value::as_str) == Some(nonce.as_str()) {
-                return Ok(v);
+            let Some((op, frame)) = self.wait_frame(deadline, Duration::from_secs(1))? else {
+                return Err(DiscordError::Call("timeout"));
+            };
+            match classify(op, &frame, &nonce) {
+                Incoming::Reply => return Ok(frame),
+                Incoming::Ping(v) => {
+                    self.pipe.write_all(&encode_frame(OP_PONG, &v.to_string()))?
+                }
+                Incoming::VoiceSettings(v) => *cache = Some(v),
+                Incoming::Other => {}
             }
-            // unrelated dispatch/event - keep reading
         }
     }
 
-    pub fn get_voice_settings(&mut self, deadline: Instant) -> Result<Value> {
-        let reply = self.request_until(deadline, "GET_VOICE_SETTINGS", json!({}))?;
-        reply
-            .get("data")
-            .cloned()
-            .ok_or(DiscordError::Call("GET_VOICE_SETTINGS"))
-    }
-
-    pub fn set_voice_settings(&mut self, patch: Value, deadline: Instant) -> Result<()> {
-        self.request_until(deadline, "SET_VOICE_SETTINGS", patch)?;
-        Ok(())
-    }
-
-    pub fn select_voice_channel(
-        &mut self,
-        channel_id: Option<&str>,
-        deadline: Instant,
-    ) -> Result<()> {
-        self.request_until(
-            deadline,
-            "SELECT_VOICE_CHANNEL",
-            json!({ "channel_id": channel_id, "timeout": 30i32 }),
-        )?;
-        Ok(())
+    /// Answer pings and absorb voice-settings pushes while no action is
+    /// running. Returns on the first transport error.
+    fn serve(&mut self, tick: Duration, cache: &mut Option<Value>) -> Result<()> {
+        let deadline = Instant::now() + tick;
+        loop {
+            let Some((op, frame)) = self.wait_frame(deadline, tick)? else {
+                return Ok(());
+            };
+            match classify(op, &frame, "") {
+                Incoming::Ping(v) => {
+                    self.pipe.write_all(&encode_frame(OP_PONG, &v.to_string()))?
+                }
+                Incoming::VoiceSettings(v) => *cache = Some(v),
+                _ => {}
+            }
+        }
     }
 }
+
+// ------------------------------------------------------------- action plan
 
 /// The original's `_labelMuteDeaf`: muted/deaf show "OFF", live shows "ON".
 fn label(active: bool) -> &'static str {
@@ -793,37 +944,200 @@ pub fn apply_flip(current: &Value, what: &Plan) -> Result<Option<FlipOutcome>> {
     })
 }
 
-/// Execute one action end to end; pushed labels go through `push`.
-pub fn execute(
+// ------------------------------------------------------------ kept-alive client
+
+/// What a finished action wants pushed to tiles: the custom-value key and
+/// the state label (same shape as the original's `_labelMuteDeaf` push).
+pub struct ExecOutcome {
+    pub key: String,
+    pub label: String,
+}
+
+enum Job {
+    Exec {
+        config: DiscordConfig,
+        action: String,
+        args: Value,
+        deadline: Instant,
+        reply: std::sync::mpsc::SyncSender<Result<Option<ExecOutcome>>>,
+    },
+    Close,
+}
+
+/// Handle to the actor thread that owns the Discord connection. Cloneable
+/// and shared; actions from any thread queue up and run one at a time.
+pub struct DiscordClient {
+    jobs: std::sync::Mutex<std::sync::mpsc::Sender<Job>>,
+}
+
+/// Idle cadence of the actor loop. While idle it checks for queued actions
+/// and serves Discord's pings; a click therefore waits at most one tick
+/// before running, and pings are answered well inside Discord's patience.
+const IDLE_TICK: Duration = Duration::from_millis(20);
+
+impl DiscordClient {
+    /// Spawn the keep-alive actor. The first action pays the ~400 ms
+    /// session setup; every later one is a single round trip.
+    pub fn spawn() -> DiscordClient {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("discord-rpc".into())
+            .spawn(move || actor_loop(rx))
+            .expect("spawn discord rpc actor");
+        DiscordClient {
+            jobs: std::sync::Mutex::new(tx),
+        }
+    }
+
+    /// Execute one action end to end on the shared connection.
+    pub fn execute(
+        &self,
+        config: &DiscordConfig,
+        action: &str,
+        args: &Value,
+        deadline: Instant,
+    ) -> Result<Option<ExecOutcome>> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        let job = Job::Exec {
+            config: config.clone(),
+            action: action.to_string(),
+            args: args.clone(),
+            deadline,
+            reply: reply_tx,
+        };
+        self.jobs
+            .lock()
+            .unwrap()
+            .send(job)
+            .map_err(|_| DiscordError::Call("discord actor stopped"))?;
+        reply_rx
+            .recv()
+            .map_err(|_| DiscordError::Call("discord actor stopped"))?
+    }
+}
+
+impl Drop for DiscordClient {
+    fn drop(&mut self) {
+        // Best effort: if the actor already died the send fails and there
+        // is nothing left to stop.
+        let _ = self.jobs.lock().unwrap().send(Job::Close);
+    }
+}
+
+fn actor_loop(rx: std::sync::mpsc::Receiver<Job>) {
+    let mut conn: Option<Conn> = None;
+    let mut cache: Option<Value> = None;
+    loop {
+        match rx.recv_timeout(IDLE_TICK) {
+            Ok(Job::Close) => break,
+            Ok(Job::Exec {
+                config,
+                action,
+                args,
+                deadline,
+                reply,
+            }) => {
+                let outcome = run_exec(&mut conn, &mut cache, &config, &action, &args, deadline);
+                let _ = reply.send(outcome);
+            }
+            // Idle: pings must be answered or Discord drops the session,
+            // and pushed voice-settings updates keep the toggle cache
+            // honest between clicks.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(c) = conn.as_mut() {
+                    let _ = c.serve(IDLE_TICK, &mut cache);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+/// Connect on demand, run the plan, and drop the session on any failure so
+/// the next action starts fresh (an expired token surfaces as AuthRejected
+/// and goes through the caller's re-authorization path).
+fn run_exec(
+    conn: &mut Option<Conn>,
+    cache: &mut Option<Value>,
     config: &DiscordConfig,
     action: &str,
     args: &Value,
-    mut push: impl FnMut(String, String),
-) -> Result<()> {
+    deadline: Instant,
+) -> Result<Option<ExecOutcome>> {
     let what = plan(action, args)?;
-    if let Plan::ConnectChannel(id) = &what {
-        let mut s = Session::connect(config)?;
-        return s.select_voice_channel(Some(id), Instant::now() + Duration::from_secs(5));
+    if conn.is_none() {
+        let (fresh, settings) = Conn::connect(config, deadline)?;
+        *conn = Some(fresh);
+        *cache = Some(settings);
     }
-    if let Plan::Disconnect = &what {
-        let mut s = Session::connect(config)?;
-        return s.select_voice_channel(None, Instant::now() + Duration::from_secs(5));
+    let outcome = run_connected(conn.as_mut().unwrap(), cache, &what, deadline);
+    if outcome.is_err() {
+        *conn = None;
+        *cache = None;
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut s = Session::connect(config)?;
-    let current = s.get_voice_settings(deadline)?;
-    if let Some(outcome) = apply_flip(&current, &what)? {
-        s.set_voice_settings(outcome.patch, deadline)?;
-        if !outcome.label.is_empty() {
+    outcome
+}
+
+fn run_connected(
+    conn: &mut Conn,
+    cache: &mut Option<Value>,
+    what: &Plan,
+    deadline: Instant,
+) -> Result<Option<ExecOutcome>> {
+    match what {
+        Plan::ConnectChannel(id) => {
+            conn.request_until(
+                deadline,
+                "SELECT_VOICE_CHANNEL",
+                json!({ "channel_id": id, "timeout": 30i32 }),
+                cache,
+            )?;
+            Ok(None)
+        }
+        Plan::Disconnect => {
+            conn.request_until(
+                deadline,
+                "SELECT_VOICE_CHANNEL",
+                json!({ "channel_id": Value::Null, "timeout": 30i32 }),
+                cache,
+            )?;
+            Ok(None)
+        }
+        _ => {
+            // Flip-style plans need the current state. The cache kept fresh
+            // by VOICE_SETTINGS_UPDATE pushes avoids a GET round trip; only
+            // a cold cache (fresh connection) pays for one.
+            if cache.is_none() {
+                let reply = conn.request_until(deadline, "GET_VOICE_SETTINGS", json!({}), cache)?;
+                if let Some(data) = reply.get("data").filter(|v| v.is_object()) {
+                    *cache = Some(data.clone());
+                }
+            }
+            let Some(current) = cache.as_ref() else {
+                return Err(DiscordError::Call("GET_VOICE_SETTINGS"));
+            };
+            let Some(outcome) = apply_flip(current, what)? else {
+                return Ok(None);
+            };
+            let reply = conn.request_until(deadline, "SET_VOICE_SETTINGS", outcome.patch, cache)?;
+            // the reply carries the authoritative post-set state
+            if let Some(data) = reply.get("data").filter(|v| v.is_object()) {
+                *cache = Some(data.clone());
+            }
+            if outcome.label.is_empty() {
+                return Ok(None);
+            }
             let key = if matches!(what, Plan::FlipMic | Plan::SetMic(_)) {
                 "toggle-microphone"
             } else {
                 "toggle-headphone"
             };
-            push(key.to_string(), outcome.label.to_string());
+            Ok(Some(ExecOutcome {
+                key: key.to_string(),
+                label: outcome.label.to_string(),
+            }))
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -840,6 +1154,59 @@ mod tests {
         assert_eq!(op, OP_FRAME);
         assert_eq!(payload, br#"{"a":1}"#);
         assert!(decode_frame(&enc[..10]).is_none());
+    }
+
+    #[test]
+    fn extract_frames_splits_concatenated_and_keeps_partials() {
+        let a = encode_frame(OP_FRAME, r#"{"a":1}"#);
+        let b = encode_frame(OP_PING, r#"{"b":"x"}"#);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&a);
+        buf.extend_from_slice(&b);
+        // a partial frame behind two complete ones must survive the pass
+        buf.extend_from_slice(&a[..5]);
+        let frames = extract_frames(&mut buf);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].0, OP_FRAME);
+        assert_eq!(frames[1].0, OP_PING);
+        assert_eq!(buf.len(), 5);
+        buf.extend_from_slice(&a[5..]);
+        let frames = extract_frames(&mut buf);
+        assert_eq!(frames.len(), 1);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn extract_frames_drops_non_json_payloads() {
+        let mut buf = encode_frame(OP_PING, "not json");
+        buf.extend_from_slice(&encode_frame(OP_FRAME, r#"{"a":2}"#));
+        let frames = extract_frames(&mut buf);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].1["a"], 2);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn classify_routes_replies_events_pings_and_noise() {
+        let reply = json!({"cmd":"SET_VOICE_SETTINGS","nonce":"dk-7","data":{"mute":false}});
+        assert_eq!(classify(OP_FRAME, &reply, "dk-7"), Incoming::Reply);
+        // error frames carry our nonce too: the caller inspects evt
+        let error = json!({"cmd":"AUTHENTICATE","evt":"ERROR","nonce":"dk-2","data":{"message":"bad"}});
+        assert_eq!(classify(OP_FRAME, &error, "dk-2"), Incoming::Reply);
+        let push = json!({"cmd":"DISPATCH","evt":"VOICE_SETTINGS_UPDATE","data":{"mute":true}});
+        match classify(OP_FRAME, &push, "dk-9") {
+            Incoming::VoiceSettings(v) => assert_eq!(v["mute"], true),
+            other => panic!("expected voice settings push, got {other:?}"),
+        }
+        match classify(OP_PING, &json!({"z": 1}), "dk-9") {
+            Incoming::Ping(_) => {}
+            other => panic!("expected ping, got {other:?}"),
+        }
+        let ready = json!({"cmd":"DISPATCH","evt":"READY"});
+        assert_eq!(classify(OP_FRAME, &ready, "dk-9"), Incoming::Other);
+        // someone else's reply is not ours
+        let other_nonce = json!({"cmd":"X","nonce":"dk-1"});
+        assert_eq!(classify(OP_FRAME, &other_nonce, "dk-9"), Incoming::Other);
     }
 
     #[test]
@@ -957,108 +1324,53 @@ mod tests {
         let _ = Pipe::open();
     }
 
-    /// Live probe: reads the saved token from settings.json and runs
-    /// handshake + AUTHENTICATE only (no state changes). Run explicitly:
-    /// `cargo test -p pulpit-discord -- --ignored`
+    /// Live probe: reads the saved token from settings.json, connects and
+    /// authenticates only (no state changes). Run explicitly:
+    /// `cargo test -p pulpit-discord -- --ignored --nocapture live_auth`
     #[test]
     #[ignore = "talks to the real Discord pipe"]
     fn live_authenticate() {
-        // first: bogus id must produce an immediate error frame - proves
-        // the frame codec reads real replies
-        let mut pipe = Pipe::open().expect("no discord pipe");
-        let deadline = Instant::now() + Duration::from_secs(3);
-        pipe.write_all(&encode_frame(
-            OP_HANDSHAKE,
-            &json!({ "v": 1, "client_id": "0" }).to_string(),
-        ))
-        .unwrap();
-        let mut tmp = vec![0u8; 8];
-        pipe.read_exact(&mut tmp, deadline).unwrap();
-        let len = i32::from_le_bytes(tmp[4..8].try_into().unwrap()) as usize;
-        let mut rest = vec![0u8; len];
-        pipe.read_exact(&mut rest, deadline).unwrap();
-        println!("bogus handshake reply: {}", String::from_utf8_lossy(&rest));
-        drop(pipe);
-
-        // now the real credentials
-        let home = std::env::var("USERPROFILE").unwrap();
-        let raw = std::fs::read_to_string(format!("{home}\\pulpitApp\\settings.json")).unwrap();
-        let settings: Value = serde_json::from_str(&raw).unwrap();
-        let config = DiscordConfig::from_settings(&settings)
-            .expect("no discord credentials in settings.json");
-        let mut session = Session::connect(&config).expect("authenticate failed");
-        let settings = session
-            .get_voice_settings(Instant::now() + Duration::from_secs(5))
-            .unwrap();
+        let config = saved_config();
+        let (conn, settings) =
+            Conn::connect(&config, Instant::now() + Duration::from_secs(8)).expect("auth failed");
+        drop(conn);
         println!(
             "authenticated; voice settings keys: {:?}",
             settings.as_object().map(|o| o.keys().collect::<Vec<_>>())
         );
     }
 
-    /// Manual probe of the real handshake path; prints diagnostics only.
+    /// Live probe of click latency through the kept-alive client. Runs two
+    /// mic flips and two deaf flips, so Discord ends in the state it
+    /// started in. Run explicitly:
+    /// `cargo test -p pulpit-discord -- --ignored --nocapture live_latency`
     #[test]
-    #[ignore = "manual probe, prints settings fingerprints"]
-    fn live_raw_real_id() {
-        let home = std::env::var("USERPROFILE").unwrap();
-        let path = format!("{home}\\pulpitApp\\settings.json");
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let settings: Value = serde_json::from_str(&raw).unwrap();
-        let config = DiscordConfig::from_settings(&settings).expect("no creds");
-        println!(
-            "client_id len: {}, token len: {}",
-            config.client_id.len(),
-            config.access_token.len()
-        );
-        let mut pipe = Pipe::open().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(4);
-        pipe.write_all(&encode_frame(
-            OP_HANDSHAKE,
-            &json!({ "v": 1, "client_id": config.client_id }).to_string(),
-        ))
-        .unwrap();
-        let mut header = vec![0u8; 8];
-        match pipe.read_exact(&mut header, deadline) {
-            Ok(()) => {
-                let len = i32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-                let mut rest = vec![0u8; len];
-                pipe.read_exact(&mut rest, deadline).unwrap();
-                let reply = String::from_utf8_lossy(&rest);
-                println!("handshake reply evt: {}", {
-                    let v: Value = serde_json::from_str(&reply).unwrap_or(Value::Null);
-                    v["evt"].as_str().unwrap_or("?").to_string()
-                });
-                // now try AUTHENTICATE on the same connection
-                pipe.write_all(&encode_frame(
-                    OP_FRAME,
-                    &json!({
-                        "cmd": "AUTHENTICATE",
-                        "args": { "access_token": config.access_token },
-                        "nonce": "probe-1",
-                    })
-                    .to_string(),
-                ))
-                .unwrap();
-                let mut header2 = vec![0u8; 8];
-                match pipe.read_exact(&mut header2, deadline) {
-                    Ok(()) => {
-                        let len2 = i32::from_le_bytes(header2[4..8].try_into().unwrap()) as usize;
-                        let mut rest2 = vec![0u8; len2];
-                        pipe.read_exact(&mut rest2, deadline).unwrap();
-                        let text = String::from_utf8_lossy(&rest2);
-                        let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-                        println!(
-                            "auth reply: cmd={:?} evt={:?} nonce={:?} msg={:?}",
-                            v["cmd"].as_str(),
-                            v["evt"].as_str(),
-                            v["nonce"].as_str(),
-                            v["data"]["message"].as_str(),
-                        );
-                    }
-                    Err(e) => println!("SILENCE after AUTHENTICATE: {e}"),
-                }
-            }
-            Err(e) => println!("SILENCE after handshake: {e}"),
+    #[ignore = "talks to the real Discord pipe"]
+    fn live_latency_probe() {
+        let config = saved_config();
+        let client = DiscordClient::spawn();
+        let toggles = [
+            ("microphone", json!({ "action": "toggle_microphone" })),
+            ("microphone", json!({ "action": "toggle_microphone" })),
+            ("headphone", json!({ "action": "toggle_headphone" })),
+            ("headphone", json!({ "action": "toggle_headphone" })),
+        ];
+        for (round, (kind, args)) in toggles.iter().enumerate() {
+            let t = Instant::now();
+            client
+                .execute(&config, kind, args, Instant::now() + Duration::from_secs(8))
+                .expect("execute failed");
+            println!("click {}: {:?}", round + 1, t.elapsed());
+            std::thread::sleep(Duration::from_millis(300));
         }
+    }
+
+    fn saved_config() -> DiscordConfig {
+        let home = std::env::var("USERPROFILE").unwrap();
+        let raw = std::fs::read_to_string(format!("{home}\\deckboard\\settings.json"))
+            .or_else(|_| std::fs::read_to_string(format!("{home}\\pulpitApp\\settings.json")))
+            .expect("settings.json not found");
+        DiscordConfig::from_settings(&serde_json::from_str(&raw).unwrap())
+            .expect("no discord credentials in settings.json")
     }
 }
