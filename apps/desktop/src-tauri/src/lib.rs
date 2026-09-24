@@ -413,7 +413,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             let mut tick: u32 = 0;
             loop {
                 tick = tick.wrapping_add(1);
-                let want_device = tick % 6 == 0;
+                let want_device = tick.is_multiple_of(6);
                 interval.tick().await;
                 // Speaker COM calls block; keep them off the runtime
                 // workers. The shared SqlBackend owns the lazy speaker
