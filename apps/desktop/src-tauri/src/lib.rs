@@ -93,12 +93,19 @@ pub fn run() {
     // lifetime, so the owner is intentionally never dropped.
     std::mem::forget(runtime);
 
-    tauri::Builder::default()
-        // Must be the first plugin: a second launch would fight this instance
-        // for port 8500 and the SQLite file, so it only surfaces the window.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+    // Must be the first plugin: a second launch would fight this instance
+    // for port 8500 and the SQLite file, so it only surfaces the window.
+    // `DECKBOARD_NO_SINGLE_INSTANCE=1` opts out (profiling side-by-side
+    // builds against a copied database).
+    let builder = tauri::Builder::default();
+    let builder = if std::env::var_os("DECKBOARD_NO_SINGLE_INSTANCE").is_none() {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
+    } else {
+        builder
+    };
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -596,8 +603,15 @@ static HIDDEN_SINCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// down. The WebView2 process tree costs ~60-150 MB resident around the
 /// clock; the embedded server, tray and tablets are unaffected. Showing
 /// the window again rebuilds the UI from scratch (the Vue app refetches
-/// everything on mount).
-const WEBVIEW_TEARDOWN_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// everything on mount). `DECKBOARD_WEBVIEW_TEARDOWN_SECS` overrides the
+/// threshold (profiling / tests).
+fn webview_teardown_after() -> std::time::Duration {
+    std::env::var("DECKBOARD_WEBVIEW_TEARDOWN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(10 * 60))
+}
 
 /// Sweep: destroy the WebView once the window has been hidden longer
 /// than `WEBVIEW_TEARDOWN_AFTER`. Runs on the 30 s loop; the window is
@@ -613,7 +627,7 @@ fn spawn_webview_teardown(app: AppHandle) {
                 continue;
             }
             let hidden_for = deckboard_v2::unix_millis().saturating_sub(hidden_at);
-            if hidden_for < WEBVIEW_TEARDOWN_AFTER.as_millis() as u64 {
+            if hidden_for < webview_teardown_after().as_millis() as u64 {
                 continue;
             }
             if let Some(window) = app.get_webview_window("main") {
