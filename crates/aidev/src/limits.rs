@@ -51,7 +51,7 @@ impl HttpState {
     /// source, never the app.
     pub fn refresh(&mut self, config: &Config, paths: &Paths) {
         self.rows = poll_all(config);
-        self.rows.extend(antigravity_quota_row());
+        self.rows.extend(antigravity_quota_rows());
         self.claude_oauth = claude_oauth_usage(paths);
     }
 }
@@ -65,6 +65,12 @@ fn poll_all(config: &Config) -> Vec<ProviderRow> {
     let anthropic = resolve_key(config.providers.anthropic.as_ref(), "ANTHROPIC_API_KEY");
     if let Some(key) = anthropic {
         rows.push(anthropic_row(&key));
+    }
+    if let Some(zai) = config.providers.zai.as_ref() {
+        let key = resolve_key(Some(&Apikey { api_key: zai.api_key.clone() }), "Z_AI_API_KEY");
+        if let Some(key) = key {
+            rows.extend(zai_rows(&key, zai.host.as_deref()));
+        }
     }
     for custom in &config.custom {
         rows.push(custom_row(custom));
@@ -82,9 +88,12 @@ pub fn plan_rows(
     now: i64,
 ) -> Vec<ProviderRow> {
     let mut rows = http.rows.clone();
+    // a live GLM quota lane from the z.ai monitor API replaces the local
+    // ceilings stopgap - real limits beat configured guesses
+    let zai_live = rows.iter().any(|r| r.name.starts_with(GLM_LANE));
 
     if let Some(limits) = crate::codex::limits(&paths.codex_sessions, now) {
-        rows.push(codex_lane("Codex", &limits));
+        rows.extend(codex_rows("Codex", &limits));
     }
 
     let provider_sums = |name: &str| {
@@ -94,17 +103,19 @@ pub fn plan_rows(
             .unwrap_or_default()
     };
     let claude = provider_sums("Claude");
-    let glm_five = provider_sums("Zcode").five_hour + provider_sums("OpenCode").five_hour;
-    let glm_week = provider_sums("Zcode").week + provider_sums("OpenCode").week;
-    rows.push(local_lane(
-        "GLM",
-        glm_five,
-        glm_week,
-        config.glm_five_hour_tokens,
-        config.glm_week_tokens,
-    ));
+    if !zai_live {
+        let glm_five = provider_sums("Zcode").five_hour + provider_sums("OpenCode").five_hour;
+        let glm_week = provider_sums("Zcode").week + provider_sums("OpenCode").week;
+        rows.push(local_lane(
+            GLM_LANE,
+            glm_five,
+            glm_week,
+            config.glm_five_hour_tokens,
+            config.glm_week_tokens,
+        ));
+    }
     match http.claude_oauth {
-        Some((five, week)) => rows.push(percent_lane("Claude", five, week)),
+        Some((five, week)) => rows.extend(percent_rows("Claude", five, week)),
         None => rows.push(local_lane(
             "Claude",
             claude.five_hour,
@@ -270,47 +281,173 @@ fn custom_row(custom: &crate::CustomProvider) -> ProviderRow {
     }
 }
 
-/// ---- local lanes (Codex, GLM, Claude fallback, Antigravity) ------------------
+/// ---- lanes as per-window bars ------------------------------------------------
 
-/// Codex lane from the rate limits embedded in the rollout files: the
-/// primary window is the session lane, secondary the weekly one. Labels
-/// come from the API's own window minutes (a free plan reports 30 days,
-/// not 5 hours).
-fn codex_lane(name: &str, limits: &crate::codex::Limits) -> ProviderRow {
-    let mut parts = Vec::new();
-    if let Some(primary) = &limits.primary {
-        parts.push(format!("{} {:.0}%", primary.window_label(), primary.used_percent));
-    }
-    if let Some(secondary) = &limits.secondary {
-        parts.push(format!(
-            "{} {:.0}%",
-            secondary.window_label(),
-            secondary.used_percent
-        ));
-    }
-    let text = if parts.is_empty() {
-        format!("{} plan", limits.plan_type.as_deref().unwrap_or("limited"))
-    } else {
-        parts.join(" · ")
+const GLM_LANE: &str = "GLM";
+
+/// One window of one provider as a bar row: the fill is the usage, the
+/// value shows `used / limit` when counts exist, else the percentage.
+fn window_row(
+    provider: &str,
+    window: &str,
+    percent: f64,
+    counts: Option<(f64, f64)>,
+) -> ProviderRow {
+    let percent = percent.clamp(0.0, 100.0);
+    let text = match counts {
+        Some((used, limit)) => format!("{} / {}", fmt_tokens(used as u64), fmt_tokens(limit as u64)),
+        None => format!("{percent:.0}%"),
     };
-    let worst = [
-        limits.primary.as_ref(),
-        limits.secondary.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|rl| rl.used_percent)
-    .fold(None::<f64>, |acc, p| Some(acc.map_or(p, |a: f64| a.max(p))));
     ProviderRow {
-        name: name.to_string(),
-        state: threshold_state(worst).to_string(),
+        name: format!("{provider} {window}"),
+        state: threshold_state(Some(percent)).to_string(),
         text,
-        percent: limits.primary.as_ref().map(|rl| rl.used_percent),
+        percent: Some((percent * 10.0).round() / 10.0),
     }
 }
 
+/// Codex rows from the rate limits embedded in the rollout files: one bar
+/// per reported window (primary is the session lane, secondary the weekly
+/// one; labels come from the API's own window minutes). Without windows
+/// the plan name is all the API gives up.
+fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
+    let mut rows = Vec::new();
+    if let Some(primary) = &limits.primary {
+        rows.push(window_row(
+            name,
+            &primary.window_label(),
+            primary.used_percent,
+            None,
+        ));
+    }
+    if let Some(secondary) = &limits.secondary {
+        rows.push(window_row(
+            name,
+            &secondary.window_label(),
+            secondary.used_percent,
+            None,
+        ));
+    }
+    if rows.is_empty() {
+        rows.push(ProviderRow {
+            name: name.to_string(),
+            state: "ok".into(),
+            text: format!("{} plan", limits.plan_type.as_deref().unwrap_or("limited")),
+            percent: None,
+        });
+    }
+    rows
+}
+
+/// GLM Coding Plan via the z.ai monitor quota endpoint (CodexBar's
+/// mapping): `data.limits[]` entries of type TOKENS_LIMIT or
+/// CREDIT_LIMIT, each with `unit`+`number` for the window and a
+/// percentage the API computes itself. `usage` (allotment) together with
+/// `currentValue`/`remaining` upgrades the row to `used / limit` counts.
+fn zai_rows(key: &str, host: Option<&str>) -> Vec<ProviderRow> {
+    let base = match host.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) if h.starts_with("http://") || h.starts_with("https://") => h.trim_end_matches('/').to_string(),
+        Some(h) => format!("https://{h}"),
+        None => "https://api.z.ai".into(),
+    };
+    let url = format!("{base}/api/monitor/usage/quota/limit");
+    let headers = [
+        ("Authorization", format!("Bearer {key}")),
+        ("accept", "application/json".to_string()),
+    ];
+    let v = match get_json(&url, &headers) {
+        Ok(v) => v,
+        Err(e) => return vec![error_row(GLM_LANE, &e)],
+    };
+    zai_rows_from(v)
+}
+
+/// Map a quota response onto bar rows; split from the HTTP call so tests
+/// can feed fixtures directly.
+fn zai_rows_from(v: serde_json::Value) -> Vec<ProviderRow> {
+    if v.get("success").and_then(|s| s.as_bool()) != Some(true) {
+        let msg = v
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("quota request rejected");
+        return vec![error_row(GLM_LANE, msg)];
+    }
+    let Some(limits) = v.pointer("/data/limits").and_then(|l| l.as_array()) else {
+        return vec![error_row(GLM_LANE, "no limits in response")];
+    };
+    let plan = ["level", "planName", "plan_type", "packageName"]
+        .iter()
+        .find_map(|k| {
+            v.pointer("/data")
+                .and_then(|d| d.get(k))
+                .and_then(|p| p.as_str())
+                .map(str::to_string)
+        });
+    let mut windows: Vec<(u64, ProviderRow)> = limits
+        .iter()
+        .filter_map(|raw| zai_window(raw))
+        .collect();
+    windows.sort_by_key(|(minutes, _)| *minutes);
+    if windows.is_empty() {
+        return vec![ProviderRow {
+            name: GLM_LANE.into(),
+            state: "ok".into(),
+            text: match &plan {
+                Some(p) => format!("{p} plan"),
+                None => "no quota windows".into(),
+            },
+            percent: None,
+        }];
+    }
+    windows.into_iter().map(|(_, row)| row).collect()
+}
+
+/// One `data.limits[]` entry -> (window_minutes, row); unsupported types
+/// and window shapes are skipped, mirroring the CodexBar parser.
+fn zai_window(raw: &serde_json::Value) -> Option<(u64, ProviderRow)> {
+    let kind = raw.get("type")?.as_str()?;
+    if kind != "TOKENS_LIMIT" && kind != "CREDIT_LIMIT" {
+        return None;
+    }
+    let unit = raw.get("unit")?.as_u64()?;
+    let number = raw.get("number")?.as_u64()?;
+    // unit codes: 1 day, 3 hour, 5 minute, 6 week
+    let multiplier = match unit {
+        1 => 1440,
+        3 => 60,
+        5 => 1,
+        6 => 10_080,
+        _ => return None,
+    };
+    let minutes = number.checked_mul(multiplier)?;
+    let api_percent = raw.get("percentage")?.as_f64()?;
+    let usage = raw.get("usage").and_then(|u| u.as_f64());
+    let current = raw.get("currentValue").and_then(|c| c.as_f64());
+    let remaining = raw.get("remaining").and_then(|r| r.as_f64());
+    let mut percent = api_percent;
+    let mut counts = None;
+    if let Some(usage) = usage.filter(|u| *u > 0.0) {
+        let used = match (remaining, current) {
+            (Some(remaining), Some(current)) => Some((usage - remaining).max(current)),
+            (Some(remaining), None) => Some(usage - remaining),
+            (None, Some(current)) => Some(current),
+            _ => None,
+        };
+        if let Some(used) = used {
+            percent = 100.0 * used.clamp(0.0, usage) / usage;
+            counts = Some((used, usage));
+        }
+    }
+    let window = crate::codex::RateLimit {
+        used_percent: 0.0,
+        window_minutes: minutes,
+    }
+    .window_label();
+    Some((minutes, window_row(GLM_LANE, &window, percent, counts)))
+}
+
 /// Local lane: token sums per window, percent only where a ceiling is
-/// configured - no ceiling, no invented percentage.
+/// configured - no ceiling, no invented percentage, so no bar either.
 fn local_lane(
     name: &str,
     five_hour: u64,
@@ -354,28 +491,28 @@ fn local_lane(
     }
 }
 
-/// Percent lane (Claude via OAuth): utilization values arrive as 0..1
-/// fractions or straight percentages; both are normalized here.
-fn percent_lane(name: &str, five_hour: Option<f64>, week: Option<f64>) -> ProviderRow {
+/// Claude via OAuth: per-window bar rows; utilization values arrive as
+/// 0..1 fractions or straight percentages, both normalized here.
+fn percent_rows(name: &str, five_hour: Option<f64>, week: Option<f64>) -> Vec<ProviderRow> {
     let normalize = |v: Option<f64>| v.map(|p| if p <= 1.0 { p * 100.0 } else { p });
     let five = normalize(five_hour);
     let week = normalize(week);
-    let mut parts = Vec::new();
+    let mut rows = Vec::new();
     if let Some(p) = five {
-        parts.push(format!("5h {p:.0}%"));
+        rows.push(window_row(name, "5h", p, None));
     }
     if let Some(p) = week {
-        parts.push(format!("week {p:.0}%"));
+        rows.push(window_row(name, "week", p, None));
     }
-    let worst = five.into_iter().chain(week).fold(None::<f64>, |acc, p| {
-        Some(acc.map_or(p, |a: f64| a.max(p)))
-    });
-    ProviderRow {
-        name: name.to_string(),
-        state: threshold_state(worst).to_string(),
-        text: if parts.is_empty() { "no data".into() } else { parts.join(" · ") },
-        percent: five,
+    if rows.is_empty() {
+        rows.push(ProviderRow {
+            name: name.to_string(),
+            state: "ok".into(),
+            text: "no data".into(),
+            percent: None,
+        });
     }
+    rows
 }
 
 /// Claude OAuth usage: `GET /api/oauth/usage` with the CLI's own bearer
@@ -409,32 +546,20 @@ fn claude_oauth_usage(paths: &Paths) -> Option<(Option<f64>, Option<f64>)> {
     Some((lane("five_hour"), lane("seven_day")))
 }
 
-/// Antigravity lane from the running IDE's local quota endpoint.
-fn antigravity_quota_row() -> Vec<ProviderRow> {
+/// Antigravity lane from the running IDE's local quota endpoint, as
+/// per-window bar rows.
+fn antigravity_quota_rows() -> Vec<ProviderRow> {
     let Some(quota) = crate::antigravity::quota() else {
         return Vec::new();
     };
-    let mut parts = Vec::new();
+    let mut rows = Vec::new();
     if let Some(p) = quota.five_hour_used {
-        parts.push(format!("5h {p:.0}%"));
+        rows.push(window_row("Antigravity", "5h", p, None));
     }
     if let Some(p) = quota.weekly_used {
-        parts.push(format!("week {p:.0}%"));
+        rows.push(window_row("Antigravity", "week", p, None));
     }
-    if parts.is_empty() {
-        return Vec::new();
-    }
-    let worst = quota
-        .five_hour_used
-        .into_iter()
-        .chain(quota.weekly_used)
-        .fold(None::<f64>, |acc, p| Some(acc.map_or(p, |a: f64| a.max(p))));
-    vec![ProviderRow {
-        name: "Antigravity".into(),
-        state: threshold_state(worst).to_string(),
-        text: parts.join(" · "),
-        percent: quota.five_hour_used,
-    }]
+    rows
 }
 
 /// ---- row shaping -----------------------------------------------------------
@@ -584,22 +709,28 @@ mod tests {
     }
 
     #[test]
-    fn codex_lane_reports_embedded_windows() {
-        let limits = crate::codex::Limits {
-            plan_type: Some("pro".into()),
-            primary: Some(crate::codex::RateLimit {
-                used_percent: 65.0,
-                window_minutes: 300,
-            }),
-            secondary: Some(crate::codex::RateLimit {
-                used_percent: 12.0,
-                window_minutes: 10_080,
-            }),
-        };
-        let row = codex_lane("Codex", &limits);
-        assert_eq!(row.text, "5h 65% · week 12%");
-        assert_eq!(row.percent, Some(65.0));
-        assert_eq!(row.state, "warn"); // the worst window decides
+    fn window_rows_carry_the_bar_data() {
+        let rows = codex_rows(
+            "Codex",
+            &crate::codex::Limits {
+                plan_type: Some("pro".into()),
+                primary: Some(crate::codex::RateLimit {
+                    used_percent: 65.0,
+                    window_minutes: 300,
+                }),
+                secondary: Some(crate::codex::RateLimit {
+                    used_percent: 12.0,
+                    window_minutes: 10_080,
+                }),
+            },
+        );
+        // one bar row per window, API-provided window labels
+        let labels: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(labels, ["Codex 5h", "Codex week"]);
+        assert_eq!(rows[0].text, "65%");
+        assert_eq!(rows[0].percent, Some(65.0));
+        assert_eq!(rows[0].state, "warn");
+        assert_eq!(rows[1].percent, Some(12.0));
 
         // a plan with no windows still shows something readable
         let bare = crate::codex::Limits {
@@ -607,15 +738,57 @@ mod tests {
             primary: None,
             secondary: None,
         };
-        assert_eq!(codex_lane("Codex", &bare).text, "free plan");
+        assert_eq!(codex_rows("Codex", &bare)[0].text, "free plan");
     }
 
     #[test]
-    fn percent_lane_normalizes_fractions_and_percentages() {
-        let row = percent_lane("Claude", Some(0.42), Some(75.0));
-        assert_eq!(row.text, "5h 42% · week 75%");
-        assert_eq!(row.percent, Some(42.0));
-        assert_eq!(row.state, "warn"); // the worst window decides
+    fn percent_rows_normalize_fractions_and_percentages() {
+        let rows = percent_rows("Claude", Some(0.42), Some(75.0));
+        assert_eq!(rows[0].name, "Claude 5h");
+        assert_eq!(rows[0].percent, Some(42.0));
+        assert_eq!(rows[1].percent, Some(75.0));
+    }
+
+    #[test]
+    fn zai_windows_map_units_and_counts() {
+        // a coding plan reports a 5h token window and a weekly one; the
+        // API's own percentage wins when the counts are unusable
+        let limits: serde_json::Value = serde_json::from_str(
+            r#"{"success":true,"code":200,"data":{"level":"pro","limits":[
+                {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":34,
+                 "usage":120000,"currentValue":40800},
+                {"type":"TOKENS_LIMIT","unit":6,"number":1,"percentage":0,
+                 "usage":600000,"remaining":540000,"currentValue":0},
+                {"type":"TIME_LIMIT","unit":3,"number":1,"percentage":10}
+            ]}}"#,
+        )
+        .unwrap();
+        let rows = zai_rows_from(limits);
+        // TIME_LIMIT is not a coding-plan window; windows sort by length
+        let labels: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(labels, ["GLM 5h", "GLM week"]);
+        // counts upgrade the row to used / limit
+        assert_eq!(rows[0].text, "40.8K / 120.0K");
+        assert_eq!(rows[0].percent, Some(34.0));
+        // remaining is honored when currentValue is zeroed
+        assert_eq!(rows[1].text, "60.0K / 600.0K");
+        assert_eq!(rows[1].percent, Some(10.0));
+    }
+
+    #[test]
+    fn zai_errors_and_empty_plans_stay_readable() {
+        let rejected: serde_json::Value =
+            serde_json::from_str(r#"{"success":false,"code":401,"msg":"invalid api key"}"#).unwrap();
+        let rows = zai_rows_from(rejected);
+        assert_eq!(rows[0].state, "error");
+        assert_eq!(rows[0].text, "invalid api key");
+
+        let no_limits: serde_json::Value =
+            serde_json::from_str(r#"{"success":true,"code":200,"data":{"level":"lite","limits":[]}}"#)
+                .unwrap();
+        let rows = zai_rows_from(no_limits);
+        assert_eq!(rows[0].text, "lite plan");
+        assert_eq!(rows[0].percent, None);
     }
 
     #[test]
@@ -650,5 +823,27 @@ mod tests {
         let glm = rows.iter().find(|r| r.name == "GLM").unwrap();
         // zcode + opencode together; an empty window is simply not shown
         assert_eq!(glm.text, "5h 50.0K");
+
+        // a live GLM quota lane replaces the local ceilings lane
+        let http = HttpState {
+            rows: vec![
+                ProviderRow {
+                    name: "GLM 5h".into(),
+                    state: "ok".into(),
+                    text: "40.8K / 120.0K".into(),
+                    percent: Some(34.0),
+                },
+                ProviderRow {
+                    name: "GLM week".into(),
+                    state: "ok".into(),
+                    text: "60.0K / 600.0K".into(),
+                    percent: Some(10.0),
+                },
+            ],
+            claude_oauth: None,
+        };
+        let rows = plan_rows(&config, &http, &sums, &paths, crate::unix_now());
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["GLM 5h", "GLM week", "Claude"]);
     }
 }

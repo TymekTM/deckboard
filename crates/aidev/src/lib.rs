@@ -107,11 +107,22 @@ pub struct Config {
 pub struct Providers {
     pub openrouter: Option<Apikey>,
     pub anthropic: Option<Apikey>,
+    /// GLM Coding Plan (z.ai / BigModel): the same API key the plan page
+    /// issues, queried against the monitor quota endpoint.
+    pub zai: Option<ZaiProvider>,
 }
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Apikey {
     pub api_key: Option<String>,
+}
+
+#[derive(serde::Deserialize, Clone, Default)]
+pub struct ZaiProvider {
+    pub api_key: Option<String>,
+    /// Host override (`open.bigmodel.cn` for mainland plans) or a full
+    /// URL; defaults to the global `https://api.z.ai`.
+    pub host: Option<String>,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -230,11 +241,13 @@ fn assemble(
     };
 
     let plan_rows = limits::plan_rows(config, http, &sums, paths, now);
+    // one-line headline: whichever window is closest to its limit
     let plan_summary = plan_rows
         .iter()
-        .filter_map(|r| r.percent.map(|p| format!("{} {:.0}%", r.name, p)))
-        .collect::<Vec<_>>()
-        .join(" · ");
+        .filter_map(|r| r.percent.map(|p| (p, r)))
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(p, r)| format!("{} {:.0}%", r.name, p))
+        .unwrap_or_default();
 
     let agents = agents::snapshot(config, paths, now);
     let hour_rows: Vec<_> = sums

@@ -6,7 +6,7 @@ agent progress and token burn. Ships four catalog entries under
 
 | Tile | Mode | Shows |
 |---|---|---|
-| `ai-plan-limits` | `status` | One lane per provider: 5h / weekly usage as percentages (when the source knows the limit) or token sums |
+| `ai-plan-limits` | `status` | One bar row per provider window (5h, week): fill = usage against the limit, value = `used / limit` (or a percentage when the source reports only that), colored by threshold |
 | `ai-agent-status` | `status` | Active agents grouped by project: provider glyph, session title, state |
 | `ai-tokens-today` | `graph` | Sparkline of tokens consumed today, all providers combined |
 | `ai-tokens-hour` | `graph` | Rolling last-60-minutes window, refreshed with every poll (~15 s); a tap flips it to the per-provider breakdown |
@@ -25,7 +25,7 @@ lane only when its limit source is available:
 
 | Provider | Sessions read from | Token usage | Limits |
 |---|---|---|---|
-| `zcode` | `~/.zcode/cli/db/db.sqlite` (`session` table: title, directory, `time_updated`; main conversations only) | rollout JSONLs `~/.zcode/cli/rollout/` | local sums vs `glm_five_hour_tokens` / `glm_week_tokens` ceilings |
+| `zcode` | `~/.zcode/cli/db/db.sqlite` (`session` table: title, directory, `time_updated`; main conversations only) | rollout JSONLs `~/.zcode/cli/rollout/` | GLM Coding Plan quota from the z.ai monitor API (`providers.zai`); falls back to local sums vs `glm_five_hour_tokens` / `glm_week_tokens` ceilings |
 | `claude` | `~/.claude/projects/<project>/*.jsonl` mtimes; the freshest transcript's head gives the real cwd and opening prompt | the same JSONLs (`message.usage`) | OAuth `api.anthropic.com/api/oauth/usage` with the CLI's own token (`user:profile` scope); falls back to `claude_five_hour_tokens` / `claude_week_tokens` |
 | `codex` | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` (`session_meta` → cwd, first `user_message` → title) | the same rollouts (`token_count` events, `last_token_usage` deltas) | the `rate_limits` embedded in every `token_count` event - no API call |
 | `opencode` | `opencode.db` `session` table (title, directory, `time_updated`) | the `message` table's assistant rows (`tokens` object) | shares the GLM ceilings |
@@ -40,6 +40,31 @@ OpenRouter (`OPENROUTER_API_KEY`), the Anthropic admin report
 (`ANTHROPIC_API_KEY`) and arbitrary config-declared endpoints remain
 opt-in extra lanes. The old OpenAI Costs lane is gone - consumer keys are
 not accepted there and Codex usage is subscription-based.
+
+## Plan-limit bars
+
+Every window with a known limit renders as its own row: a thin bar under
+`label  used / limit`, fill colored by the threshold palette (green ok,
+amber over 60%, red over 85%). Sources that expose only percentages
+(Codex, Claude OAuth, Antigravity quota) show `N%` as the value; the
+z.ai lane reads real limits, so its bars show token or credit counts.
+
+The GLM lane reads the z.ai monitor quota endpoint with the plan's API
+key (CodexBar's mapping: `data.limits[]`, TOKENS_LIMIT / CREDIT_LIMIT
+windows, `usage` + `currentValue`/`remaining` counts, plan level). Put
+the key in `~/deckboard/aidev.json`:
+
+```json
+{
+  "providers": {
+    "zai": { "api_key": "..." }
+  }
+}
+```
+
+Mainland (BigModel) plans add `"host": "open.bigmodel.cn"`. While this
+lane answers, the local-sums-vs-ceilings stopgap is suppressed - real
+limits beat configured guesses.
 
 ## Agent states
 
@@ -89,7 +114,8 @@ disk - they prune their own logs, so "today" counts what is retrievable.
   "glm_week_tokens": null,
   "providers": {
     "openrouter": { "api_key": "" },
-    "anthropic": { "api_key": "" }
+    "anthropic": { "api_key": "" },
+    "zai": { "api_key": "", "host": null }
   },
   "custom": []
 }
@@ -98,7 +124,9 @@ disk - they prune their own logs, so "today" counts what is retrievable.
 Token ceilings turn the local GLM / Claude sums into percentages; without
 a ceiling the lane shows raw tokens. Poll cadence: `poll_secs` drives the
 local tick (the tokens-per-hour tile refreshes at this rate),
-`http_poll_secs` the network lanes.
+`http_poll_secs` the network lanes. `providers.zai.api_key` enables the
+GLM Coding Plan quota lane (see "Plan-limit bars" above); `host` is only
+needed for mainland BigModel plans.
 
 Live smoke check against the real user directories:
 

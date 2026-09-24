@@ -216,8 +216,12 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Native AI dev-work source: plan limits + agent progress, same channel.
+    // DECKBOARD_AIDEV_CONFIG overrides the config location (hermetic runs).
+    let aidev_config = std::env::var_os("DECKBOARD_AIDEV_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join("deckboard/aidev.json"));
     let aidev_paths = deckboard_aidev::Paths {
-        config: home.join("deckboard/aidev.json"),
+        config: aidev_config,
         zcode_cli: home.join(".zcode/cli"),
         claude_projects: home.join(".claude/projects"),
         codex_sessions: home.join(".codex/sessions"),

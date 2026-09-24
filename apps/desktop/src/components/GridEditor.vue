@@ -763,6 +763,18 @@ function onGridClick(event) {
   border-radius: 1px;
   background: rgba(255, 255, 255, 0.75);
 }
+/* plan-limit bars take the threshold palette, like the dots */
+.s-ok .status-bar i {
+  background: #2ecc71;
+}
+.s-warn .status-bar i,
+.s-attention .status-bar i {
+  background: #f39c12;
+}
+.s-high .status-bar i,
+.s-error .status-bar i {
+  background: #e74c3c;
+}
 .status-summary {
   font-size: 10.5px;
   color: rgba(255, 255, 255, 0.8);

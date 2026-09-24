@@ -349,8 +349,13 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         register_ext_input(value, Some(icon), Some(color), "fas", Some(mode), None);
     }
     {
+        // DECKBOARD_AIDEV_CONFIG overrides the aidev config location
+        // (profiling / hermetic runs), like DECKBOARD_DB for the database
+        let aidev_config = std::env::var_os("DECKBOARD_AIDEV_CONFIG")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join("deckboard").join("aidev.json"));
         let paths = deckboard_aidev::Paths {
-            config: home.join("deckboard").join("aidev.json"),
+            config: aidev_config,
             zcode_cli: home.join(".zcode").join("cli"),
             claude_projects: home.join(".claude").join("projects"),
             codex_sessions: home.join(".codex").join("sessions"),
