@@ -172,7 +172,7 @@ function boardContextMenu(board, event) {
         });
         if (ok) {
           await api.clearBoard(board.id);
-          await load();
+          await loadBoards();
         }
       },
     },
@@ -187,7 +187,7 @@ function boardContextMenu(board, event) {
         });
         if (ok) {
           await api.deleteBoard(board.id);
-          await load();
+          await loadBoards();
         }
       },
     },
@@ -212,11 +212,18 @@ const boardNames = computed(() =>
   Object.fromEntries(boards.value.map((b) => [b.id, b.name || "Untitled"]))
 );
 
-async function load() {
+// Panel data that only changes on restart or settings edits: fetched at
+// startup only, not after every tile edit (each call is an IPC round-trip
+// and listBoards ships every board with its base64 images).
+async function loadCore() {
   status.value = await api.serverStatus();
   hotkey.value = (await api.getSettings()).hotkey;
   knownInputs.value = await api.listKnownInputs();
   audioDevices.value = await api.listAudioDevices().catch(() => []);
+}
+
+// Board data: the only thing tile/board edits change.
+async function loadBoards() {
   if (status.value.dbOk) {
     boards.value = await api.listBoards();
     if (!boards.value.some((b) => b.id === currentId.value)) {
@@ -224,6 +231,11 @@ async function load() {
     }
   }
   if (touchBoardId.value === null) touchBoardId.value = currentId.value;
+}
+
+async function load() {
+  await loadCore();
+  await loadBoards();
 }
 
 // Open (or close) the server-status popover; on open, refresh the LAN
@@ -291,7 +303,7 @@ async function tileCreated(form) {
     h: form.h || 1,
   });
   createFlow.value = null;
-  await load();
+  await loadBoards();
   const tile = boards.value
     .find((b) => b.id === board.id)
     ?.buttons.find((b) => b.id === id);
@@ -313,13 +325,13 @@ async function tileMoved(tile, x, y, w, h) {
 async function tileEdited(button) {
   await api.updateButton(button);
   editingTile.value = null;
-  await load();
+  await loadBoards();
 }
 
 async function tileDeleted(tile) {
   await api.deleteButton(tile.id, tile.board_id);
   editingTile.value = null;
-  await load();
+  await loadBoards();
 }
 
 async function doExport() {
@@ -341,7 +353,7 @@ async function doImport() {
   });
   if (!path) return;
   await api.importBoards(path);
-  await load();
+  await loadBoards();
 }
 
 async function clearCurrentBoard() {
@@ -353,7 +365,7 @@ async function clearCurrentBoard() {
   });
   if (!ok) return;
   await api.clearBoard(currentBoard.value.id);
-  await load();
+  await loadBoards();
 }
 
 async function deleteCurrentBoard() {
@@ -365,7 +377,7 @@ async function deleteCurrentBoard() {
   });
   if (!ok) return;
   await api.deleteBoard(currentBoard.value.id);
-  await load();
+  await loadBoards();
 }
 
 async function saveHotkey() {

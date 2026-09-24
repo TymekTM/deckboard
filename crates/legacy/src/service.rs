@@ -23,6 +23,11 @@ pub trait Backend: Send + Sync + 'static {
     fn get_board(&self, board_id: i64) -> Option<deckboard_db::BoardRow>;
     fn get_buttons_by_board(&self, board_id: i64) -> Vec<deckboard_db::ButtonRow>;
     fn get_button(&self, id: i64) -> Option<deckboard_db::ButtonRow>;
+    /// Image-less row for per-event paths (gesture checks, exec dispatch).
+    /// Defaults to the full row for backends without a cheaper query.
+    fn get_button_meta(&self, id: i64) -> Option<deckboard_db::ButtonRow> {
+        self.get_button(id)
+    }
     fn exec(
         &self,
         button: deckboard_db::ButtonRow,

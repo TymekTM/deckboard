@@ -313,10 +313,12 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
             }
         };
     // The lookup is a SQLite read; it must not run on the async workers.
+    // The image-less read: taps and slides hit this per event and the
+    // image columns only bloat the row (the exec path never reads them).
     let backend = state.backend.clone();
     let (tile, board) = (payload.tile, payload.board);
     let button = match tokio::task::spawn_blocking(move || {
-        backend.get_button(tile).filter(|b| b.board_id == board)
+        backend.get_button_meta(tile).filter(|b| b.board_id == board)
     })
     .await
     {

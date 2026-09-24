@@ -104,12 +104,24 @@ impl Mapper {
             .collect()
     }
 
+    /// The payload's `app` value alone: the style-table/extension lookup
+    /// plus the vol_mute quirk below. Per-event paths (the v2 gesture
+    /// check) use this instead of building the full payload.
+    pub fn app_value(&self, b: &ButtonRow) -> Option<String> {
+        let props = self.resolver.props_for(&b.kind, b.command.as_deref());
+        let command = transform_command(&b.kind, b.command.as_deref(), &props);
+        if b.kind == "vol" && command == "vol_mute" {
+            return Some("custom-value".to_string());
+        }
+        props.app.clone()
+    }
+
     /// One button -> client shortcut object (ButtonStyle port).
     pub fn shortcut_payload(&self, b: &ButtonRow) -> Value {
         let props = self.resolver.props_for(&b.kind, b.command.as_deref());
         let command = transform_command(&b.kind, b.command.as_deref(), &props);
-        let extra = extra_listener(&b.kind, b.command.as_deref(), b.mode.as_str(), &props);
-        let mut app = props.app.clone();
+        let mut extra = extra_listener(&b.kind, b.command.as_deref(), b.mode.as_str(), &props);
+        let app = self.app_value(b);
 
         // icon from db overrides the type default; prefix follows the icon
         let (unicode, unicode2, prefix) = match b.icon.as_deref() {
@@ -130,10 +142,9 @@ impl Mapper {
         };
 
         // original quirk: vol_mute buttons report their state under
-        // the custom-value app with the "speaker-muted" key
-        let mut extra = extra;
+        // the custom-value app with the "speaker-muted" key (the app half
+        // lives in `app_value`, shared with the per-event paths)
         if b.kind == "vol" && command == "vol_mute" {
-            app = Some("custom-value".to_string());
             extra = "speaker-muted".to_string();
         }
 
@@ -203,8 +214,6 @@ impl Mapper {
         o.insert("prefix".into(), json!(prefix));
         o.insert("extra".into(), json!(extra));
         if let Some(a) = app {
-            o.insert("app".into(), json!(a));
-        } else if let Some(a) = &props.app {
             o.insert("app".into(), json!(a));
         }
         if let Some(tk) = &props.toggle_key {

@@ -254,6 +254,16 @@ impl Backend for SqlBackend {
         }
     }
 
+    fn get_button_meta(&self, id: i64) -> Option<ButtonRow> {
+        match self.db.lock().unwrap().get_button_meta(id) {
+            Ok(button) => button,
+            Err(e) => {
+                tracing::error!("get_button_meta({id}) failed: {e}");
+                None
+            }
+        }
+    }
+
     fn exec(&self, button: ButtonRow, is_tap_start: bool, sink: &mut dyn EventSink) {
         let cmd = deckboard_actions::Command::from_row(
             &button.kind,

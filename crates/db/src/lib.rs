@@ -150,7 +150,7 @@ impl Db {
     }
 
     pub fn get_boards(&self) -> Result<Vec<BoardRow>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, name, background, layout, image, sort, type, args, \
              COALESCE(\"order\", 0), width, height, converted \
              FROM Boards ORDER BY COALESCE(\"order\", 0), id",
@@ -162,7 +162,7 @@ impl Db {
     }
 
     pub fn get_board(&self, id: i64) -> Result<Option<BoardRow>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, name, background, layout, image, sort, type, args, \
              COALESCE(\"order\", 0), width, height, converted \
              FROM Boards WHERE id = ?1",
@@ -193,6 +193,25 @@ impl Db {
             "SELECT id, board_id, type, command, title, title_position, title_color, \
              title_box_color, color, icon_color, icon_color2, border_color, shape, icon, \
              img, img2, icon2, color2, shape2, border_color2, title_position2, \
+             title_box_color2, title_color2, position, position2, mode, x, y, w, h, options \
+             FROM Shortcuts WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], map_button_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Same row as [`Db::get_button`] with the `img`/`img2` columns left
+    /// empty. Taps and slider slides read a button per event and must not
+    /// materialize multi-MB base64 image strings; every consumer treats an
+    /// empty `img` as "no image" (see `build_tile`'s filter).
+    pub fn get_button_meta(&self, id: i64) -> Result<Option<ButtonRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, board_id, type, command, title, title_position, title_color, \
+             title_box_color, color, icon_color, icon_color2, border_color, shape, icon, \
+             '' AS img, '' AS img2, icon2, color2, shape2, border_color2, title_position2, \
              title_box_color2, title_color2, position, position2, mode, x, y, w, h, options \
              FROM Shortcuts WHERE id = ?1",
         )?;
