@@ -210,6 +210,7 @@ export const CATALOG = [
     label: "Toggle Strip Parameter",
     icon: "microphone-slash",
     color: "#171A21",
+    dual: true,
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_STRIP_PARAMS },
       { key: "number", kind: "select", label: "Index", options: VM_INDEX },
@@ -253,6 +254,7 @@ export const CATALOG = [
     label: "Toggle Bus Parameter",
     icon: "volume-mute",
     color: "#171A21",
+    dual: true,
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_BUS_PARAMS },
       { key: "number", kind: "select", label: "Index", options: VM_INDEX },

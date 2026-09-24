@@ -534,7 +534,8 @@ async fn interaction_acks_execs_and_reports_unknown_tiles() {
     assert_eq!(ack.kind, TYPE_INTERACTION);
     assert_eq!(ack.payload.unwrap(), serde_json::json!({}));
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert!(backend.execs.lock().unwrap().contains(&(17, true)));
+    // a tap is a full click, so it lands in the release phase
+    assert!(backend.execs.lock().unwrap().contains(&(17, false)));
 
     // Slide reaches the slider backend with the value.
     send_frame(&mut ws, &Frame::request(TYPE_INTERACTION, "i2", serde_json::json!({"board": 3, "tile": 21, "interaction": "slide", "args": {"value": 0.75}}))).await;

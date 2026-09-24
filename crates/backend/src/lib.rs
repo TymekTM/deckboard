@@ -261,13 +261,19 @@ impl Backend for SqlBackend {
             button.options.as_deref(),
             &button.mode,
         );
-        if self.exec_extension(&cmd, None)
-            || self.exec_sysinfo(&cmd)
-            || self.exec_callurl(&cmd)
-            || self.exec_voicemeeter(&cmd)
-            || self.exec_discord(&cmd, sink)
-            || self.exec_speaker(&cmd, sink)
-            || self.exec_play(&cmd)
+        // Touch-down (`is_tap_start = true`) only drives held `key` buttons
+        // via run_command below; every other kind fires once on release.
+        // The tablet client sends exec_shortcut on BOTH phases, so the
+        // native dispatcher must honor the same filter as run_command or
+        // toggles flip twice per tap and volume steps twice.
+        if !is_tap_start
+            && (self.exec_extension(&cmd, None)
+                || self.exec_sysinfo(&cmd)
+                || self.exec_callurl(&cmd)
+                || self.exec_voicemeeter(&cmd)
+                || self.exec_discord(&cmd, sink)
+                || self.exec_speaker(&cmd, sink)
+                || self.exec_play(&cmd))
         {
             return;
         }

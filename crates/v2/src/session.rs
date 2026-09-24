@@ -371,7 +371,9 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
     match payload.interaction {
         Interaction::Tap => {
             ack_ok();
-            exec_once(state, button, true);
+            // a tap is a full click: release-phase semantics, so every
+            // kind acts exactly once (tap-start only drives held keys)
+            exec_once(state, button, false);
         }
         Interaction::PressStart => {
             ack_ok();
@@ -434,7 +436,9 @@ fn start_hold(
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         let _ = tokio::time::timeout(cap, async {
             loop {
-                exec_blocking(&backend, &engine, &hub, button.clone(), true);
+                // each repeat tick executes the action (release phase) -
+                // tap-start would no-op everything except held keys
+                exec_blocking(&backend, &engine, &hub, button.clone(), false);
                 tokio::time::sleep(Duration::from_millis(interval_ms)).await;
             }
         })
