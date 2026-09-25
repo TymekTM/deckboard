@@ -24,7 +24,12 @@ use crate::util::mtime;
 /// Recent conversations; activity is the database file mtime, the title
 /// is the conversation uuid fragment. Protobuf carries no cwd, so the
 /// project lane is fixed.
-pub fn sessions(conversations_dir: &Path, config: &crate::Config, now: i64, out: &mut Vec<AgentSession>) {
+pub fn sessions(
+    conversations_dir: &Path,
+    config: &crate::Config,
+    now: i64,
+    out: &mut Vec<AgentSession>,
+) {
     let cutoff = now - config.agent_done_secs - crate::util::DONE_GRACE_SECS;
     let Ok(entries) = std::fs::read_dir(conversations_dir) else {
         return;
@@ -44,7 +49,14 @@ pub fn sessions(conversations_dir: &Path, config: &crate::Config, now: i64, out:
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        let frag: String = stem.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        let frag: String = stem
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         out.push(AgentSession {
             provider: "antigravity",
             project: "antigravity".into(),
@@ -99,10 +111,7 @@ impl Usage {
                     // the gen_metadata blob carries no time; the matching
                     // steps row does (protobuf Timestamp), discovery time
                     // is the last-resort fallback
-                    let ts = step_meta
-                        .as_deref()
-                        .and_then(step_timestamp)
-                        .unwrap_or(now);
+                    let ts = step_meta.as_deref().and_then(step_timestamp).unwrap_or(now);
                     self.samples.push(Sample { ts, tokens });
                 }
             }

@@ -250,13 +250,7 @@ impl ExtManager {
                     // metadata known; still need the live runtime (thread
                     // spawn, no JS on this thread)
                     tracing::info!(package = %package, "timer extension from metadata cache - loading runtime");
-                    match spawn_runtime(
-                        &path,
-                        &package,
-                        &configs,
-                        &events_tx,
-                        &active_clients,
-                    ) {
+                    match spawn_runtime(&path, &package, &configs, &events_tx, &active_clients) {
                         Ok(dispatch) => Plan::Resident {
                             meta,
                             dispatch: Some(dispatch),

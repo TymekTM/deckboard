@@ -177,14 +177,13 @@ async fn asset_get(
     // Asset files are arbitrarily large; the read must not run on the
     // async workers (the server runtime is single-threaded).
     let assets = state.assets.clone();
-    let body = match tokio::task::spawn_blocking(move || {
-        assets.read_for_serving(&hash, range.as_deref())
-    })
-    .await
-    {
-        Ok(Ok(body)) => body,
-        _ => return StatusCode::NOT_FOUND.into_response(),
-    };
+    let body =
+        match tokio::task::spawn_blocking(move || assets.read_for_serving(&hash, range.as_deref()))
+            .await
+        {
+            Ok(Ok(body)) => body,
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        };
     // Every response advertises byte ranges; a satisfied window adds its
     // Content-Range, an unsatisfiable request gets the 416 form.
     let mut head = HeaderMap::new();
@@ -204,9 +203,7 @@ async fn asset_get(
         } => {
             head.insert(
                 header::CONTENT_RANGE,
-                format!("bytes {start}-{end_incl}/{total}")
-                    .parse()
-                    .unwrap(),
+                format!("bytes {start}-{end_incl}/{total}").parse().unwrap(),
             );
             (head, bytes).into_response()
         }

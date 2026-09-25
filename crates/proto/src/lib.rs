@@ -9,7 +9,7 @@
 //! shared WebView layer; `Photo`/`Video` reference hashed assets served by
 //! the desktop (`/assets/<hash>`), never inline dataURLs.
 //!
-//! Evolution rules (docs/protocol-v2.md §9): additive changes never break a
+//! Evolution rules (docs/protocol-v2.md §10): additive changes never break a
 //! conforming client - unknown message types are ignored, unknown fields
 //! dropped, unknown enum values degrade through the `#[serde(other)]`
 //! variants.
@@ -42,6 +42,9 @@ pub const TYPE_INTERACTION: &str = "interaction";
 pub const TYPE_WIDGET_EVENT: &str = "widget.event";
 /// Reserved for a future remote editor; the editor writes in-process.
 pub const TYPE_BOARDS_WRITE: &str = "boards.write";
+/// Server-to-client only: the server is exiting on purpose (app quit or
+/// machine shutdown). The client stops reconnecting; a WS close follows.
+pub const TYPE_SERVER_SHUTDOWN: &str = "server.shutdown";
 
 /// Error codes carried in `error` frames (docs/protocol-v2.md §2).
 pub mod error_code {
@@ -102,6 +105,18 @@ impl Frame {
             kind,
             serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
         )
+    }
+
+    /// Server control push that carries no payload at all (the envelope
+    /// omits it, per the frame-envelope rules).
+    pub fn bare(kind: &str) -> Frame {
+        Frame {
+            v: PROTOCOL_VERSION,
+            id: None,
+            ack: None,
+            kind: kind.to_string(),
+            payload: None,
+        }
     }
 }
 
@@ -384,11 +399,19 @@ pub enum StateShape {
 pub struct Style {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// State-dependent colors: `color2` shows while the tile's channel is
+    /// in its active state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color2: Option<String>,
     /// FontAwesome glyph as a unicode character (already resolved).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Active-state glyph (e.g. mic -> mic-slash); paired with `color2`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon2: Option<String>,
+    /// Font family for the glyphs: `"fas"` (default) or `"fab"` (brands).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_family: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

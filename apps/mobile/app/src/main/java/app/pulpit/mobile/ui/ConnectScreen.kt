@@ -1,6 +1,7 @@
-//! First-run / disconnected screen: server address entry. The port matches
-//! the original app's default (8500); the access key defaults to the PRO
-//! handshake so the full grid renders.
+//! First-run / disconnected screen: server address entry plus pairing.
+//! A paired device (token stored) just hits Connect. A new device enters
+//! the one-time code the desktop prints next to its QR (POST /v2/pair)
+//! together with a name shown in the desktop's trust prompt.
 
 package app.pulpit.mobile.ui
 
@@ -25,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import app.pulpit.mobile.net.ConnState
@@ -37,6 +39,9 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
 
     var host by remember(cfg.host) { mutableStateOf(cfg.host) }
     var port by remember(cfg.port) { mutableStateOf(cfg.port.toString()) }
+    var name by remember(cfg.name) { mutableStateOf(cfg.name) }
+    var pairCode by remember { mutableStateOf("") }
+    val paired = !cfg.token.isNullOrBlank()
 
     Column(
         Modifier
@@ -49,12 +54,12 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
         Text(
             text = "Pulpit",
             style = MaterialTheme.typography.headlineMedium,
-            color = androidx.compose.ui.graphics.Color.White,
+            color = Color.White,
         )
         Text(
             text = "connect to your desktop server",
             style = MaterialTheme.typography.bodySmall,
-            color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.6f),
+            color = Color.White.copy(alpha = 0.6f),
             modifier = Modifier.padding(bottom = 24.dp),
         )
 
@@ -74,11 +79,50 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.weight(1f),
             )
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Device name") },
+                singleLine = true,
+                modifier = Modifier.weight(1.4f).padding(start = 8.dp),
+            )
+        }
+
+        if (paired) {
+            Text(
+                text = "paired - Connect uses the stored device token",
+                color = Color.White.copy(alpha = 0.6f),
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            TextButton(
+                text = "Forget pairing",
+                onClick = { vm.forgetPairing() },
+            )
+        } else {
+            OutlinedTextField(
+                value = pairCode,
+                onValueChange = { pairCode = it.uppercase().filter { c -> c.isLetterOrDigit() }.take(8) },
+                label = { Text("Pairing code (desktop: \"Dodaj urządzenie\")") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            )
         }
 
         when (conn) {
             is ConnState.Connecting -> {
-                CircularProgressIndicator(Modifier.padding(16.dp))
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(16.dp),
+                ) {
+                    CircularProgressIndicator()
+                    Text(
+                        text = "Connecting to ${cfg.host}:${cfg.port}...",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                }
             }
             is ConnState.Failed -> {
                 Text(
@@ -93,14 +137,25 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
         Button(
             onClick = {
                 vm.saveConfig(
-                    cfg.copy(host = host.trim(), port = port.toIntOrNull() ?: 8500),
+                    cfg.copy(host = host.trim(), port = port.toIntOrNull() ?: 8500, name = name.trim()),
                 )
-                vm.connect()
+                if (paired) {
+                    vm.connect()
+                } else {
+                    vm.connectWithPairCode(pairCode)
+                }
                 onConnected()
             },
             modifier = Modifier.padding(top = 16.dp).fillMaxWidth(),
         ) {
-            Text("Connect")
+            Text(if (paired) "Connect" else "Pair")
         }
+    }
+}
+
+@Composable
+private fun TextButton(text: String, onClick: () -> Unit) {
+    androidx.compose.material3.TextButton(onClick = onClick) {
+        Text(text, color = Color.White.copy(alpha = 0.7f))
     }
 }

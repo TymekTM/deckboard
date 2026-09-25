@@ -18,7 +18,12 @@ use crate::util::{mtime, truncate};
 const TAIL_BYTES: u64 = 64 * 1024;
 
 /// A session with recent activity, as the agents tile sees it.
-pub fn sessions(sessions_dir: &Path, config: &crate::Config, now: i64, out: &mut Vec<AgentSession>) {
+pub fn sessions(
+    sessions_dir: &Path,
+    config: &crate::Config,
+    now: i64,
+    out: &mut Vec<AgentSession>,
+) {
     let cutoff = now - config.agent_done_secs - crate::util::DONE_GRACE_SECS;
     let mut files = Vec::new();
     collect_jsonl(sessions_dir, 0, &mut files);
@@ -31,7 +36,10 @@ pub fn sessions(sessions_dir: &Path, config: &crate::Config, now: i64, out: &mut
         }
         let project = session_meta_cwd(&path)
             .map(|cwd| {
-                let base = cwd.rsplit(['\\', '/']).find(|s| !s.is_empty()).unwrap_or(&cwd);
+                let base = cwd
+                    .rsplit(['\\', '/'])
+                    .find(|s| !s.is_empty())
+                    .unwrap_or(&cwd);
                 base.to_string()
             })
             .unwrap_or_else(|| "codex".into());
@@ -67,9 +75,7 @@ fn session_meta_cwd(path: &Path) -> Option<String> {
     if v.get("type")?.as_str()? != "session_meta" {
         return None;
     }
-    v.pointer("/payload/cwd")?
-        .as_str()
-        .map(|s| s.to_string())
+    v.pointer("/payload/cwd")?.as_str().map(|s| s.to_string())
 }
 
 /// The first `user_message` event of a rollout, scanned over the same
@@ -206,7 +212,10 @@ fn parse_limits(rl: &serde_json::Value) -> Option<Limits> {
         let used_percent = w.get("used_percent")?.as_f64()?;
         Some(RateLimit {
             used_percent,
-            window_minutes: w.get("window_minutes").and_then(|x| x.as_u64()).unwrap_or(0),
+            window_minutes: w
+                .get("window_minutes")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
         })
     };
     Some(Limits {

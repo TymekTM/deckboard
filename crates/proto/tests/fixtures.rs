@@ -1,4 +1,4 @@
-//! Golden fixture contract (docs/protocol-v2.md §9): every wire message
+//! Golden fixture contract (docs/protocol-v2.md §10): every wire message
 //! has one committed example that must (a) parse into its typed payload
 //! and (b) re-serialize to JSON equal to the file, envelope included. The
 //! Kotlin unit test parses the same files, so wire drift fails both builds.
@@ -170,4 +170,17 @@ fn interaction() {
     assert_eq!((i.board, i.tile), (3, 21));
     assert_eq!(i.interaction, Interaction::Slide);
     assert_eq!(i.args.value, Some(0.5));
+}
+
+#[test]
+fn server_shutdown() {
+    // A pure control push: no id/ack and an empty payload object - there
+    // is no typed message to pin, so round-trip the envelope itself.
+    let (frame, raw) = fixture("server.shutdown");
+    assert_eq!(frame.kind, TYPE_SERVER_SHUTDOWN);
+    assert_eq!(frame.id, None);
+    assert_eq!(frame.ack, None);
+    let round: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
+    assert_eq!(round, raw);
 }

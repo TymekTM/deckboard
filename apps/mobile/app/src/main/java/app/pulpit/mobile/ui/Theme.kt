@@ -24,7 +24,7 @@ private val DarkScheme = darkColorScheme(
 )
 
 @Composable
-fun PulpitTheme(content: @Composable () -> Unit) {
+fun DeckboardTheme(content: @Composable () -> Unit) {
     // the original app is dark-only
     isSystemInDarkTheme()
     MaterialTheme(colorScheme = DarkScheme, content = content)

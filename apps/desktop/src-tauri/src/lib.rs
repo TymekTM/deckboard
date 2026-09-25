@@ -22,6 +22,8 @@ struct DesktopState {
     /// Protocol v2 pairing codes; `None` when the v2 stack failed to start
     /// (bad devices.json or asset store) - the UI then hides pairing.
     pairing: Option<Arc<pulpit_v2::Pairing>>,
+    /// Protocol v2 session fan-out; receives the shutdown goodbye on quit.
+    v2_hub: Option<Arc<pulpit_v2::V2Hub>>,
     /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
     hotkey: std::sync::Mutex<String>,
     /// `pulpitApp/editor.json` - editor-local settings (hotkey), kept
@@ -161,13 +163,23 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             // The idle sweep destroys the hidden WebView, which leaves the
             // process window-less for a while; the default reaction to that
             // (exit) would kill the server and the tray. Only an explicit
-            // exit carries a code - the tray's Quit Deckboard.
-            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
-                api.prevent_exit();
+            // exit carries a code - the tray's Quit.
+            match event {
+                tauri::RunEvent::ExitRequested {
+                    code: None, api, ..
+                } => {
+                    api.prevent_exit();
+                }
+                // A real exit (tray quit, OS shutdown when Tauri surfaces
+                // it): tell the v2 tablets the exit is deliberate. The
+                // once-guard keeps the tray quit from paying the flush
+                // wait twice.
+                tauri::RunEvent::ExitRequested { .. } => goodbye_v2(app),
+                _ => {}
             }
         });
 }
@@ -244,6 +256,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             ext: None,
             port,
             pairing: None,
+            v2_hub: None,
             hotkey: std::sync::Mutex::new("Ctrl+Alt+D".to_string()),
             settings_path: None,
         };
@@ -446,8 +459,15 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             zcode_cli: home.join(".zcode").join("cli"),
             claude_projects: home.join(".claude").join("projects"),
             codex_sessions: home.join(".codex").join("sessions"),
-            opencode_db: home.join(".local").join("share").join("opencode").join("opencode.db"),
-            antigravity_conversations: home.join(".gemini").join("antigravity").join("conversations"),
+            opencode_db: home
+                .join(".local")
+                .join("share")
+                .join("opencode")
+                .join("opencode.db"),
+            antigravity_conversations: home
+                .join(".gemini")
+                .join("antigravity")
+                .join("conversations"),
         };
         let mut aidev_values = pulpit_aidev::spawn_push(paths);
         let hub = hub.clone();
@@ -599,7 +619,8 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         hub: Some(hub),
         ext: Some(ext_manager),
         port,
-        pairing: v2.map(|v| v.pairing.clone()),
+        pairing: v2.as_ref().map(|v| v.pairing.clone()),
+        v2_hub: v2.as_ref().map(|v| v.hub.clone()),
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
     }
@@ -610,6 +631,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
 /// Unix millis of the moment the main window was hidden; 0 means visible
 /// or not created. The teardown sweep below reads it.
 static HIDDEN_SINCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long the goodbye waits for the session pumps to put the frame and
+/// the WS close on the wire before the process exits.
+const SHUTDOWN_FLUSH_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How long the window may stay tray-hidden before its WebView is torn
 /// down. The WebView2 process tree costs ~60-150 MB resident around the
@@ -684,6 +709,27 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// Tells connected v2 tablets this exit is deliberate (docs/protocol-v2.md
+/// §9): one `server.shutdown` frame per session, then a WS close. Without
+/// it a quit looks like a network drop and tablets retry into the void.
+/// Best effort by design - the process exits either way.
+fn goodbye_v2(app: &AppHandle) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Some(hub) = app
+        .try_state::<DesktopState>()
+        .and_then(|state| state.v2_hub.clone())
+    else {
+        return;
+    };
+    hub.shutdown();
+    // The session pumps write the frame + close asynchronously; give them
+    // a beat before `exit` tears the process down.
+    std::thread::sleep(SHUTDOWN_FLUSH_GRACE);
+}
+
 /// The main window is built here instead of `tauri.conf.json` because the
 /// WebView2 argument list is only reachable through the builder API, and a
 /// custom list replaces the default one - so the stock feature disables are
@@ -740,7 +786,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     launch.enable()
                 };
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                goodbye_v2(app);
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

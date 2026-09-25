@@ -553,7 +553,10 @@ mod tests {
         settle();
         let after = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
         println!("A3 gain: {before} -> {mid} -> {after}");
-        assert!((after - before).abs() < 1.0, "restore drifted: {before} vs {after}");
+        assert!(
+            (after - before).abs() < 1.0,
+            "restore drifted: {before} vs {after}"
+        );
     }
 
     #[test]

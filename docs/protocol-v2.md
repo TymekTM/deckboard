@@ -50,7 +50,8 @@ covers v2.
 - `type`: dotted, kebab-case names. Reserved control types: `hello`,
   `welcome`, `error`. Domain types: `boards.sync`, `boards.delta`,
   `board.open`, `state.sync`, `state.patch`, `interaction`. Reserved for
-  future use: `widget.event`, `boards.write`.
+  future use: `widget.event`, `boards.write`. Control, server-to-client
+  only: `server.shutdown` (see section 9).
 - `payload`: omitted when empty.
 - Unknown inbound `type`: if the frame carries an `id`, answer
   `error {code: "unknown-type"}`; otherwise ignore and log.
@@ -92,8 +93,10 @@ last_seen}`; `id` and `token` are random hex, 16 and 32 bytes).
    device *tokens* get an HTTP 401 at the upgrade.
 3. The desktop shows "Trust this device?" using the `hello` name. M1:
    auto-accept with a warning log (no UI yet).
-4. On trust: a device entry is created, `welcome` flows, the tablet stores
-   the token (Android: `EncryptedSharedPreferences`).
+4. On trust: a device entry is created and `welcome` carries the new
+   `token` - the only time the secret travels on the wire, and only to the
+   connection that just presented a valid pairing code. The tablet stores
+   it (Android: `EncryptedSharedPreferences`).
 5. Every later connect uses `?token=...`; no prompt. A non-empty
    `hello.name` may rename the paired device - the change is persisted to
    `devices.json` so the welcome and the desktop device list agree.
@@ -119,6 +122,7 @@ QR payload: `pulpit://<host>:<port>?pair=<CODE>`.
   "payload": { "protocol": 2, "desktop_version": "0.1.0",
                "min_client": "0.0.0", "generation": 7,
                "device": { "id": "9ab...", "name": "Tablet salon" },
+               "token": "64-hex-chars...",
                "channels": { "ext.si-cpu-usage": { "shape": "series", "cap": 120 } } } }
 ```
 
@@ -156,9 +160,12 @@ Boards are data. One board:
   photo, video). Legacy `img`/`img2` data URLs are converted to store
   entries on the fly when the server builds a sync; tiles whose image
   cannot be converted simply omit it.
-- `style`: `color`/`color2`/`icon` (unicode char)/`title`/`shape` - all
-  optional, resolved server-side the same way the legacy mapper resolves
-  them (DB value → type default → fallback).
+- `style`: `color`/`color2`/`icon`/`icon2`/`icon_family` (`fas`|`fab`,
+  resolved glyph fonts)/`title`/`shape` - all optional, resolved
+  server-side the same way the legacy mapper resolves them (DB value →
+  type default → fallback). `color2`/`icon2` are the active-state pair:
+  the client swaps to them while the tile's channel reports its active
+  value (e.g. `"ON"`).
 - `interactions` lists the gestures the tile accepts (section 6).
 
 ### boards.sync (server → client, full snapshot)
@@ -247,6 +254,12 @@ Client → server, one frame per user gesture:
 - Kinds: `tap`, `press-start`, `press-end`, `slide` (`args.value`, 0..1),
   `wheel` (`args.delta`), `drag` (`args.dx`, `args.dy`). `press-start` /
   `press-end` replace the legacy `isTapStart` bool pair.
+- Clients send only gestures the tile declares in `interactions`.
+  Declarations: plain buttons declare `tap` (fire once on release);
+  key-style commands and tiles with `params.hold.repeat` declare
+  `tap` + `press-start` + `press-end` (down/up semantics, hold-to-repeat);
+  sliders/knobs declare `slide`; displays declare none. The server
+  rejects undeclared gestures with `unsupported-interaction`.
 - The server validates the tile exists and answers
   `ack {ok: true}` (payload `{}`) or `error` (`unknown-tile`,
   `unsupported-interaction` for gestures the tile/backend cannot serve,
@@ -282,7 +295,31 @@ Two-step widget flows (confirm, prompt) and web-widget messaging (M6) will
 use `widget.event` frames with a `request_id` correlation. Nothing before
 M6 needs it; the name is reserved so M1 clients can safely ignore it.
 
-## 9. Versioning and evolution
+## 9. server.shutdown (server -> client, on exit)
+
+When the server exits on purpose (user quits the app, or the machine is
+shutting down), it sends one `server.shutdown` frame to every attached
+session, immediately followed by a WebSocket close:
+
+```json
+{ "v": 2, "type": "server.shutdown" }
+```
+
+The frame carries no payload (the envelope omits it when empty). "Every
+attached session" means authenticated ones: a socket still inside its
+handshake misses the goodbye and sees a bare drop.
+
+The frame is the signal that the exit is deliberate: a conforming client
+stops reconnecting (it may show an idle/offline state instead) and can
+drop any keep-awake behavior. A plain disconnect without the frame keeps
+its usual meaning - transient loss, retry. Clients that predate the type
+ignore the unknown frame and behave as before.
+
+The frame is a courtesy, not a guarantee: if the process is killed hard
+or the flush loses the race with process teardown, the client sees a bare
+disconnect and retries as usual.
+
+## 10. Versioning and evolution
 
 - Additive changes (new message types, new optional fields, new enum
   values) never bump `v` and never break a conforming client: unknown
@@ -294,7 +331,7 @@ M6 needs it; the name is reserved so M1 clients can safely ignore it.
   (`crates/proto/tests/fixtures/*.json`): Rust round-trips them and the
   Kotlin unit test parses the same files. Both must stay green.
 
-## 10. Codegen
+## 11. Codegen
 
 - Types are defined once in Rust (`crates/proto`, serde) - ADR-004.
 - TypeScript: generated with ts-rs into `crates/proto/bindings/` by
@@ -304,7 +341,7 @@ M6 needs it; the name is reserved so M1 clients can safely ignore it.
   (`proto/Models.kt` grows v2 types with the M4 client), validated against
   the same fixtures by a JVM unit test.
 
-## 11. Coexistence with legacy
+## 12. Coexistence with legacy
 
 Both protocols live on one port: legacy under `/socket.io/` (frozen,
 stock client) and health on `/`, v2 under `/v2/ws` and `/assets/`,

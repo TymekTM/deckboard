@@ -226,10 +226,7 @@ impl Backend for SqlBackend {
         SqlBackend::speaker_device_id(self)
     }
 
-    fn speaker_snapshot(
-        &self,
-        want_device: bool,
-    ) -> (Option<f32>, Option<bool>, Option<String>) {
+    fn speaker_snapshot(&self, want_device: bool) -> (Option<f32>, Option<bool>, Option<String>) {
         SqlBackend::speaker_snapshot(self, want_device)
     }
 
@@ -580,11 +577,13 @@ impl SqlBackend {
         let client = clients.get_or_insert_with(pulpit_discord::DiscordClient::spawn);
         let mut run = |config: &DiscordConfig| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-            client.execute(config, &cmd.kind, &args, deadline).inspect(|o| {
-                if let Some(o) = o {
-                    sink.app_value(&o.key, &o.label);
-                }
-            })
+            client
+                .execute(config, &cmd.kind, &args, deadline)
+                .inspect(|o| {
+                    if let Some(o) = o {
+                        sink.app_value(&o.key, &o.label);
+                    }
+                })
         };
         let result = match run(&config) {
             Err(pulpit_discord::DiscordError::AuthRejected) => {

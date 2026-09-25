@@ -1,35 +1,50 @@
-//! App state: connection lifecycle, boards snapshot, current board, live
-//! custom values. Reconnects with backoff; every (re)connect pulls a full
-//! `get_shortcuts` snapshot (the reconnect rule from ADR-006).
+//! App state over protocol v2: connection lifecycle (token or pairing),
+//! boards snapshot + live deltas, the current board, and the live channel
+//! state (scalars + series). Reconnects with backoff; every (re)connect
+//! gets a full snapshot from the server, so there is no client cache to
+//! invalidate.
 
 package app.pulpit.mobile.state
 
 import android.app.Application
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.util.Log
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import app.pulpit.mobile.net.ConnState
-import app.pulpit.mobile.net.DeckEvent
-import app.pulpit.mobile.net.PulpitClient
+import app.pulpit.mobile.net.V2Client
+import app.pulpit.mobile.net.V2Event
 import app.pulpit.mobile.proto.Board
-import app.pulpit.mobile.proto.Shortcut
+import app.pulpit.mobile.proto.ChannelInfo
+import app.pulpit.mobile.proto.BoardOp
+import app.pulpit.mobile.proto.Tile
+import app.pulpit.mobile.proto.V2
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.decodeFromJsonElement
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 
-data class ServerConfig(val host: String, val port: Int, val accessKey: String)
+data class ServerConfig(
+    val host: String,
+    val port: Int,
+    val name: String,
+    val token: String?,
+)
 
 class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val scope = CoroutineScope(Job())
 
     private val prefs = app.getSharedPreferences("pulpit", Context.MODE_PRIVATE)
 
@@ -37,7 +52,8 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         ServerConfig(
             host = prefs.getString("host", "") ?: "",
             port = prefs.getInt("port", 8500),
-            accessKey = prefs.getString("accessKey", PRO_ACCESS_KEY) ?: PRO_ACCESS_KEY,
+            name = prefs.getString("name", "") ?: "",
+            token = prefs.getString("token", null),
         ),
     )
     val config: StateFlow<ServerConfig> = _config
@@ -45,59 +61,171 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     private val _connState = MutableStateFlow<ConnState>(ConnState.Disconnected)
     val connState: StateFlow<ConnState> = _connState
 
+    /** True once the server announced its shutdown: the goodbye overlay is
+     *  up, the normal retry loop is suspended, and reconnects happen only
+     *  silently (foreground probe) or on a tap. Cleared by any successful
+     *  connect or by [reconnectFromShutdown]. */
+    private val _serverDown = MutableStateFlow(false)
+    val serverDown: StateFlow<Boolean> = _serverDown
+
+    /** Tracks the Activity's STARTED/STOPPED so the silent probe sleeps
+     *  with the screen: no connect attempts while the tablet is dozing. */
+    @Volatile private var foreground = false
+
+    /** Reconnect attempts since the last successful session; the banner
+     *  shows it so the retry loop is visible instead of mysterious. */
+    private val _reconnectAttempt = MutableStateFlow(0)
+    val reconnectAttempt: StateFlow<Int> = _reconnectAttempt
+
     private val _boards = MutableStateFlow<List<Board>>(emptyList())
     val boards: StateFlow<List<Board>> = _boards
 
     private val _currentBoard = MutableStateFlow<Board?>(null)
     val currentBoard: StateFlow<Board?> = _currentBoard
 
-    /** Merged custom-value state (`app_status_update` data per key). */
-    private val _customValues = MutableStateFlow<Map<String, JsonElement>>(emptyMap())
-    val customValues: StateFlow<Map<String, JsonElement>> = _customValues
+    private val _deviceName = MutableStateFlow("")
+    val deviceName: StateFlow<String> = _deviceName
 
-    /** One parsed `value`/`suffix` label per watch key, computed once per
-     * push so tiles render without re-parsing JSON on recomposition. */
-    data class LiveScalar(val text: String?, val suffix: String?)
+    /** Last pushed value per state channel (`state.sync` merged with
+     *  `state.patch`). */
+    private val _values = MutableStateFlow<Map<String, JsonElement>>(emptyMap())
+    val values: StateFlow<Map<String, JsonElement>> = _values
 
-    private val _liveScalars = MutableStateFlow<Map<String, LiveScalar>>(emptyMap())
-    val liveScalars: StateFlow<Map<String, LiveScalar>> = _liveScalars
+    /** Series windows per channel, oldest first (server keeps the history). */
+    private val _series = MutableStateFlow<Map<String, List<Double>>>(emptyMap())
+    val series: StateFlow<Map<String, List<Double>>> = _series
 
-    /** Value series per key, mirroring the original `setCustomValues`:
-     * object payloads with a `value` field append to a history capped at
-     * 10 entries; scalars replace in place. */
-    private val _valueHistory = MutableStateFlow<Map<String, List<Float>>>(emptyMap())
-    val valueHistory: StateFlow<Map<String, List<Float>>> = _valueHistory
+    /** Decoded tile/board images by asset hash (content-addressed, so the
+     *  map is safe across reconnects to any server). */
+    private val _bitmaps = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
+    val bitmaps: StateFlow<Map<String, ImageBitmap>> = _bitmaps
 
-    private val _serverVersion = MutableStateFlow("")
-    val serverVersion: StateFlow<String> = _serverVersion
+    /** Hashes with a fetch in flight or failed this process; failures are
+     *  not retried - a 404 stays a 404 until the app restarts. */
+    private val assetFetches = mutableSetOf<String>()
 
-    private var client: PulpitClient? = null
+    private var client: V2Client? = null
     private var eventJob: Job? = null
     private var reconnectAttempts = 0
 
-    /** Bumped by every connect(); a pending reconnect from an older cycle
-     * no-ops instead of racing the fresh connection. */
-    private var connectGeneration = 0
+    /** One pending reconnect per connect cycle: Failed and Disconnected
+     *  arrive back to back, and each state flip would otherwise schedule
+     *  a duplicate timer (double-counting the attempt budget). */
+    private var reconnectScheduled = false
 
-    /** Cycle that currently has a reconnect delay pending; Failed and
-     * Disconnected often fire for the same failure, and each must not
-     * burn its own attempt. */
-    private var pendingReconnectGeneration = -1
+    /** Set while a pairing is in flight (no token yet). */
+    private var pendingPairCode: String? = null
+
+    /** Channels the server declared as series in the welcome catalog.
+     *  Patches for these append to the chart window even when the
+     *  connect-time snapshot carried no history yet (fresh server). */
+    private var seriesChannels: Set<String> = emptySet()
+
+    /** Welcome channel catalog: shape plus the graph tiles' display
+     *  title/suffix captured by the server from pushed values. */
+    private val _channelMeta =
+        MutableStateFlow<Map<String, ChannelInfo>>(emptyMap())
+    val channelMeta: StateFlow<Map<String, ChannelInfo>> = _channelMeta
+
+    init {
+        // A paired device reconnects on its own; pairing needs the user
+        // to enter a fresh code.
+        if (!_config.value.token.isNullOrBlank()) {
+            connect()
+        }
+        // The silent probe: while the shutdown overlay is up and the app is
+        // foreground, poke the server every PROBE_SECONDS so a restarted
+        // machine picks the deck back up without a tap. Background = dark
+        // screen = no attempts at all.
+        scope.launch {
+            while (true) {
+                delay(PROBE_SECONDS * 1000L)
+                if (foreground && _serverDown.value) {
+                    Log.i(TAG, "shutdown probe: trying the server again")
+                    connect()
+                }
+            }
+        }
+    }
+
+    override fun onCleared() {
+        disconnect()
+        scope.cancel()
+    }
+
+    /** Kick off a fetch for [hash]. Reads [ServerConfig.token], so nothing
+     *  loads before the device is authenticated. Failures back off and
+     *  retry a few times - e.g. an asset fetched during a server restart. */
+    fun ensureAsset(hash: String, attempt: Int = 0) {
+        if (_bitmaps.value.containsKey(hash) || !assetFetches.add(hash)) return
+        val cfg = _config.value
+        val token = cfg.token ?: return
+        scope.launch {
+            val bitmap = withContext(Dispatchers.IO) {
+                runCatching {
+                    val url = "http://${cfg.host}:${cfg.port}/assets/$hash?token=$token"
+                    sharedHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                        if (!resp.isSuccessful) return@use null
+                        // one read: OkHttp streams cannot be consumed twice
+                        val bytes = resp.body?.byteStream()?.readBytes() ?: return@use null
+                        // a tile renders ~150px; decode with a power-of-two
+                        // sample so a future full-res photo cannot eat the
+                        // heap of a 1 GB tablet
+                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                        val sampled = BitmapFactory.Options().apply {
+                            inSampleSize = maxOf(
+                                bounds.outWidth / ASSET_MAX_DIM,
+                                bounds.outHeight / ASSET_MAX_DIM,
+                                1,
+                            )
+                        }
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, sampled)
+                    }
+                }.getOrNull()
+            }
+            if (bitmap != null) {
+                _bitmaps.value = _bitmaps.value + (hash to bitmap.asImageBitmap())
+            } else if (attempt < ASSET_RETRIES) {
+                delay(30_000L * (attempt + 1))
+                assetFetches.remove(hash)
+                ensureAsset(hash, attempt + 1)
+            }
+        }
+    }
 
     fun saveConfig(cfg: ServerConfig) {
         prefs.edit()
             .putString("host", cfg.host)
             .putInt("port", cfg.port)
-            .putString("accessKey", cfg.accessKey)
+            .putString("name", cfg.name)
+            .putString("token", cfg.token)
             .apply()
         _config.value = cfg
     }
 
+    /** Connect with the stored token. */
     fun connect() {
-        connectGeneration++
+        val token = _config.value.token
+        if (token.isNullOrBlank()) {
+            _connState.value = ConnState.Failed("device not paired - enter a pairing code")
+            return
+        }
+        openClient(token = token, pairCode = null)
+    }
+
+    /** First-time pairing: the desktop shows a one-time code (POST /v2/pair
+     *  output). On success the issued token is stored. */
+    fun connectWithPairCode(code: String) {
+        pendingPairCode = code.trim().uppercase()
+        openClient(token = null, pairCode = pendingPairCode)
+    }
+
+    private fun openClient(token: String?, pairCode: String?) {
         disconnect()
+        reconnectScheduled = false
         val cfg = _config.value
-        val c = PulpitClient(cfg.host, cfg.port, cfg.accessKey)
+        val c = V2Client(cfg.host, cfg.port, token, pairCode, cfg.name)
         client = c
         observeEvents(c)
         c.connect()
@@ -107,90 +235,178 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         eventJob?.cancel()
         client?.disconnect()
         client = null
+        pendingPairCode = null
         _connState.value = ConnState.Disconnected
+        // The last board stays on screen (dimmed by the status banner):
+        // every reconnect resyncs from scratch, so the snapshot cannot go
+        // stale in any way the protocol does not overwrite immediately.
+    }
+
+    fun forgetPairing() {
+        saveConfig(_config.value.copy(token = null))
+        disconnect()
         _boards.value = emptyList()
         _currentBoard.value = null
-        _customValues.value = emptyMap()
+        _values.value = emptyMap()
+        _series.value = emptyMap()
+        _channelMeta.value = emptyMap()
+        _bitmaps.value = emptyMap()
     }
 
-    override fun onCleared() {
-        // Release the socket and the client's ping executor thread; the
-        // scope itself is already being cancelled.
-        disconnect()
+    /** The user tapped the shutdown overlay: leave the standby state and
+     *  retry immediately, with the normal reconnecting banner visible. */
+    fun reconnectFromShutdown() {
+        _serverDown.value = false
+        reconnectAttempts = 1
+        _reconnectAttempt.value = 1
+        connect()
     }
 
-    private fun observeEvents(client: PulpitClient) {
-        eventJob = viewModelScope.launch {
+    fun onAppForeground() {
+        foreground = true
+    }
+
+    fun onAppBackground() {
+        foreground = false
+        // No attempts in standby while the screen is off: kill a probe
+        // that is mid-flight so the socket dies with the screen.
+        if (_serverDown.value) {
+            client?.disconnect()
+        }
+    }
+
+    private fun observeEvents(client: V2Client) {
+        eventJob = scope.launch {
             launch {
                 client.state.collect { st ->
                     _connState.value = st
-                    if (st is ConnState.Connected) {
-                        reconnectAttempts = 0
-                        // full snapshot on every (re)connect - ADR-006
-                        client.requestBoards()
+                    when (st) {
+                        is ConnState.Connected -> {
+                            reconnectAttempts = 0
+                            _reconnectAttempt.value = 0
+                            _serverDown.value = false
+                        }
+                        is ConnState.ServerDown -> {
+                            Log.i(TAG, "server announced shutdown - retry loop suspended")
+                            _serverDown.value = true
+                        }
+                        // While the overlay is up the probe owns reconnects:
+                        // failures are expected and stay invisible.
+                        is ConnState.Failed, is ConnState.Disconnected ->
+                            if (!_serverDown.value) scheduleReconnect()
+                        else -> {}
                     }
-                    if (st is ConnState.Failed || st is ConnState.Disconnected) scheduleReconnect()
                 }
             }
             launch {
-                client.events.collect { ev ->
-                    when (ev) {
-                        is DeckEvent.Shortcuts -> {
-                            val boards = runCatching {
-                                json.decodeFromJsonElement<List<Board>>(ev.json)
-                            }.getOrElse {
-                                Log.w(TAG, "bad boards payload", it)
-                                emptyList()
-                            }
-                            _boards.value = boards.sortedBy { it.order?.let { o -> o } ?: Int.MAX_VALUE }
-                            // keep selection if still present, else first board
-                            val cur = _currentBoard.value
-                            _currentBoard.value = boards.firstOrNull { it.id == cur?.id } ?: boards.firstOrNull()
-                        }
-                        is DeckEvent.ChangeBoard -> {
-                            _currentBoard.value = _boards.value.firstOrNull { it.id == ev.boardId }
-                                ?: _currentBoard.value
-                        }
-                        DeckEvent.RefreshBoard -> client.requestBoards()
-                        is DeckEvent.AppStatus -> {
-                            if (ev.app == "APP_CUSTOM_VALUE") {
-                                _customValues.value = _customValues.value + ev.data
-                                _liveScalars.value = _liveScalars.value +
-                                    ev.data.mapValues { (_, el) -> parseScalar(el) }
-                                _valueHistory.value = updateHistory(_valueHistory.value, ev.data)
-                            }
-                        }
-                        is DeckEvent.Version -> _serverVersion.value = ev.version
-                        is DeckEvent.Other -> Log.d(TAG, "event ${ev.name}")
-                    }
+                // The channel buffers every frame the socket delivered, so
+                // the sync burst right after hello is never lost to a slow
+                // subscription.
+                for (ev in client.events) {
+                    handleEvent(client, ev)
                 }
             }
         }
     }
 
-    /** Payloads are scalars ("14:33") or objects ({value, suffix}). */
-    private fun parseScalar(el: JsonElement): LiveScalar {
-        val obj = el as? kotlinx.serialization.json.JsonObject
-        val text = (obj?.get("value") ?: el)
-            .let { runCatching { it.jsonPrimitive.content }.getOrNull() }
-        val suffix = obj?.get("suffix")
-            ?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }
-        return LiveScalar(text, suffix)
+    private fun handleEvent(client: V2Client, ev: V2Event) {
+        when (ev) {
+            is V2Event.WelcomeReady -> {
+                seriesChannels = ev.welcome.channels
+                    .filterValues { it.shape == V2.SHAPE_SERIES }
+                    .keys
+                _channelMeta.value = ev.welcome.channels
+                ev.issuedToken?.let { token ->
+                    Log.i(TAG, "paired, storing device token")
+                    saveConfig(_config.value.copy(token = token))
+                }
+                _deviceName.value = ev.welcome.device.name
+                pendingPairCode = null
+            }
+            is V2Event.Boards -> {
+                _boards.value = ev.boards.sortedBy { it.order }
+                val cur = _currentBoard.value
+                _currentBoard.value = _boards.value.firstOrNull { it.id == cur?.id }
+                    ?: _boards.value.firstOrNull()
+            }
+            is V2Event.Delta -> applyDelta(ev.ops)
+            is V2Event.SwitchBoard -> {
+                _currentBoard.value = _boards.value.firstOrNull { it.id == ev.boardId }
+                    ?: _currentBoard.value
+            }
+            is V2Event.State -> {
+                _values.value = ev.values
+                _series.value = ev.series
+            }
+            is V2Event.Patch -> {
+                val values = _values.value.toMutableMap()
+                val series = _series.value.toMutableMap()
+                for (change in ev.changes) {
+                    val info = change.value
+                    // series channels carry their newest point; scalars replace
+                    if (change.channel in seriesChannels) {
+                        val point = (info as? kotlinx.serialization.json.JsonPrimitive)
+                            ?.content?.toDoubleOrNull()
+                        if (point != null) {
+                            // the window may not exist yet: a fresh server
+                            // sends an empty state.sync and only patches
+                            // from here on build the chart history
+                            val window = ((series[change.channel] ?: emptyList()) + point)
+                                .takeLast(V2.SERIES_CAP)
+                            series[change.channel] = window
+                        }
+                    }
+                    values[change.channel] = info
+                }
+                _values.value = values
+                _series.value = series
+            }
+            is V2Event.ServerError -> {
+                Log.w(TAG, "server error: ${ev.code} ${ev.message.orEmpty()}")
+                if (ev.code == "pair-invalid" || ev.code == "pair-expired" || ev.code == "unauthorized") {
+                    // Bad auth: stop retrying; the connect screen explains.
+                    client.disconnect()
+                    _connState.value = ConnState.Failed(authMessage(ev.code))
+                }
+            }
+            is V2Event.Acked -> {} // interactions are fire-and-confirm
+        }
+    }
+
+    /** Deltas mutate the snapshot the server already sent (docs/protocol-v2.md §4). */
+    private fun applyDelta(ops: List<BoardOp>) {
+        _boards.value = applyBoardOps(_boards.value, ops)
+        val cur = _currentBoard.value
+        val currentId = cur?.id
+        if (currentId != null && _boards.value.none { it.id == currentId }) {
+            _currentBoard.value = _boards.value.firstOrNull()
+        } else if (currentId != null) {
+            // refresh the selected board object so tile edits show up
+            _currentBoard.value = _boards.value.firstOrNull { it.id == currentId }
+        }
     }
 
     private fun scheduleReconnect() {
-        if (reconnectAttempts >= MAX_RECONNECT) return
-        if (pendingReconnectGeneration == connectGeneration) return
-        pendingReconnectGeneration = connectGeneration
+        // Pairing codes are one-time: a dropped pairing socket cannot be
+        // retried with the same code, so only paired devices reconnect.
+        val token = _config.value.token
+        if (token.isNullOrBlank()) {
+            if (pendingPairCode != null) {
+                pendingPairCode = null
+                _connState.value = ConnState.Failed("pairing failed - generate a new code on the desktop")
+            }
+            return
+        }
+        if (reconnectScheduled) return
+        reconnectScheduled = true
         reconnectAttempts++
-        val generation = connectGeneration
-        viewModelScope.launch {
+        _reconnectAttempt.value = reconnectAttempts
+        scope.launch {
             delay(reconnectAttempts.coerceAtMost(6) * 2_000L)
-            // free the slot: sequential failures may schedule again
-            pendingReconnectGeneration = -1
-            // A newer connect() cycle (user retry or a scheduled reconnect
-            // that already fired) took over while we waited.
-            if (generation != connectGeneration) return@launch
+            reconnectScheduled = false
+            // A retry scheduled just before the goodbye arrived must not
+            // fire into standby; the probe owns reconnecting from there.
+            if (_serverDown.value) return@launch
             val st = _connState.value
             if (st is ConnState.Failed || st is ConnState.Disconnected) {
                 Log.i(TAG, "reconnect attempt $reconnectAttempts")
@@ -199,63 +415,32 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Fold one `app_status_update` batch into the per-key histories. */
-    private fun updateHistory(
-        current: Map<String, List<Float>>,
-        data: Map<String, JsonElement>,
-    ): Map<String, List<Float>> {
-        val out = current.toMutableMap()
-        for ((key, el) in data) {
-            val value = numericOf(el) ?: continue
-            val series = (out[key] ?: emptyList()) + value
-            out[key] = if (series.size > HISTORY_CAP) series.takeLast(HISTORY_CAP) else series
-        }
-        return out
-    }
-
-    private fun numericOf(el: JsonElement): Float? {
-        // graph payloads are objects like {value, title, suffix}; scalars
-        // are the value themselves
-        val raw = when (el) {
-            is kotlinx.serialization.json.JsonObject ->
-                runCatching { el["value"]?.jsonPrimitive?.content }.getOrNull()
-            else ->
-                runCatching { el.jsonPrimitive.content }.getOrNull()
-        } ?: return null
-        return raw.toFloatOrNull()?.takeIf { it.isFinite() }
+    private fun authMessage(code: String): String = when (code) {
+        "pair-invalid" -> "invalid pairing code - generate a new one on the desktop"
+        "pair-expired" -> "pairing code expired - generate a new one on the desktop"
+        else -> "device revoked on the desktop - pair again"
     }
 
     // -- user interactions ------------------------------------------------
+    // Clients send only gestures the tile declares (docs/protocol-v2.md §6).
 
-    // Original behavior: only `key` buttons act on touch-down (isTapStart
-    // = true); everything else executes on release. Board buttons switch
-    // boards locally like the stock client (command = `{"id":N}`).
-    fun holdStart(shortcut: Shortcut) {
-        if (shortcut.type == "key") {
-            shortcut.id?.let { client?.execShortcut(it, true) }
+    fun pressStart(boardId: Long, tile: Tile) {
+        if (tile.interacts(V2.INT_PRESS_START)) {
+            client?.pressStart(boardId, tile.id)
         }
     }
 
-    fun holdEnd(shortcut: Shortcut) {
-        if (shortcut.type == "board") {
-            val target = runCatching {
-                json.parseToJsonElement(shortcut.command).jsonObject["id"]
-                    ?.jsonPrimitive?.content?.toLong()
-            }.getOrNull()
-            if (target != null) {
-                _boards.value.firstOrNull { it.id == target }?.let { selectBoard(it) }
-                return
-            }
+    fun pressEnd(boardId: Long, tile: Tile) {
+        when {
+            tile.interacts(V2.INT_PRESS_END) -> client?.pressEnd(boardId, tile.id)
+            tile.interacts(V2.INT_TAP) -> client?.tap(boardId, tile.id)
         }
-        shortcut.id?.let { client?.execShortcut(it, false) }
     }
 
-    fun slider(shortcut: Shortcut, value: Float) {
-        shortcut.id?.let { client?.execSlider(it, value) }
-    }
-
-    fun refresh() {
-        client?.requestBoards()
+    fun slider(boardId: Long, tile: Tile, value: Float) {
+        if (tile.interacts(V2.INT_SLIDE)) {
+            client?.slide(boardId, tile.id, value)
+        }
     }
 
     fun selectBoard(board: Board) {
@@ -264,10 +449,19 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val TAG = "PulpitViewModel"
-        private const val MAX_RECONNECT = 10
-        /** The original app's PRO handshake key: full grid instead of 4x3. */
-        const val PRO_ACCESS_KEY = "DCKBRD_PRO_1_3_0"
-        /** The original client keeps the last 10 graph values. */
-        const val HISTORY_CAP = 10
+
+        private const val ASSET_RETRIES = 3
+
+        /** Shutdown-overlay probe cadence; see the init loop. */
+        private const val PROBE_SECONDS = 30L
+
+        /** Decode cap for tile images: tiles render around 150px, so a
+         *  512px sample is plenty even on a 2x2-tile widget. */
+        private const val ASSET_MAX_DIM = 512
+
+        /** Shared by reconnects and asset fetches - see V2Client.http. */
+        private val sharedHttp = OkHttpClient.Builder()
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .build()
     }
 }

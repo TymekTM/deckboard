@@ -1,16 +1,66 @@
+//! Protocol v2 wire models (docs/protocol-v2.md). The Rust types in
+//! `crates/proto` are the source of truth; the golden fixtures in
+//! `crates/proto/tests/fixtures/` are parsed by ProtoFixturesTest so this
+//! file cannot drift from the wire format.
+//!
+//! Enum-ish wire values (kinds, interactions, shapes) are strings with
+//! constants instead of Kotlin enums: kotlinx.serialization has no
+//! unknown-enum fallback, and the protocol requires degrading on unknown
+//! values instead of failing the parse. A [Tile] is flat on the wire
+//! (placement + manifest are serde-flattened on the Rust side), which maps
+//! 1:1 onto a single data class here.
+
 package app.pulpit.mobile.proto
 
+import androidx.compose.runtime.Immutable
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
 
-/**
- * Protocol v2 wire models (docs/protocol-v2.md). The Rust types in
- * `crates/proto` are the source of truth; the golden fixtures in
- * `crates/proto/tests/fixtures/` are parsed by [ProtoFixturesTest] so this
- * file cannot drift from the wire format. Full Tile typing lands with the
- * M4 client work - tiles stay [JsonElement] until then.
- */
+/** Protocol constants. */
+object V2 {
+    const val PROTOCOL = 2
+        /** Server ring buffer window per series channel (docs/protocol-v2.md §5). */
+        const val SERIES_CAP = 120
+
+    // message type names
+    const val TYPE_HELLO = "hello"
+    const val TYPE_WELCOME = "welcome"
+    const val TYPE_ERROR = "error"
+    const val TYPE_BOARDS_SYNC = "boards.sync"
+    const val TYPE_BOARDS_DELTA = "boards.delta"
+    const val TYPE_BOARD_OPEN = "board.open"
+    const val TYPE_STATE_SYNC = "state.sync"
+    const val TYPE_STATE_PATCH = "state.patch"
+    const val TYPE_INTERACTION = "interaction"
+    /** Server-to-client only: the server is exiting on purpose. */
+    const val TYPE_SERVER_SHUTDOWN = "server.shutdown"
+
+    // widget kinds (unknown degrades to button)
+    const val KIND_BUTTON = "button"
+    const val KIND_TOGGLE = "toggle"
+    const val KIND_SLIDER = "slider"
+    const val KIND_KNOB = "knob"
+    const val KIND_GRAPH = "graph"
+    const val KIND_LIST = "list"
+
+    // interactions
+    const val INT_TAP = "tap"
+    const val INT_PRESS_START = "press-start"
+    const val INT_PRESS_END = "press-end"
+    const val INT_SLIDE = "slide"
+
+    // state shapes
+    const val SHAPE_SCALAR = "scalar"
+    const val SHAPE_SERIES = "series"
+    const val SHAPE_TOGGLE = "toggle"
+    const val SHAPE_LIST = "list"
+}
+
 @Serializable
 data class Frame(
     val v: Int,
@@ -34,20 +84,14 @@ data class Device(
     val name: String,
 )
 
-/** Shape names kept as strings: kotlinx.serialization has no unknown-enum
- * fallback, so unknown future shapes must not break parsing (they render
- * as scalar client-side, mirroring Rust's `#[serde(other)]`). */
-object Shapes {
-    const val SCALAR = "scalar"
-    const val SERIES = "series"
-    const val TOGGLE = "toggle"
-    const val LIST = "list"
-}
-
 @Serializable
 data class ChannelInfo(
     val shape: String,
     val cap: Int? = null,
+    /** Display title captured from the producer's custom-value object. */
+    val title: String? = null,
+    /** Unit suffix captured alongside the title (e.g. "%", "GB"). */
+    val suffix: String? = null,
 )
 
 @Serializable
@@ -57,6 +101,8 @@ data class Welcome(
     @SerialName("min_client") val minClient: String,
     val generation: Long,
     val device: Device,
+    /** Issued only in the welcome that completes a pairing. */
+    val token: String? = null,
     val channels: Map<String, ChannelInfo> = emptyMap(),
 )
 
@@ -66,11 +112,120 @@ data class ErrorPayload(
     val message: String? = null,
 )
 
+@Immutable
+@Serializable
+data class Board(
+    val id: Long,
+    val name: String = "",
+    val width: Int = 4,
+    val height: Int = 3,
+    val order: Int = 0,
+    val background: Background? = null,
+    val tiles: List<Tile> = emptyList(),
+)
+
+/** Board background: `{"kind":"color","color":..}` or
+ *  `{"kind":"asset","hash":..}` - one flat class, the kind picks the
+ *  meaningful field. */
+@Immutable
+@Serializable
+data class Background(
+    val kind: String,
+    val color: String? = null,
+    val hash: String? = null,
+) {
+    companion object {
+        fun color(value: String) = Background(kind = "color", color = value)
+    }
+}
+
+internal fun JsonElement.contentOrNull(): String? =
+    (this as? JsonPrimitive)?.let { runCatching { it.content }.getOrNull() }
+
+/** One tile: placement + widget manifest flattened into one object. */
+@Immutable
+@Serializable
+data class Tile(
+    val id: Long,
+    val x: Int = 0,
+    val y: Int = 0,
+    val w: Int = 1,
+    val h: Int = 1,
+    val kind: String = V2.KIND_BUTTON,
+    val params: JsonElement? = null,
+    val state: StateRef? = null,
+    val interactions: List<String> = emptyList(),
+    val style: Style? = null,
+    @SerialName("web_package") val webPackage: String? = null,
+    @SerialName("asset_hash") val assetHash: String? = null,
+) {
+    fun interacts(kind: String): Boolean = interactions.contains(kind)
+
+    /** `params.widget` - implicit template hints (e.g. the clock). */
+    fun widgetHint(): String? =
+        (params as? JsonObject)?.get("widget")?.contentOrNull()
+
+    fun param(name: String): String? =
+        (params as? JsonObject)?.get(name)?.contentOrNull()
+}
+
+@Immutable
+@Serializable
+data class StateRef(
+    val channel: String,
+    val shape: String = V2.SHAPE_SCALAR,
+)
+
+@Immutable
+@Serializable
+data class Style(
+    val color: String? = null,
+    val color2: String? = null,
+    val icon: String? = null,
+    val icon2: String? = null,
+    @SerialName("icon_family") val iconFamily: String? = null,
+    val title: String? = null,
+    val shape: String? = null,
+)
+
 @Serializable
 data class BoardsSync(
     val generation: Long,
-    val boards: List<JsonElement> = emptyList(),
+    val boards: List<Board> = emptyList(),
 )
+
+/** One committed board change; ops arrive tagged with a `"op"` field. */
+sealed class BoardOp {
+    data class BoardSet(val board: Board) : BoardOp()
+    data class BoardRemove(val boardId: Long) : BoardOp()
+    data class TileSet(val boardId: Long, val tile: Tile) : BoardOp()
+    data class TileRemove(val boardId: Long, val tileId: Long) : BoardOp()
+    data class TileClear(val boardId: Long) : BoardOp()
+
+    companion object {
+        /** Unknown ops return null (ignored per protocol evolution rules). */
+        fun from(el: JsonElement, json: Json): BoardOp? {
+            val obj = el as? JsonObject ?: return null
+            val op = obj["op"]?.contentOrNull() ?: return null
+            val boardId = (obj["board"] as? JsonPrimitive)?.content?.toLongOrNull()
+            return when (op) {
+                "board-set" -> obj["board"]?.let {
+                    json.decodeFromString(Board.serializer(), it.toString())
+                }?.let { BoardSet(it) }
+                "board-remove" -> boardId?.let { BoardRemove(it) }
+                "tile-set" -> boardId?.let { b ->
+                    obj["tile"]?.let { json.decodeFromString(Tile.serializer(), it.toString()) }
+                        ?.let { TileSet(b, it) }
+                }
+                "tile-remove" -> boardId?.let { b ->
+                    (obj["tile"] as? JsonPrimitive)?.content?.toLongOrNull()?.let { TileRemove(b, it) }
+                }
+                "tile-clear" -> boardId?.let { TileClear(it) }
+                else -> null
+            }
+        }
+    }
+}
 
 @Serializable
 data class BoardsDelta(

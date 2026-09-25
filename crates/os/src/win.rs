@@ -312,6 +312,9 @@ mod tests {
         let (vol, muted, device) = sp.status(true).expect("status snapshot");
         assert_eq!(vol, sp.volume().expect("volume getter"));
         assert_eq!(muted, sp.muted().expect("mute getter"));
-        assert_eq!(device.as_deref(), Some(sp.active_device().expect("device getter").as_str()));
+        assert_eq!(
+            device.as_deref(),
+            Some(sp.active_device().expect("device getter").as_str())
+        );
     }
 }

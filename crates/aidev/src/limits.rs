@@ -14,8 +14,8 @@
 
 use std::io::Read;
 
-use crate::{local_usage::fmt_tokens, local_usage::Sums, Apikey, Config, Paths};
 use crate::util::truncate;
+use crate::{local_usage::fmt_tokens, local_usage::Sums, Apikey, Config, Paths};
 
 /// One display row of the plan-limits tile. `state` colors the dot:
 /// ok | warn | high | error.
@@ -67,7 +67,12 @@ fn poll_all(config: &Config) -> Vec<ProviderRow> {
         rows.push(anthropic_row(&key));
     }
     if let Some(zai) = config.providers.zai.as_ref() {
-        let key = resolve_key(Some(&Apikey { api_key: zai.api_key.clone() }), "Z_AI_API_KEY");
+        let key = resolve_key(
+            Some(&Apikey {
+                api_key: zai.api_key.clone(),
+            }),
+            "Z_AI_API_KEY",
+        );
         if let Some(key) = key {
             rows.extend(zai_rows(&key, zai.host.as_deref()));
         }
@@ -234,7 +239,11 @@ fn anthropic_row(key: &str) -> ProviderRow {
 /// array; either way the row only needs the day's grand total.
 fn anthropic_totals(v: &serde_json::Value) -> Option<u64> {
     let totals = v.get("totals")?;
-    let fields = ["input_tokens", "output_tokens", "cache_creation_input_tokens"];
+    let fields = [
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+    ];
     if let Some(map) = totals.as_object() {
         let sum: u64 = fields
             .iter()
@@ -339,7 +348,9 @@ fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
 /// percentage the API computes itself.
 fn zai_rows(key: &str, host: Option<&str>) -> Vec<ProviderRow> {
     let base = match host.map(str::trim).filter(|h| !h.is_empty()) {
-        Some(h) if h.starts_with("http://") || h.starts_with("https://") => h.trim_end_matches('/').to_string(),
+        Some(h) if h.starts_with("http://") || h.starts_with("https://") => {
+            h.trim_end_matches('/').to_string()
+        }
         Some(h) => format!("https://{h}"),
         None => "https://api.z.ai".into(),
     };
@@ -376,10 +387,8 @@ fn zai_rows_from(v: serde_json::Value) -> Vec<ProviderRow> {
                 .and_then(|p| p.as_str())
                 .map(str::to_string)
         });
-    let mut windows: Vec<(u64, ProviderRow)> = limits
-        .iter()
-        .filter_map(|raw| zai_window(raw))
-        .collect();
+    let mut windows: Vec<(u64, ProviderRow)> =
+        limits.iter().filter_map(|raw| zai_window(raw)).collect();
     windows.sort_by_key(|(minutes, _)| *minutes);
     if windows.is_empty() {
         return vec![ProviderRow {
@@ -458,9 +467,11 @@ fn local_rows(
             continue; // nothing used and no limit known: nothing to show
         }
         match ceiling.filter(|c| *c > 0) {
-            Some(ceiling) => {
-                rows.push(window_row(name, window, 100.0 * used as f64 / ceiling as f64))
-            }
+            Some(ceiling) => rows.push(window_row(
+                name,
+                window,
+                100.0 * used as f64 / ceiling as f64,
+            )),
             None => rows.push(ProviderRow {
                 name: format!("{name} {window}"),
                 state: "ok".into(),
@@ -639,7 +650,10 @@ mod tests {
     fn json_path_walks_objects_and_arrays() {
         let v: serde_json::Value =
             serde_json::from_str(r#"{"data":{"rows":[{"used":1},{"used":2}]}}"#).unwrap();
-        assert_eq!(json_path(&v, "data.rows.1.used").and_then(|x| x.as_i64()), Some(2));
+        assert_eq!(
+            json_path(&v, "data.rows.1.used").and_then(|x| x.as_i64()),
+            Some(2)
+        );
         assert!(json_path(&v, "data.nope").is_none());
     }
 
@@ -668,9 +682,15 @@ mod tests {
         assert!(note.chars().count() <= 48);
 
         // non-JSON bodies collapse to one short line
-        assert_eq!(http_error_note("Bad  gateway\n  try again"), "Bad gateway try again");
+        assert_eq!(
+            http_error_note("Bad  gateway\n  try again"),
+            "Bad gateway try again"
+        );
         // top-level message shape also works
-        assert_eq!(http_error_note(r#"{"message":"quota exceeded"}"#), "quota exceeded");
+        assert_eq!(
+            http_error_note(r#"{"message":"quota exceeded"}"#),
+            "quota exceeded"
+        );
     }
 
     #[test]
@@ -775,14 +795,16 @@ mod tests {
     #[test]
     fn zai_errors_and_empty_plans_stay_readable() {
         let rejected: serde_json::Value =
-            serde_json::from_str(r#"{"success":false,"code":401,"msg":"invalid api key"}"#).unwrap();
+            serde_json::from_str(r#"{"success":false,"code":401,"msg":"invalid api key"}"#)
+                .unwrap();
         let rows = zai_rows_from(rejected);
         assert_eq!(rows[0].state, "error");
         assert_eq!(rows[0].text, "invalid api key");
 
-        let no_limits: serde_json::Value =
-            serde_json::from_str(r#"{"success":true,"code":200,"data":{"level":"lite","limits":[]}}"#)
-                .unwrap();
+        let no_limits: serde_json::Value = serde_json::from_str(
+            r#"{"success":true,"code":200,"data":{"level":"lite","limits":[]}}"#,
+        )
+        .unwrap();
         let rows = zai_rows_from(no_limits);
         assert_eq!(rows[0].text, "lite plan");
         assert_eq!(rows[0].percent, None);
@@ -809,9 +831,28 @@ mod tests {
             antigravity_conversations: "Z:/nope".into(),
         };
         let sums = [
-            ("Zcode", Sums { today: 500_000, ..Default::default() }),
-            ("Claude", Sums { five_hour: 100_000, week: 1_000_000, ..Default::default() }),
-            ("OpenCode", Sums { five_hour: 50_000, ..Default::default() }),
+            (
+                "Zcode",
+                Sums {
+                    today: 500_000,
+                    ..Default::default()
+                },
+            ),
+            (
+                "Claude",
+                Sums {
+                    five_hour: 100_000,
+                    week: 1_000_000,
+                    ..Default::default()
+                },
+            ),
+            (
+                "OpenCode",
+                Sums {
+                    five_hour: 50_000,
+                    ..Default::default()
+                },
+            ),
         ];
         let rows = plan_rows(&config, &http, &sums, &paths, crate::unix_now());
         // no codex sessions on this fake path: the lane stays absent; the

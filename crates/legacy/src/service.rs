@@ -25,9 +25,7 @@ pub trait Backend: Send + Sync + 'static {
     /// Every shortcut grouped by board id, for whole-board reads. The
     /// default loops the per-board getter (fine for mocks); real backends
     /// override it with a single grouped query.
-    fn all_buttons_by_board(
-        &self,
-    ) -> std::collections::HashMap<i64, Vec<pulpit_db::ButtonRow>> {
+    fn all_buttons_by_board(&self) -> std::collections::HashMap<i64, Vec<pulpit_db::ButtonRow>> {
         self.get_boards()
             .iter()
             .map(|board| (board.id, self.get_buttons_by_board(board.id)))
@@ -59,10 +57,7 @@ pub trait Backend: Send + Sync + 'static {
     /// `want_device`) the default device id. Per-tick loops use this;
     /// the default composes the getters for backends without a combined
     /// read.
-    fn speaker_snapshot(
-        &self,
-        want_device: bool,
-    ) -> (Option<f32>, Option<bool>, Option<String>) {
+    fn speaker_snapshot(&self, want_device: bool) -> (Option<f32>, Option<bool>, Option<String>) {
         let (volume, muted) = self.speaker_status();
         let device = if want_device {
             self.speaker_device_id()

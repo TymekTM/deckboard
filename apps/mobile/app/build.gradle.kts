@@ -20,7 +20,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8: kotlinx-serialization and OkHttp ship their consumer
+            // keep rules; the debug signing config lets this install
+            // straight over the debug build on the deck tablet.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = signingConfigs.getByName("debug")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
     }
     compileOptions {
@@ -35,7 +41,7 @@ android {
     }
     // Golden fixtures shared with the Rust contract tests
     // (crates/proto/tests/fixtures) so both stacks parse the same wire
-    // examples. Path is relative to this app module (apps/mobile/app).
+    // examples.
     sourceSets.getByName("test") {
         resources.srcDir("../../../crates/proto/tests/fixtures")
     }

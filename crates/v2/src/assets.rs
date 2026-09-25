@@ -323,7 +323,9 @@ mod tests {
         assert_eq!(store.import_data_url(&url).unwrap(), hash);
         assert_eq!(store.url_hashes.lock().unwrap().len(), 2);
         // a URL that fails to import (bad mime) must not poison the cache
-        assert!(store.import_data_url("data:image/tiff;base64,Zm9v").is_none());
+        assert!(store
+            .import_data_url("data:image/tiff;base64,Zm9v")
+            .is_none());
         assert!(!store
             .url_hashes
             .lock()

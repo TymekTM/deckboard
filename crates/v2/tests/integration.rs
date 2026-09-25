@@ -402,6 +402,13 @@ async fn pairing_flow_mints_welcome_and_device() {
     let (welcome, _sync, _state_sync) = handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
     assert_eq!(welcome.device.name, "Test tablet");
     assert_eq!(welcome.protocol, PROTOCOL_VERSION);
+    // Pairing issues the token: the client stores it and reconnects with it.
+    let token = welcome.token.as_deref().expect("pairing issues a token");
+    assert!(!token.is_empty());
+    let mut reconnected = ws_open(&format!("ws://{addr}/v2/ws?token={token}")).await;
+    let (again, _, _) = handshake(&mut reconnected, "deckboard-mobile", "0.2.0").await;
+    assert_eq!(again.device.id, welcome.device.id);
+    assert!(again.token.is_none(), "token reconnects omit the secret");
     // The code burned on use: a second pairing with it fails on the socket.
     let mut burned = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
     send_frame(
@@ -878,4 +885,38 @@ async fn exec_side_values_land_on_ext_channels() {
     let patch: StatePatch = serde_json::from_value(frame.payload.unwrap()).unwrap();
     assert_eq!(patch.changes[0].channel, "ext.fake-key");
     assert_eq!(patch.changes[0].value, "42");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_goodbye_reaches_clients_then_closes() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let device = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    // The desktop quit path verbatim: one goodbye frame per attached
+    // session, then a WS close. Over the real pump this also pins the
+    // ordering - the frame is on the wire before the close.
+    state.hub.shutdown();
+
+    let mut saw_shutdown = false;
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                    let frame: Frame = serde_json::from_str(&text)
+                        .unwrap_or_else(|e| panic!("bad frame {text}: {e}"));
+                    assert_eq!(frame.kind, TYPE_SERVER_SHUTDOWN);
+                    saw_shutdown = true;
+                }
+                Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
+                Ok(_) => {} // pings, pongs
+                Err(e) => panic!("ws error: {e}"),
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "expected a WS close after the goodbye");
+    assert!(saw_shutdown, "the goodbye frame must precede the close");
 }

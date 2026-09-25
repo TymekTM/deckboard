@@ -95,11 +95,14 @@ impl Scanner {
             return;
         };
         let len = meta.len();
-        let state = self.files.entry(path.to_path_buf()).or_insert_with(|| FileState {
-            offset: 0,
-            samples: Vec::new(),
-            seen_keys: HashSet::new(),
-        });
+        let state = self
+            .files
+            .entry(path.to_path_buf())
+            .or_insert_with(|| FileState {
+                offset: 0,
+                samples: Vec::new(),
+                seen_keys: HashSet::new(),
+            });
         if len < state.offset {
             // truncated/rewritten file: start over rather than lose it
             state.offset = 0;
@@ -271,7 +274,9 @@ fn parse_line(format: Format, line: &str) -> Option<Parsed> {
             }
             let ts = parse_iso_rfc3339(v.get("timestamp")?.as_str()?)?;
             let info = payload.get("info")?;
-            let last = info.get("last_token_usage").or_else(|| info.get("total_token_usage"))?;
+            let last = info
+                .get("last_token_usage")
+                .or_else(|| info.get("total_token_usage"))?;
             let pick = |key: &str| last.get(key).and_then(|x| x.as_u64());
             let tokens = tokens_from(
                 pick("input_tokens"),
@@ -295,11 +300,7 @@ fn tokens_from(
 ) -> Option<u64> {
     // a line without any token fields is not a usage record (queue ops,
     // user turns, ...): skip it rather than count a zero sample
-    if input.is_none()
-        && output.is_none()
-        && cache_write.is_none()
-        && cache_read.is_none()
-    {
+    if input.is_none() && output.is_none() && cache_write.is_none() && cache_read.is_none() {
         return None;
     }
     Some(
@@ -400,7 +401,10 @@ mod tests {
     #[test]
     fn iso_parse_matches_known_unix_values() {
         assert_eq!(parse_iso_rfc3339("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_iso_rfc3339("2026-09-22T12:17:09.815Z"), Some(1_790_079_429));
+        assert_eq!(
+            parse_iso_rfc3339("2026-09-22T12:17:09.815Z"),
+            Some(1_790_079_429)
+        );
         // +02:00 offset shifts back two hours
         assert_eq!(
             parse_iso_rfc3339("2026-09-22T12:17:09+02:00"),

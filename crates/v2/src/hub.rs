@@ -103,6 +103,27 @@ impl V2Hub {
             self.remove(id);
         }
     }
+
+    /// The exit path: one `server.shutdown` goodbye to every attached
+    /// session, then a WS close. Each pump drains its queue in order, so
+    /// the frame is on the wire before the close - clients that understand
+    /// it know the exit is deliberate, not a network drop. A wedged peer
+    /// (full queue) misses the goodbye and just gets torn down at exit.
+    pub fn shutdown(&self) {
+        self.broadcast_frame(&Frame::bare(pulpit_proto::TYPE_SERVER_SHUTDOWN));
+        let mut dead = Vec::new();
+        {
+            let sessions = self.sessions.lock().expect("v2 hub poisoned");
+            for session in sessions.values() {
+                if session.try_send(super::session::WsOut::Close).is_err() {
+                    dead.push(session.id);
+                }
+            }
+        }
+        for id in dead {
+            self.remove(id);
+        }
+    }
 }
 
 pub struct V2Session {
@@ -300,5 +321,21 @@ mod tests {
         assert_eq!(hub.count(), 1, "fresh session survives the reap");
         hub.broadcast_frame(&frame());
         assert_eq!(hub.count(), 1);
+    }
+
+    #[test]
+    fn shutdown_sends_frame_then_close() {
+        let hub = V2Hub::new();
+        let (tx, mut rx) = mpsc::channel(8);
+        let a = hub.create(tx);
+        hub.attach(&a);
+
+        hub.shutdown();
+
+        let WsOut::Text(text) = rx.blocking_recv().unwrap() else {
+            panic!("goodbye frame first")
+        };
+        assert!(text.contains("server.shutdown"));
+        assert!(matches!(rx.blocking_recv().unwrap(), WsOut::Close));
     }
 }

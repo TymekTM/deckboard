@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use crate::antigravity;
 use crate::codex;
 use crate::opencode;
-use crate::{Config, Paths};
 use crate::util::{mtime, truncate};
+use crate::{Config, Paths};
 
 /// How many sessions of one project to show before the group is trimmed.
 const PER_PROJECT_CAP: usize = 2;
@@ -62,12 +62,7 @@ pub fn snapshot(config: &Config, paths: &Paths, now: i64) -> serde_json::Value {
     claude_sessions(&paths.claude_projects, &mut sessions);
     codex::sessions(&paths.codex_sessions, config, now, &mut sessions);
     opencode::sessions(&paths.opencode_db, config, now, &mut sessions);
-    antigravity::sessions(
-        &paths.antigravity_conversations,
-        config,
-        now,
-        &mut sessions,
-    );
+    antigravity::sessions(&paths.antigravity_conversations, config, now, &mut sessions);
 
     let classified: Vec<(&AgentSession, &'static str)> = sessions
         .iter()
@@ -82,12 +77,8 @@ pub fn snapshot(config: &Config, paths: &Paths, now: i64) -> serde_json::Value {
         .filter(|(_, state)| *state != "done")
         .collect();
 
-    let count = |want: &'static str| {
-        visible
-            .iter()
-            .filter(|(_, state)| *state == want)
-            .count() as u32
-    };
+    let count =
+        |want: &'static str| visible.iter().filter(|(_, state)| *state == want).count() as u32;
     let (working, attention) = (count("working"), count("attention"));
 
     let mut rows = grouped_rows(&visible, now);
@@ -134,10 +125,15 @@ fn grouped_rows(classified: &[(&AgentSession, &'static str)], now: i64) -> Vec<s
     }
     // projects ordered by their most urgent session, freshest activity as
     // the tie-break so active projects float to the top
-    let mut projects: Vec<(&str, Vec<&(&AgentSession, &'static str)>)> = buckets.into_iter().collect();
+    let mut projects: Vec<(&str, Vec<&(&AgentSession, &'static str)>)> =
+        buckets.into_iter().collect();
     projects.sort_by_key(|(_, sessions)| {
         (
-            sessions.iter().map(|(_, state)| rank(state)).min().unwrap_or(2),
+            sessions
+                .iter()
+                .map(|(_, state)| rank(state))
+                .min()
+                .unwrap_or(2),
             std::cmp::Reverse(
                 sessions
                     .iter()
@@ -352,7 +348,10 @@ fn claude_sessions(root: &Path, out: &mut Vec<AgentSession>) {
         };
         let (cwd_project, prompt) = transcript_head_info(&transcript);
         // "f--projects-deckboard-clone" -> "projects-deckboard-clone"
-        let raw = project_dir.file_name().unwrap_or_default().to_string_lossy();
+        let raw = project_dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
         let cleaned = raw
             .trim_start_matches(|c: char| c.is_ascii_alphabetic())
             .trim_start_matches('-');
@@ -511,7 +510,9 @@ mod tests {
             zcode_cli: std::env::temp_dir().join("aidev-test-nope-z"),
             claude_projects: std::env::temp_dir().join("aidev-test-nope-c"),
             codex_sessions: std::env::temp_dir().join("aidev-test-nope-x"),
-            opencode_db: std::env::temp_dir().join("aidev-test-nope-o").join("db.sqlite"),
+            opencode_db: std::env::temp_dir()
+                .join("aidev-test-nope-o")
+                .join("db.sqlite"),
             antigravity_conversations: std::env::temp_dir().join("aidev-test-nope-a"),
         };
         let v = snapshot(&cfg, &paths, 1_800_000_000);
@@ -528,7 +529,12 @@ mod tests {
         seed_journal(
             &db_path,
             &[
-                ("s1", "Fix the grid", "F:\\projects\\deckboard clone", now - 120),
+                (
+                    "s1",
+                    "Fix the grid",
+                    "F:\\projects\\deckboard clone",
+                    now - 120,
+                ),
                 ("sub", "You are a reviewer", "F:\\x", now - 30),
                 ("s3", "Ancient", "F:\\y", now - 90_000),
             ],
@@ -553,9 +559,24 @@ mod tests {
         seed_journal(
             &db_path,
             &[
-                ("s1", "Fix the grid", "F:\\projects\\deckboard clone", now - 120),
-                ("s3", "Rebrand README", "F:\\projects\\deckboard clone", now - 500),
-                ("s2", "Deep dive", "F:\\projects\\AIJobSearchDLL", now - 3_600),
+                (
+                    "s1",
+                    "Fix the grid",
+                    "F:\\projects\\deckboard clone",
+                    now - 120,
+                ),
+                (
+                    "s3",
+                    "Rebrand README",
+                    "F:\\projects\\deckboard clone",
+                    now - 500,
+                ),
+                (
+                    "s2",
+                    "Deep dive",
+                    "F:\\projects\\AIJobSearchDLL",
+                    now - 3_600,
+                ),
             ],
         );
 
@@ -604,8 +625,18 @@ mod tests {
         seed_journal(
             &db_path,
             &[
-                ("s1", "Old work", "F:\\projects\\deckboard clone", now - 3_600),
-                ("s2", "Other old", "F:\\projects\\AIJobSearchDLL", now - 7_200),
+                (
+                    "s1",
+                    "Old work",
+                    "F:\\projects\\deckboard clone",
+                    now - 3_600,
+                ),
+                (
+                    "s2",
+                    "Other old",
+                    "F:\\projects\\AIJobSearchDLL",
+                    now - 7_200,
+                ),
             ],
         );
 

@@ -43,7 +43,9 @@ pub fn input_declarations() -> Vec<(&'static str, &'static str, &'static str, &'
 
 /// Does this action kind belong to the native AI dev-work source?
 pub fn is_aidev_action(kind: &str) -> bool {
-    input_declarations().iter().any(|(value, ..)| *value == kind)
+    input_declarations()
+        .iter()
+        .any(|(value, ..)| *value == kind)
 }
 
 /// Display tiles have nothing to press; keep the claimed no-op parity with
@@ -207,7 +209,17 @@ fn push_loop(tx: &tokio_mpsc::UnboundedSender<serde_json::Value>, paths: Paths) 
             http.refresh(&config, &paths);
             last_http = Some(std::time::Instant::now());
         }
-        let payload = assemble(&config, &http, &zcode, &claude, &codex, &opencode, &antigravity, &paths, now);
+        let payload = assemble(
+            &config,
+            &http,
+            &zcode,
+            &claude,
+            &codex,
+            &opencode,
+            &antigravity,
+            &paths,
+            now,
+        );
         if tx.send(payload).is_err() {
             tracing::debug!("aidev push channel closed, stopping");
             return;
@@ -236,9 +248,7 @@ fn assemble(
         ("OpenCode", opencode.sums(now)),
         ("Antigravity", antigravity.sums(now)),
     ];
-    let total = |key: fn(&local_usage::Sums) -> u64| {
-        sums.iter().map(|(_, s)| key(s)).sum::<u64>()
-    };
+    let total = |key: fn(&local_usage::Sums) -> u64| sums.iter().map(|(_, s)| key(s)).sum::<u64>();
 
     let plan_rows = limits::plan_rows(config, http, &sums, paths, now);
     // one-line headline: whichever window is closest to its limit

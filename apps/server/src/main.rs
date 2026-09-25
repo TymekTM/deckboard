@@ -259,11 +259,10 @@ async fn main() -> anyhow::Result<()> {
                 let backend = backend.clone();
                 // the original fetched the device id on the first fetch
                 // and every 6th cycle after that
-                let snapshot = tokio::task::spawn_blocking(move || {
-                    backend.speaker_snapshot(cycle == 1)
-                })
-                .await
-                .ok();
+                let snapshot =
+                    tokio::task::spawn_blocking(move || backend.speaker_snapshot(cycle == 1))
+                        .await
+                        .ok();
                 if let Some((volume, muted, device)) = snapshot {
                     if let (Some(volume), Some(muted)) = (volume, muted) {
                         // one decimal-free fraction like the original n/100

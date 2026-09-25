@@ -196,7 +196,8 @@ mod tests {
     use super::*;
 
     fn tmp_db(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("aidev-opencode-{}-{}", tag, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aidev-opencode-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("opencode.db")
@@ -248,7 +249,10 @@ mod tests {
         )
         .unwrap();
         let now = crate::unix_now();
-        for (i, (age, input, cache)) in [(30i64, 100u64, 500u64), (3700, 200, 900)].iter().enumerate() {
+        for (i, (age, input, cache)) in [(30i64, 100u64, 500u64), (3700, 200, 900)]
+            .iter()
+            .enumerate()
+        {
             conn.execute(
                 "INSERT INTO message VALUES (?1, ?2, ?3)",
                 rusqlite::params![

@@ -1,0 +1,46 @@
+# Deckboard Android client (protocol v2)
+
+The tablet client for the deckboard server, speaking protocol v2 only
+(`docs/protocol-v2.md`): one plain WebSocket to `/v2/ws`, token pairing,
+`boards.sync` + `boards.delta` for the board snapshot, `state.sync` +
+`state.patch` for live values, `interaction` frames for taps/presses.
+
+## Build
+
+Requirements: JDK 17, an Android SDK (API 34) and Gradle 8.7 on the path.
+`apps/mobile/local.properties` (gitignored) points at the SDK via
+`sdk.dir=`. From `apps/mobile/`:
+
+```
+gradle :app:assembleDebug        # dev build
+gradle :app:assembleRelease      # R8-minified, debug-signed
+gradle :app:testDebugUnitTest    # wire/fixture/delta unit tests
+```
+
+The golden wire fixtures in `crates/proto/tests/fixtures` are parsed by
+`ProtoFixturesTest`, so the Kotlin models cannot drift from the Rust ones.
+
+## Pairing and running
+
+1. Run the server (`apps/server`); it prints a QR URL and mints one-time
+   codes on `POST /v2/pair` (loopback only).
+2. In the app enter the PC address, port, and the current pairing code;
+   tap Pair. The `welcome` frame carries the device token - it is stored
+   and every later start reconnects with it automatically.
+3. Interactions: clients send only gestures a tile declares; key tiles
+   declare the `press-start`/`press-end` pair (server-side hold-to-repeat),
+   everything else taps.
+
+The device is a dedicated deck: the screen is kept on and the app starts
+itself after a reboot (`BootReceiver`). Pairing data survives reinstalls
+as long as the app is updated with `adb install -r`.
+
+## Notes
+
+- Connect over the LAN address of the PC. The `adb reverse` tunnel drops
+  server-to-client frames on some devices - fine for installs, not for
+  running the deck.
+- Asset images (tile images, board backgrounds) load from
+  `/assets/<hash>?token=<device token>`.
+- Release minification relies on the keep rules bundled with
+  kotlinx-serialization and OkHttp; no custom proguard file is needed.
