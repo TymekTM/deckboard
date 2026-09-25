@@ -660,7 +660,7 @@ function onKeydown(event) {
             </label>
 
             <div class="pop-row muted tnum">
-              Editor v{{ status.version || "0.1.0" }}
+              Editor v{{ status.version || "0.1.1" }}
             </div>
           </div>
         </Transition>
@@ -782,7 +782,7 @@ function onKeydown(event) {
             </div>
             <div class="canvas-overlay version tnum">
               <i class="fas fa-puzzle-piece"></i>
-              Version {{ status.version || "0.1.0" }}
+              Version {{ status.version || "0.1.1" }}
             </div>
           </template>
 

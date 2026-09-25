@@ -18,7 +18,7 @@
 //! project with the provider glyph on every row. When the tile cannot fit
 //! the detail, the renderer switches to the per-provider `compact` counts.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -74,16 +74,12 @@ pub fn snapshot(config: &Config, paths: &Paths, now: i64) -> serde_json::Value {
         .filter_map(|s| classify((now - s.last_ts).max(0), config).map(|state| (s, state)))
         .collect();
 
-    // a provider is on the tile only while something of it is alive:
-    // working or needing attention - finished sessions alone stay hidden
-    let active: HashSet<&str> = classified
-        .iter()
-        .filter(|(_, state)| *state != "done")
-        .map(|(session, _)| session.provider)
-        .collect();
+    // finished sessions are never displayed: the tile carries only what is
+    // running or waiting, so providers whose sessions are all done vanish
+    // along with their rows
     let visible: Vec<(&AgentSession, &'static str)> = classified
         .into_iter()
-        .filter(|(session, _)| active.contains(session.provider))
+        .filter(|(_, state)| *state != "done")
         .collect();
 
     let count = |want: &'static str| {
@@ -92,7 +88,7 @@ pub fn snapshot(config: &Config, paths: &Paths, now: i64) -> serde_json::Value {
             .filter(|(_, state)| *state == want)
             .count() as u32
     };
-    let (working, attention, done) = (count("working"), count("attention"), count("done"));
+    let (working, attention) = (count("working"), count("attention"));
 
     let mut rows = grouped_rows(&visible, now);
     if rows.is_empty() {
@@ -104,7 +100,7 @@ pub fn snapshot(config: &Config, paths: &Paths, now: i64) -> serde_json::Value {
     }
 
     let mut summary = String::new();
-    for (count, label) in [(working, "working"), (attention, "attention"), (done, "done")] {
+    for (count, label) in [(working, "working"), (attention, "attention")] {
         if count > 0 {
             if !summary.is_empty() {
                 summary.push_str(" · ");
@@ -176,39 +172,33 @@ fn grouped_rows(classified: &[(&AgentSession, &'static str)], now: i64) -> Vec<s
     rows
 }
 
-/// Per-provider counts for the compact fallback: one line per active
-/// provider in canonical order, done sessions included for context.
+/// Per-provider active counts for the compact fallback: the renderer
+/// draws each provider's logo with a dot and the number of sessions that
+/// are working or waiting below it. The dot color follows the more
+/// urgent state, so a single attention session turns it amber.
 fn compact_rows(classified: &[(&AgentSession, &'static str)]) -> Vec<serde_json::Value> {
     let mut rows = Vec::new();
     for provider in PROVIDERS {
-        let mut counts = [0u32; 3]; // working, attention, done
-        let mut any = false;
+        let mut working = 0u32;
+        let mut attention = 0u32;
         for (session, state) in classified {
             if session.provider != provider {
                 continue;
             }
-            any = true;
-            counts[rank(state) as usize] += 1;
-        }
-        if !any {
-            continue;
-        }
-        let mut value = String::new();
-        for (count, label) in [
-            (counts[0], "working"),
-            (counts[1], "attention"),
-            (counts[2], "done"),
-        ] {
-            if count > 0 {
-                if !value.is_empty() {
-                    value.push_str(" · ");
-                }
-                value.push_str(&format!("{count} {label}"));
+            match *state {
+                "working" => working += 1,
+                "attention" => attention += 1,
+                _ => {}
             }
+        }
+        let total = working + attention;
+        if total == 0 {
+            continue;
         }
         rows.push(serde_json::json!({
             "provider": provider,
-            "value": value,
+            "count": total,
+            "state": if attention > 0 { "attention" } else { "working" },
         }));
     }
     rows
@@ -564,7 +554,7 @@ mod tests {
             &db_path,
             &[
                 ("s1", "Fix the grid", "F:\\projects\\deckboard clone", now - 120),
-                ("s3", "Rebrand README", "F:\\projects\\deckboard clone", now - 1_620),
+                ("s3", "Rebrand README", "F:\\projects\\deckboard clone", now - 500),
                 ("s2", "Deep dive", "F:\\projects\\AIJobSearchDLL", now - 3_600),
             ],
         );
@@ -582,27 +572,26 @@ mod tests {
             now,
         );
         let rows = v["rows"].as_array().unwrap();
-        // the project with mixed states still gets exactly one header, its
-        // working session above the done one
+        // done sessions are never displayed: the done-only project loses
+        // its header entirely, the live project keeps exactly one
         let headers: Vec<_> = rows
             .iter()
             .filter(|r| r["state"] == "header")
             .map(|r| r["label"].as_str().unwrap())
             .collect();
-        assert_eq!(headers, ["deckboard clone", "AIJobSearchDLL"]);
+        assert_eq!(headers, ["deckboard clone"]);
         assert_eq!(rows[0]["state"], "header");
         assert_eq!(rows[1]["label"], "Fix the grid");
         assert_eq!(rows[1]["provider"], "zcode");
         assert!(rows[1]["value"].as_str().unwrap().starts_with("working · "));
         assert_eq!(rows[2]["label"], "Rebrand README");
-        assert!(rows[2]["value"].as_str().unwrap().starts_with("done · "));
-        assert_eq!(rows[3]["state"], "header");
-        assert_eq!(rows[3]["label"], "AIJobSearchDLL");
-        assert!(rows[4]["value"].as_str().unwrap().starts_with("done · "));
-        assert_eq!(v["summary"], "1 working · 2 done");
-        // compact counts mirror the visible sessions per provider
+        assert!(rows[2]["value"].as_str().unwrap().starts_with("check? · "));
+        assert_eq!(v["summary"], "1 working · 1 attention");
+        // compact: one active+waiting number per provider, the dot follows
+        // the more urgent state
         assert_eq!(v["compact"][0]["provider"], "zcode");
-        assert_eq!(v["compact"][0]["value"], "1 working · 2 done");
+        assert_eq!(v["compact"][0]["count"], 2);
+        assert_eq!(v["compact"][0]["state"], "attention");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

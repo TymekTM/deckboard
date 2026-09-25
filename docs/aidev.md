@@ -6,7 +6,7 @@ agent progress and token burn. Ships four catalog entries under
 
 | Tile | Mode | Shows |
 |---|---|---|
-| `ai-plan-limits` | `status` | One bar row per provider window (5h, week): fill = usage against the limit, value = `used / limit` (or a percentage when the source reports only that), colored by threshold |
+| `ai-plan-limits` | `status` | One bar row per provider window (5h, week): fill and value are the usage percentage, colored by threshold |
 | `ai-agent-status` | `status` | Active agents grouped by project: provider glyph, session title, state |
 | `ai-tokens-today` | `graph` | Sparkline of tokens consumed today, all providers combined |
 | `ai-tokens-hour` | `graph` | Rolling last-60-minutes window, refreshed with every poll (~15 s); a tap flips it to the per-provider breakdown |
@@ -43,16 +43,26 @@ not accepted there and Codex usage is subscription-based.
 
 ## Plan-limit bars
 
-Every window with a known limit renders as its own row: a thin bar under
-`label  used / limit`, fill colored by the threshold palette (green ok,
-amber over 60%, red over 85%). Sources that expose only percentages
-(Codex, Claude OAuth, Antigravity quota) show `N%` as the value; the
-z.ai lane reads real limits, so its bars show token or credit counts.
+Every window renders as its own row: label (`GLM 5h`), value (`34%`) and
+a thin bar whose fill is that percentage, colored by the threshold
+palette (green ok, amber over 60%, red over 85%). Percentage is the one
+metric every source shares, so it is the only value shown.
 
-The GLM lane reads the z.ai monitor quota endpoint with the plan's API
-key (CodexBar's mapping: `data.limits[]`, TOKENS_LIMIT / CREDIT_LIMIT
-windows, `usage` + `currentValue`/`remaining` counts, plan level). Put
-the key in `~/deckboard/aidev.json`:
+Percentage sources per provider: Codex's embedded `rate_limits`, Claude
+OAuth utilization, Antigravity's quota endpoint, and the z.ai monitor
+API for GLM (CodexBar's mapping: `data.limits[]`, TOKENS_LIMIT /
+CREDIT_LIMIT windows; `usage` + `currentValue`/`remaining` counts only
+refine the percentage the API reports). Without any of those, GLM and
+Claude fall back to token sums against ceilings configured in
+`~/deckboard/aidev.json` (`glm_five_hour_tokens` / `glm_week_tokens`
+and the `claude_*` pair) - a ceiling turns the local sum into a
+percentage bar. With neither source nor ceiling there is no percentage
+to show, so the row stays a raw sum; ZCode does not expose its plan
+quota locally (its own protocol, credentials stay in the encrypted
+keystore).
+
+The z.ai lane needs the plan's API key pasted into `aidev.json` - it
+cannot be pulled out of ZCode's keystore:
 
 ```json
 {
@@ -74,15 +84,18 @@ limits beat configured guesses.
   (default 15 min) ago: a permission prompt, a long build, or a finished
   turn waiting for review.
 - **done** - quiet for up to `agent_done_secs` (default 4 h), then the
-  session drops off. A provider whose sessions are all done is hidden:
-  nothing is running.
+  session drops off. Done sessions are never displayed: the tile carries
+  only what is running or waiting, so a provider whose sessions are all
+  done disappears entirely.
 
 Rows are grouped under an uppercase project header (the session's
 working-directory basename), freshest and most urgent project first, up
 to 2 sessions per project. Every session row carries its provider glyph.
 When the tile cannot fit the detail (small tile, too many rows) the
-renderer switches to the producer's `compact` list: one line per active
-provider with glyph and counts (`2 working · 1 done`), no titles.
+renderer switches to the producer's `compact` view: a vertical stack of
+provider logos, each with a dot and the number of working or waiting
+sessions below it (the dot turns amber when any session needs
+attention).
 
 ## Token accounting
 
