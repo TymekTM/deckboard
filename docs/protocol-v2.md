@@ -291,8 +291,12 @@ shutting down), it sends one `server.shutdown` frame to every attached
 session, immediately followed by a WebSocket close:
 
 ```json
-{ "v": 2, "type": "server.shutdown", "payload": {} }
+{ "v": 2, "type": "server.shutdown" }
 ```
+
+The frame carries no payload (the envelope omits it when empty). "Every
+attached session" means authenticated ones: a socket still inside its
+handshake misses the goodbye and sees a bare drop.
 
 The frame is the signal that the exit is deliberate: a conforming client
 stops reconnecting (it may show an idle/offline state instead) and can

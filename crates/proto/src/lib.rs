@@ -106,6 +106,18 @@ impl Frame {
             serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
         )
     }
+
+    /// Server control push that carries no payload at all (the envelope
+    /// omits it, per the frame-envelope rules).
+    pub fn bare(kind: &str) -> Frame {
+        Frame {
+            v: PROTOCOL_VERSION,
+            id: None,
+            ack: None,
+            kind: kind.to_string(),
+            payload: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

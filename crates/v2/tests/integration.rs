@@ -898,9 +898,7 @@ async fn shutdown_goodbye_reaches_clients_then_closes() {
     // The desktop quit path verbatim: one goodbye frame per attached
     // session, then a WS close. Over the real pump this also pins the
     // ordering - the frame is on the wire before the close.
-    state
-        .hub
-        .shutdown(&Frame::push(TYPE_SERVER_SHUTDOWN, serde_json::json!({})));
+    state.hub.shutdown();
 
     let mut saw_shutdown = false;
     let closed = tokio::time::timeout(Duration::from_secs(2), async {

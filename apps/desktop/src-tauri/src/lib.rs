@@ -493,10 +493,7 @@ fn goodbye_v2(app: &AppHandle) {
     else {
         return;
     };
-    hub.shutdown(&pulpit_proto::Frame::push(
-        pulpit_proto::TYPE_SERVER_SHUTDOWN,
-        serde_json::json!({}),
-    ));
+    hub.shutdown();
     // The session pumps write the frame + close asynchronously; give them
     // a beat before `exit` tears the process down.
     std::thread::sleep(SHUTDOWN_FLUSH_GRACE);

@@ -262,6 +262,11 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onAppBackground() {
         foreground = false
+        // No attempts in standby while the screen is off: kill a probe
+        // that is mid-flight so the socket dies with the screen.
+        if (_serverDown.value) {
+            client?.disconnect()
+        }
     }
 
     private fun observeEvents(client: V2Client) {
