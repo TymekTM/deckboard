@@ -330,6 +330,7 @@ private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
                     series = SeriesWindow(series[watchChannel] ?: emptyList()),
                     channel = watchChannel?.let { channelMeta[it] },
                     items = TileItems(listItems(t, live)),
+                    status = statusData(t, live),
                     image = t.assetHash?.let { bitmaps[it] },
                     onPressStart = { vm.pressStart(board.id, t) },
                     onPressEnd = { vm.pressEnd(board.id, t) },

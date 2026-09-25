@@ -187,9 +187,19 @@ fn widget_kind_for(row: &ButtonRow, app: Option<&str>) -> (WidgetKind, Vec<Inter
 }
 
 /// State channel + shape, registered with the engine as a side effect so
-/// the channel shows up in `welcome` even before the first push.
+/// the channel shows up in `welcome` even before the first push. The
+/// legacy `extra` listener returns an empty key for display-mode tiles
+/// (status): the ai-dev producers push under the tile's type, mirroring
+/// the editor's `command || type` read, so fall back to the kind there.
 fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<StateRef> {
-    let key = legacy.get("extra").and_then(Value::as_str)?;
+    let mut key = legacy
+        .get("extra")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if key.is_empty() && row.mode == "status" {
+        key = row.kind.clone();
+    }
     if key.is_empty() {
         return None;
     }
@@ -198,7 +208,7 @@ fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<St
     } else {
         StateShape::Scalar
     };
-    let channel = ext_channel(key);
+    let channel = ext_channel(&key);
     engine.register(&channel, shape, None);
     Some(StateRef { channel, shape })
 }
@@ -430,6 +440,19 @@ mod tests {
                 .unwrap(),
             b"img-bytes"
         );
+    }
+
+    #[test]
+    fn status_display_tiles_watch_the_type_channel() {
+        // the ai-dev producers push under the tile type; a status tile
+        // with no command must still get its channel declared
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let tile = build_tile(&row("ai-plan-limits", "status", Some("")), &assets, &engine);
+        let state = tile.manifest.state.expect("type channel for status mode");
+        assert_eq!(state.channel, "ext.ai-plan-limits");
+        assert_eq!(state.shape, StateShape::Scalar);
+        assert_eq!(engine.catalog()["ext.ai-plan-limits"].shape, StateShape::Scalar);
     }
 
     fn asset_store() -> (AssetStore, tempfile::TempDir) {

@@ -93,6 +93,7 @@ fun Tile(
     series: SeriesWindow,
     channel: ChannelInfo? = null,
     items: TileItems,
+    status: StatusData? = null,
     image: ImageBitmap? = null,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
@@ -203,7 +204,13 @@ fun Tile(
                 "knob" -> KnobTile(tile, titleColor, iconColor, titleColor, onSlider)
                 "graph" -> GraphTile(tile, series, liveText, channel, titleColor)
                 "clock" -> ClockTile(tile, icon, iconFamily, titleColor)
-                "list" -> ListTile(tile, items, titleColor, onPress = onPressEnd)
+                "list" ->
+                    if (status != null) {
+                        // ai-dev status push: rows/compact/summary renderer
+                        StatusTile(tile, status, titleColor)
+                    } else {
+                        ListTile(tile, items, titleColor, onPress = onPressEnd)
+                    }
                 else -> ButtonTile(
                     tile = tile,
                     unicode = icon,
