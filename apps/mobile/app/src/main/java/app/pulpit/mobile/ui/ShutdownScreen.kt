@@ -3,7 +3,7 @@
 //! reconnects; the screen can also just doze (the Activity drops
 //! keep-screen-on while this is up).
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures

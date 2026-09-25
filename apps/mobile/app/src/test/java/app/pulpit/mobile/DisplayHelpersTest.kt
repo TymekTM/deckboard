@@ -1,4 +1,4 @@
-package app.deckboard.mobile.net
+package app.pulpit.mobile.net
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive

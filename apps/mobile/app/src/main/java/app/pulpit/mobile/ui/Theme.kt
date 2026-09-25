@@ -1,4 +1,4 @@
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme

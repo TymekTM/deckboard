@@ -2,7 +2,7 @@
 //! arrive resolved (hex colors, unicode glyphs, active-state pairs), the
 //! kind picks the template, unknown kinds degrade to a plain button.
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -47,10 +47,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.times
-import app.deckboard.mobile.R
-import app.deckboard.mobile.proto.ChannelInfo
-import app.deckboard.mobile.proto.Tile
-import app.deckboard.mobile.proto.V2
+import app.pulpit.mobile.R
+import app.pulpit.mobile.proto.ChannelInfo
+import app.pulpit.mobile.proto.Tile
+import app.pulpit.mobile.proto.V2
 import kotlinx.serialization.json.JsonElement
 
 val FaBrands = FontFamily(Font(R.font.fa_brands_400))

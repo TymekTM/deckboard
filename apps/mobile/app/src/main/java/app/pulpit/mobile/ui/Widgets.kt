@@ -2,7 +2,7 @@
 //! series ring buffer, knob, list, and the locally rendered clock (the
 //! tile announces itself via `params.widget = "clock"`).
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import android.content.Context
 import androidx.compose.foundation.Canvas
@@ -44,8 +44,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.deckboard.mobile.proto.ChannelInfo
-import app.deckboard.mobile.proto.Tile
+import app.pulpit.mobile.proto.ChannelInfo
+import app.pulpit.mobile.proto.Tile
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.abs
@@ -92,7 +92,7 @@ fun ClockTile(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val prefs = remember(tile.id) { context.getSharedPreferences("deckboard", Context.MODE_PRIVATE) }
+    val prefs = remember(tile.id) { context.getSharedPreferences("pulpit", Context.MODE_PRIVATE) }
     var style by remember(tile.id) {
         mutableStateOf(prefs.getString("clock_style_${tile.id}", "icon") ?: "icon")
     }

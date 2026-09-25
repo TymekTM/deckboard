@@ -1,4 +1,4 @@
-package app.deckboard.mobile
+package app.pulpit.mobile
 
 import android.content.BroadcastReceiver
 import android.content.Context

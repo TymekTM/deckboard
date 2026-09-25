@@ -1,8 +1,8 @@
-package app.deckboard.mobile.state
+package app.pulpit.mobile.state
 
-import app.deckboard.mobile.proto.Board
-import app.deckboard.mobile.proto.BoardOp
-import app.deckboard.mobile.proto.Tile
+import app.pulpit.mobile.proto.Board
+import app.pulpit.mobile.proto.BoardOp
+import app.pulpit.mobile.proto.Tile
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Test

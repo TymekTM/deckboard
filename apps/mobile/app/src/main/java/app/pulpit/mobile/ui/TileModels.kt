@@ -2,7 +2,7 @@
 //! collections as unstable, so an unchanged list would still recompose
 //! every tile on each state patch). Equality is by content.
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import androidx.compose.runtime.Immutable
 

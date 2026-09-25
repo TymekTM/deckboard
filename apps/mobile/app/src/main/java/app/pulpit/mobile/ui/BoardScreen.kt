@@ -3,7 +3,7 @@
 //! server's channels keyed by the tile's state channel; board switches
 //! arrive as `board.open` or via the floating chip.
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import android.os.Build
 
@@ -56,15 +56,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.deckboard.mobile.net.ConnState
-import app.deckboard.mobile.net.displayText
-import app.deckboard.mobile.net.isActiveValue
-import app.deckboard.mobile.proto.Board
-import app.deckboard.mobile.proto.V2
-import app.deckboard.mobile.state.DeckboardViewModel
+import app.pulpit.mobile.net.ConnState
+import app.pulpit.mobile.net.displayText
+import app.pulpit.mobile.net.isActiveValue
+import app.pulpit.mobile.proto.Board
+import app.pulpit.mobile.proto.V2
+import app.pulpit.mobile.state.PulpitViewModel
 
 @Composable
-fun BoardScreen(vm: DeckboardViewModel) {
+fun BoardScreen(vm: PulpitViewModel) {
     val board by vm.currentBoard.collectAsState()
     val conn by vm.connState.collectAsState()
     val boards by vm.boards.collectAsState()
@@ -147,7 +147,7 @@ private const val BASE_DIM = 0.35f
 private fun BoardSwitcher(
     board: Board?,
     boards: List<Board>,
-    vm: DeckboardViewModel,
+    vm: PulpitViewModel,
     modifier: Modifier = Modifier,
 ) {
     var settled by remember { mutableStateOf<Board?>(null) }
@@ -247,14 +247,14 @@ private fun statusFor(conn: ConnState, hasBoards: Boolean, attempt: Int): String
 
 /** Small translucent board switcher in the corner - replaces the top bar. */
 @Composable
-private fun BoardChip(vm: DeckboardViewModel) {
+private fun BoardChip(vm: PulpitViewModel) {
     val boards by vm.boards.collectAsState()
     val board by vm.currentBoard.collectAsState()
     var menuOpen by remember { mutableStateOf(false) }
 
     Box(Modifier.padding(10.dp)) {
         Text(
-            text = board?.name ?: "Deckboard",
+            text = board?.name ?: "Pulpit",
             fontSize = 12.sp,
             color = Color.White.copy(alpha = 0.75f),
             maxLines = 1,
@@ -280,7 +280,7 @@ private fun BoardChip(vm: DeckboardViewModel) {
 }
 
 @Composable
-private fun BoardGrid(vm: DeckboardViewModel, board: Board, modifier: Modifier) {
+private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
     val liveValues by vm.values.collectAsState()
     val series by vm.series.collectAsState()
     val channelMeta by vm.channelMeta.collectAsState()

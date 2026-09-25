@@ -3,7 +3,7 @@
 //! the one-time code the desktop prints next to its QR (POST /v2/pair)
 //! together with a name shown in the desktop's trust prompt.
 
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -29,11 +29,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import app.deckboard.mobile.net.ConnState
-import app.deckboard.mobile.state.DeckboardViewModel
+import app.pulpit.mobile.net.ConnState
+import app.pulpit.mobile.state.PulpitViewModel
 
 @Composable
-fun ConnectScreen(vm: DeckboardViewModel, onConnected: () -> Unit) {
+fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
     val cfg by vm.config.collectAsState()
     val conn by vm.connState.collectAsState()
 
@@ -52,7 +52,7 @@ fun ConnectScreen(vm: DeckboardViewModel, onConnected: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = "Deckboard",
+            text = "Pulpit",
             style = MaterialTheme.typography.headlineMedium,
             color = Color.White,
         )

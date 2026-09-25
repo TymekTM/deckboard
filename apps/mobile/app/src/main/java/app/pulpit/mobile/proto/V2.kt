@@ -10,7 +10,7 @@
 //! (placement + manifest are serde-flattened on the Rust side), which maps
 //! 1:1 onto a single data class here.
 
-package app.deckboard.mobile.proto
+package app.pulpit.mobile.proto
 
 import androidx.compose.runtime.Immutable
 import kotlinx.serialization.SerialName

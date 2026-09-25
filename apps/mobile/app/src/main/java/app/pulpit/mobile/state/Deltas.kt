@@ -2,10 +2,10 @@
 //! ops reshape the snapshot the server already sent. The ViewModel calls
 //! this and then decides which board stays selected.
 
-package app.deckboard.mobile.state
+package app.pulpit.mobile.state
 
-import app.deckboard.mobile.proto.Board
-import app.deckboard.mobile.proto.BoardOp
+import app.pulpit.mobile.proto.Board
+import app.pulpit.mobile.proto.BoardOp
 
 /** Apply [ops] to [boards]; unknown boards/tiles are ignored (the next
  *  full `boards.sync` re-synchronizes anyway). New boards append. */

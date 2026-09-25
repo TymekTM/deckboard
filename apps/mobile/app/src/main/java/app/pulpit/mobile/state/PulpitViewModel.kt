@@ -4,7 +4,7 @@
 //! gets a full snapshot from the server, so there is no client cache to
 //! invalidate.
 
-package app.deckboard.mobile.state
+package app.pulpit.mobile.state
 
 import android.app.Application
 import android.content.Context
@@ -13,14 +13,14 @@ import android.util.Log
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
-import app.deckboard.mobile.net.ConnState
-import app.deckboard.mobile.net.V2Client
-import app.deckboard.mobile.net.V2Event
-import app.deckboard.mobile.proto.Board
-import app.deckboard.mobile.proto.ChannelInfo
-import app.deckboard.mobile.proto.BoardOp
-import app.deckboard.mobile.proto.Tile
-import app.deckboard.mobile.proto.V2
+import app.pulpit.mobile.net.ConnState
+import app.pulpit.mobile.net.V2Client
+import app.pulpit.mobile.net.V2Event
+import app.pulpit.mobile.proto.Board
+import app.pulpit.mobile.proto.ChannelInfo
+import app.pulpit.mobile.proto.BoardOp
+import app.pulpit.mobile.proto.Tile
+import app.pulpit.mobile.proto.V2
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,11 +42,11 @@ data class ServerConfig(
     val token: String?,
 )
 
-class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
+class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     private val scope = CoroutineScope(Job())
 
-    private val prefs = app.getSharedPreferences("deckboard", Context.MODE_PRIVATE)
+    private val prefs = app.getSharedPreferences("pulpit", Context.MODE_PRIVATE)
 
     private val _config = MutableStateFlow(
         ServerConfig(
@@ -448,7 +448,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
-        private const val TAG = "DeckboardViewModel"
+        private const val TAG = "PulpitViewModel"
 
         private const val ASSET_RETRIES = 3
 

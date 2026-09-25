@@ -1,4 +1,4 @@
-package app.deckboard.mobile
+package app.pulpit.mobile
 
 import android.os.Bundle
 import android.view.WindowManager
@@ -11,11 +11,11 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
-import app.deckboard.mobile.state.DeckboardViewModel
-import app.deckboard.mobile.ui.BoardScreen
-import app.deckboard.mobile.ui.ConnectScreen
-import app.deckboard.mobile.ui.DeckboardTheme
-import app.deckboard.mobile.ui.ShutdownScreen
+import app.pulpit.mobile.state.PulpitViewModel
+import app.pulpit.mobile.ui.BoardScreen
+import app.pulpit.mobile.ui.ConnectScreen
+import app.pulpit.mobile.ui.DeckboardTheme
+import app.pulpit.mobile.ui.ShutdownScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -26,7 +26,7 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent {
             DeckboardTheme {
-                val vm: DeckboardViewModel = viewModel()
+                val vm: PulpitViewModel = viewModel()
                 val conn by vm.connState.collectAsState()
                 val boards by vm.boards.collectAsState()
                 val serverDown by vm.serverDown.collectAsState()
@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
 
                 if (serverDown) {
                     ShutdownScreen(onTap = vm::reconnectFromShutdown)
-                } else if (conn is app.deckboard.mobile.net.ConnState.Connected || boards.isNotEmpty()) {
+                } else if (conn is app.pulpit.mobile.net.ConnState.Connected || boards.isNotEmpty()) {
                     // With a snapshot on screen the deck stays up while the
                     // link is down (BoardScreen shows the retrying banner);
                     // the connect screen only owns the no-data states.

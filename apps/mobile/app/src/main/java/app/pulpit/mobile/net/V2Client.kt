@@ -4,22 +4,22 @@
 //! (OkHttp does automatically) and closes when the server is silent for
 //! longer than the watchdog window - reconnection is the caller's job.
 
-package app.deckboard.mobile.net
+package app.pulpit.mobile.net
 
 import android.util.Log
-import app.deckboard.mobile.proto.BoardsDelta
-import app.deckboard.mobile.proto.BoardsSync
-import app.deckboard.mobile.proto.BoardOp
-import app.deckboard.mobile.proto.BoardOpen
-import app.deckboard.mobile.proto.ChannelValue
-import app.deckboard.mobile.proto.ErrorPayload
-import app.deckboard.mobile.proto.Frame
-import app.deckboard.mobile.proto.Hello
-import app.deckboard.mobile.proto.InteractionArgs
-import app.deckboard.mobile.proto.InteractionPayload
-import app.deckboard.mobile.proto.StateSync
-import app.deckboard.mobile.proto.V2
-import app.deckboard.mobile.proto.Welcome
+import app.pulpit.mobile.proto.BoardsDelta
+import app.pulpit.mobile.proto.BoardsSync
+import app.pulpit.mobile.proto.BoardOp
+import app.pulpit.mobile.proto.BoardOpen
+import app.pulpit.mobile.proto.ChannelValue
+import app.pulpit.mobile.proto.ErrorPayload
+import app.pulpit.mobile.proto.Frame
+import app.pulpit.mobile.proto.Hello
+import app.pulpit.mobile.proto.InteractionArgs
+import app.pulpit.mobile.proto.InteractionPayload
+import app.pulpit.mobile.proto.StateSync
+import app.pulpit.mobile.proto.V2
+import app.pulpit.mobile.proto.Welcome
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.json.Json
@@ -54,7 +54,7 @@ sealed class V2Event {
         /** Non-null only right after pairing: store it. */
         val issuedToken: String?,
     ) : V2Event()
-    data class Boards(val generation: Long, val boards: List<app.deckboard.mobile.proto.Board>) : V2Event()
+    data class Boards(val generation: Long, val boards: List<app.pulpit.mobile.proto.Board>) : V2Event()
     data class Delta(val generation: Long, val ops: List<BoardOp>) : V2Event()
     data class SwitchBoard(val boardId: Long) : V2Event()
     data class State(
@@ -245,7 +245,7 @@ class V2Client(
             }
             V2.TYPE_STATE_PATCH -> {
                 val patch = json.decodeFromJsonElement(
-                    app.deckboard.mobile.proto.StatePatch.serializer(),
+                    app.pulpit.mobile.proto.StatePatch.serializer(),
                     payload,
                 )
                 _events.trySend(V2Event.Patch(patch.changes))
@@ -283,7 +283,7 @@ class V2Client(
             // docs/protocol-v2.md §7 - no app frames).
             .pingInterval(KEEPALIVE_SECONDS, TimeUnit.SECONDS)
             .build()
-        const val CLIENT = "deckboard-mobile"
+        const val CLIENT = "pulpit-mobile"
         const val VERSION = "0.2.0"
         /** OkHttp ping interval; a missing pong fails the socket. */
         const val KEEPALIVE_SECONDS = 30L

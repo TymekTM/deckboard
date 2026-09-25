@@ -1,4 +1,4 @@
-package app.deckboard.mobile.ui
+package app.pulpit.mobile.ui
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
