@@ -171,3 +171,16 @@ fn interaction() {
     assert_eq!(i.interaction, Interaction::Slide);
     assert_eq!(i.args.value, Some(0.5));
 }
+
+#[test]
+fn server_shutdown() {
+    // A pure control push: no id/ack and an empty payload object - there
+    // is no typed message to pin, so round-trip the envelope itself.
+    let (frame, raw) = fixture("server.shutdown");
+    assert_eq!(frame.kind, TYPE_SERVER_SHUTDOWN);
+    assert_eq!(frame.id, None);
+    assert_eq!(frame.ack, None);
+    let round: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
+    assert_eq!(round, raw);
+}

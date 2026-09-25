@@ -31,7 +31,7 @@ class ProtoFixturesTest {
     @Test
     fun envelopeCarriesProtocolVersion() {
         for (name in listOf("hello", "welcome", "error", "boards.sync", "boards.delta",
-                "board.open", "state.sync", "state.patch", "interaction")) {
+                "board.open", "state.sync", "state.patch", "interaction", "server.shutdown")) {
             val frame = fixture("$name.json")
             assertEquals("fixture $name", 2, frame.v)
             assertTrue("fixture $name", frame.type.isNotEmpty())

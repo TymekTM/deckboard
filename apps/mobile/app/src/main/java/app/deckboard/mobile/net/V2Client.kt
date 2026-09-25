@@ -190,18 +190,21 @@ class V2Client(
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.i(TAG, "closed: $reason")
-            // Our own close after `server.shutdown` must not downgrade the
-            // terminal state back to a retryable disconnect.
-            if (_state.value !is ConnState.ServerDown) {
-                _state.value = ConnState.Disconnected
-            }
+            setStateUnlessServerDown(ConnState.Disconnected)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.w(TAG, "failure: ${t.message}")
-            if (_state.value !is ConnState.ServerDown) {
-                _state.value = ConnState.Failed(t.message ?: "connection failed")
-            }
+            setStateUnlessServerDown(ConnState.Failed(t.message ?: "connection failed"))
+        }
+    }
+
+    /** The terminal `ServerDown` state survives the close or failure that
+     *  follows it: the socket going away is the expected aftermath of the
+     *  goodbye, not a retryable drop. */
+    private fun setStateUnlessServerDown(state: ConnState) {
+        if (_state.value !is ConnState.ServerDown) {
+            _state.value = state
         }
     }
 
@@ -247,7 +250,6 @@ class V2Client(
                 )
                 _events.trySend(V2Event.Patch(patch.changes))
             }
-            V2.TYPE_SERVER_SHUTDOWN -> onServerShutdown()
             V2.TYPE_ERROR -> {
                 val error = json.decodeFromJsonElement(ErrorPayload.serializer(), payload)
                 Log.w(TAG, "server error: ${error.code} ${error.message.orEmpty()}")

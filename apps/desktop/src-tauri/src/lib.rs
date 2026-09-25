@@ -474,6 +474,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
 
 // ---- tray + hotkey ---------------------------------------------------------
 
+/// How long the goodbye waits for the session pumps to put the frame and
+/// the WS close on the wire before the process exits.
+const SHUTDOWN_FLUSH_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Tells connected v2 tablets this exit is deliberate (docs/protocol-v2.md
 /// §9): one `server.shutdown` frame per session, then a WS close. Without
 /// it a quit looks like a network drop and tablets retry into the void.
@@ -495,7 +499,7 @@ fn goodbye_v2(app: &AppHandle) {
     ));
     // The session pumps write the frame + close asynchronously; give them
     // a beat before `exit` tears the process down.
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(SHUTDOWN_FLUSH_GRACE);
 }
 
 /// The main window is built here instead of `tauri.conf.json` because the

@@ -390,6 +390,9 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
         _reconnectAttempt.value = reconnectAttempts
         scope.launch {
             delay(reconnectAttempts.coerceAtMost(6) * 2_000L)
+            // A retry scheduled just before the goodbye arrived must not
+            // fire into standby; the probe owns reconnecting from there.
+            if (_serverDown.value) return@launch
             val st = _connState.value
             if (st is ConnState.Failed || st is ConnState.Disconnected) {
                 Log.i(TAG, "reconnect attempt $reconnectAttempts")
