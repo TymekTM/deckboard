@@ -313,12 +313,27 @@ pub fn quota() -> Option<Quota> {
     None
 }
 
+/// Console probes run on every producer tick; without CREATE_NO_WINDOW
+/// each tasklist/netstat pops a visible cmd window on the desktop (see
+/// the matching flag in pulpit_ext's shell_command).
+#[cfg(windows)]
+fn quiet(mut c: std::process::Command) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    c
+}
+
+#[cfg(not(windows))]
+fn quiet(c: std::process::Command) -> std::process::Command {
+    c
+}
+
 fn ide_ports() -> Vec<u16> {
     let pids = antigravity_pids();
     if pids.is_empty() {
         return Vec::new();
     }
-    let output = std::process::Command::new("netstat")
+    let output = quiet(std::process::Command::new("netstat"))
         .args(["-ano"])
         .output();
     let Ok(output) = output else {
@@ -346,7 +361,7 @@ fn ide_ports() -> Vec<u16> {
 
 #[cfg(windows)]
 fn antigravity_pids() -> Vec<u32> {
-    let output = std::process::Command::new("tasklist")
+    let output = quiet(std::process::Command::new("tasklist"))
         .args(["/FO", "CSV", "/NH"])
         .output();
     let Ok(output) = output else {
