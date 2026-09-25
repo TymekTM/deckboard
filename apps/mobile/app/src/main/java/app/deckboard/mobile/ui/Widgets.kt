@@ -286,6 +286,22 @@ private fun liveFromSeries(history: SeriesWindow): String? {
  *  per bucket so small tiles stay readable. */
 private const val MAX_DRAWN_POINTS = 40
 
+/** Drag events fire hundreds of times per gesture and every slide send is
+ *  a websocket round-trip the server executes - ship at most one value
+ *  per [throttleMs], plus the final one on release ([push] with
+ *  `force = true`). One instance per tile, remembered alongside it. */
+class SlideThrottle(private val throttleMs: Long = 30) {
+    private var lastSentAt = 0L
+
+    fun push(value: Float, force: Boolean = false, send: (Float) -> Unit) {
+        val now = System.currentTimeMillis()
+        if (force || now - lastSentAt >= throttleMs) {
+            lastSentAt = now
+            send(value)
+        }
+    }
+}
+
 /** Bucket-average [history] down to at most [max] points (keeps shape,
  *  drops jitter). A no-op when the window already fits. */
 internal fun downsample(history: List<Double>, max: Int): List<Double> {
@@ -312,6 +328,7 @@ fun KnobTile(
     modifier: Modifier = Modifier,
 ) {
     var value by remember(tile.id) { mutableFloatStateOf(0.5f) }
+    val slide = remember(tile.id) { SlideThrottle() }
     val arcColor = tile.style?.color2?.let { hex(it, titleColor) } ?: titleColor
 
     Box(
@@ -335,8 +352,13 @@ fun KnobTile(
                         val scaled = if (radius < dead) value else clamped
                         if (scaled != value) {
                             value = scaled
-                            onSlider(value)
+                            slide.push(value, send = onSlider)
                         }
+                    },
+                    onDragEnd = {
+                        // converge: the last sampled value always reaches
+                        // the server, throttling only smooths the path
+                        slide.push(value, force = true, send = onSlider)
                     },
                 )
             },

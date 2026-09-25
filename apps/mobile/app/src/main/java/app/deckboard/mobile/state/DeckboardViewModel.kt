@@ -108,6 +108,11 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
     private var eventJob: Job? = null
     private var reconnectAttempts = 0
 
+    /** One pending reconnect per connect cycle: Failed and Disconnected
+     *  arrive back to back, and each state flip would otherwise schedule
+     *  a duplicate timer (double-counting the attempt budget). */
+    private var reconnectScheduled = false
+
     /** Set while a pairing is in flight (no token yet). */
     private var pendingPairCode: String? = null
 
@@ -218,6 +223,7 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun openClient(token: String?, pairCode: String?) {
         disconnect()
+        reconnectScheduled = false
         val cfg = _config.value
         val c = V2Client(cfg.host, cfg.port, token, pairCode, cfg.name)
         client = c
@@ -391,10 +397,13 @@ class DeckboardViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
+        if (reconnectScheduled) return
+        reconnectScheduled = true
         reconnectAttempts++
         _reconnectAttempt.value = reconnectAttempts
         scope.launch {
             delay(reconnectAttempts.coerceAtMost(6) * 2_000L)
+            reconnectScheduled = false
             // A retry scheduled just before the goodbye arrived must not
             // fire into standby; the probe owns reconnecting from there.
             if (_serverDown.value) return@launch

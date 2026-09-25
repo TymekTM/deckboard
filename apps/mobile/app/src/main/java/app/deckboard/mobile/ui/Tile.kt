@@ -314,6 +314,7 @@ private fun SliderTile(
     onSlider: (Float) -> Unit,
 ) {
     var value by remember(tile.id) { mutableFloatStateOf(0.5f) }
+    val slide = remember(tile.id) { SlideThrottle() }
     val fill = tile.style?.color2?.let { hex(it, baseColor.copy(alpha = 0.6f)) }
         ?: baseColor.copy(alpha = 0.55f)
 
@@ -324,12 +325,17 @@ private fun SliderTile(
                 detectDragGestures(
                     onDragStart = { offset ->
                         value = (1f - offset.y / size.height).coerceIn(0f, 1f)
-                        onSlider(value)
+                        slide.push(value, force = true, send = onSlider)
                     },
                     onDrag = { change, _ ->
                         change.consume()
                         value = (1f - change.position.y / size.height).coerceIn(0f, 1f)
-                        onSlider(value)
+                        slide.push(value, send = onSlider)
+                    },
+                    onDragEnd = {
+                        // converge: the last sampled value always reaches
+                        // the server, throttling only smooths the path
+                        slide.push(value, force = true, send = onSlider)
                     },
                 )
             },
