@@ -234,6 +234,27 @@ impl V2State {
         generation
     }
 
+    /// `tile-set` op for one committed tile write, built from the
+    /// post-commit DB row. `None` when the row is already gone (delete).
+    pub fn tile_set_op(&self, board_id: i64, tile_id: i64) -> Option<pulpit_proto::BoardOp> {
+        let row = self.backend.get_button(tile_id)?;
+        Some(pulpit_proto::BoardOp::TileSet {
+            board: board_id,
+            tile: crate::boards::build_tile(&row, &self.assets, &self.engine),
+        })
+    }
+
+    /// `board-set` op for one committed board write (create, rename,
+    /// resize, background), with its current tiles. `None` when the board
+    /// is already gone.
+    pub fn board_set_op(&self, board_id: i64) -> Option<pulpit_proto::BoardOp> {
+        let board = self.backend.get_board(board_id)?;
+        let buttons = self.backend.get_buttons_by_board(board_id);
+        Some(pulpit_proto::BoardOp::BoardSet {
+            board: crate::boards::build_board(&board, &buttons, &self.assets, &self.engine),
+        })
+    }
+
     /// The `boards.sync` frame for the current generation, built off the
     /// async workers. Serves from the per-generation cache when no board
     /// write happened since the last build (the common reconnect case).

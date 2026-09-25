@@ -22,8 +22,10 @@ struct DesktopState {
     /// Protocol v2 pairing codes; `None` when the v2 stack failed to start
     /// (bad devices.json or asset store) - the UI then hides pairing.
     pairing: Option<Arc<pulpit_v2::Pairing>>,
-    /// Protocol v2 session fan-out; receives the shutdown goodbye on quit.
-    v2_hub: Option<Arc<pulpit_v2::V2Hub>>,
+    /// Protocol v2 state; `None` when the stack failed to start. Carries
+    /// the session fan-out for the shutdown goodbye and the delta
+    /// publisher the editor's write path notifies after each commit.
+    v2: Option<Arc<pulpit_v2::V2State>>,
     /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
     hotkey: std::sync::Mutex<String>,
     /// `pulpitApp/editor.json` - editor-local settings (hotkey), kept
@@ -42,6 +44,34 @@ impl DesktopState {
         self.broadcaster
             .as_ref()
             .ok_or_else(|| "database unavailable".into())
+    }
+
+    /// Broadcasts one committed editor write to the v2 tablets as a
+    /// `boards.delta`. No-op when the v2 stack is unavailable. The ops are
+    /// built from the post-commit DB state, so tablets never see a stale
+    /// tile.
+    fn publish_v2(&self, ops: Vec<pulpit_proto::BoardOp>) {
+        if let Some(v2) = self.v2.as_ref() {
+            v2.publish_delta(ops);
+        }
+    }
+
+    /// Delta after a tile add/update/move: the full post-commit tile.
+    fn publish_tile_set(&self, board_id: i64, tile_id: i64) {
+        if let Some(v2) = self.v2.as_ref() {
+            if let Some(op) = v2.tile_set_op(board_id, tile_id) {
+                self.publish_v2(vec![op]);
+            }
+        }
+    }
+
+    /// Delta after a board create/update: the full post-commit board.
+    fn publish_board_set(&self, board_id: i64) {
+        if let Some(v2) = self.v2.as_ref() {
+            if let Some(op) = v2.board_set_op(board_id) {
+                self.publish_v2(vec![op]);
+            }
+        }
     }
 }
 
@@ -256,7 +286,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             ext: None,
             port,
             pairing: None,
-            v2_hub: None,
+            v2: None,
             hotkey: std::sync::Mutex::new("Ctrl+Alt+D".to_string()),
             settings_path: None,
         };
@@ -620,7 +650,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         ext: Some(ext_manager),
         port,
         pairing: v2.as_ref().map(|v| v.pairing.clone()),
-        v2_hub: v2.as_ref().map(|v| v.hub.clone()),
+        v2: v2.clone(),
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
     }
@@ -720,7 +750,7 @@ fn goodbye_v2(app: &AppHandle) {
     }
     let Some(hub) = app
         .try_state::<DesktopState>()
-        .and_then(|state| state.v2_hub.clone())
+        .and_then(|state| state.v2.as_ref().map(|v2| v2.hub.clone()))
     else {
         return;
     };
@@ -1130,6 +1160,7 @@ async fn create_board(
         .create_board(&name, &background, width, height)
         .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
+    state.publish_board_set(id);
     Ok(id)
 }
 
@@ -1138,6 +1169,7 @@ async fn update_board(state: State<'_, DesktopState>, board: BoardRow) -> Result
     let backend = state.backend()?;
     backend.update_board(&board).map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
+    state.publish_board_set(board.id);
     Ok(())
 }
 
@@ -1146,6 +1178,7 @@ async fn delete_board(state: State<'_, DesktopState>, board_id: i64) -> Result<(
     let backend = state.backend()?;
     backend.delete_board(board_id).map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
+    state.publish_v2(vec![pulpit_proto::BoardOp::BoardRemove { board: board_id }]);
     Ok(())
 }
 
@@ -1163,6 +1196,7 @@ async fn create_button(
         .create_button(board_id, &kind, &mode, x, y)
         .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
+    state.publish_tile_set(board_id, id);
     Ok(id)
 }
 
@@ -1170,8 +1204,10 @@ async fn create_button(
 async fn update_button(state: State<'_, DesktopState>, button: ButtonRow) -> Result<(), String> {
     let backend = state.backend()?;
     let board_id = button.board_id;
+    let tile_id = button.id;
     backend.update_button(&button).map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
+    state.publish_tile_set(board_id, tile_id);
     Ok(())
 }
 
@@ -1190,6 +1226,7 @@ async fn move_button(
         .move_button(id, x, y, w, h)
         .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
+    state.publish_tile_set(board_id, id);
     Ok(())
 }
 
@@ -1202,6 +1239,10 @@ async fn delete_button(
     let backend = state.backend()?;
     backend.delete_button(id).map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
+    state.publish_v2(vec![pulpit_proto::BoardOp::TileRemove {
+        board: board_id,
+        tile: id,
+    }]);
     Ok(())
 }
 
@@ -1210,6 +1251,7 @@ async fn clear_board(state: State<'_, DesktopState>, board_id: i64) -> Result<()
     let backend = state.backend()?;
     backend.clear_board(board_id).map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
+    state.publish_v2(vec![pulpit_proto::BoardOp::TileClear { board: board_id }]);
     Ok(())
 }
 
@@ -1335,5 +1377,8 @@ async fn import_boards(state: State<'_, DesktopState>, path: String) -> Result<V
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
+    for id in ids.iter().copied() {
+        state.publish_board_set(id);
+    }
     Ok(ids)
 }

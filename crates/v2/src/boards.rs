@@ -28,25 +28,31 @@ pub fn build_boards(
         .get_boards()
         .iter()
         .map(|board| {
-            let tiles = buttons
-                .get(&board.id)
-                .map(|rows| {
-                    rows.iter()
-                        .map(|row| build_tile(row, assets, engine))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Board {
-                id: board.id,
-                name: board.name.clone(),
-                width: board.width.max(1) as u32,
-                height: board.height.max(1) as u32,
-                order: board.order.max(0) as u32,
-                background: board_background(board, assets),
-                tiles,
-            }
+            let rows = buttons.get(&board.id);
+            build_board(board, rows.map(Vec::as_slice).unwrap_or(&[]), assets, engine)
         })
         .collect()
+}
+
+/// One board row plus its shortcuts -> one protocol board.
+pub fn build_board(
+    board: &BoardRow,
+    buttons: &[ButtonRow],
+    assets: &AssetStore,
+    engine: &StateEngine,
+) -> Board {
+    Board {
+        id: board.id,
+        name: board.name.clone(),
+        width: board.width.max(1) as u32,
+        height: board.height.max(1) as u32,
+        order: board.order.max(0) as u32,
+        background: board_background(board, assets),
+        tiles: buttons
+            .iter()
+            .map(|row| build_tile(row, assets, engine))
+            .collect(),
+    }
 }
 
 fn board_background(board: &BoardRow, assets: &AssetStore) -> Option<pulpit_proto::Background> {
