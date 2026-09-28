@@ -7,6 +7,7 @@ import { CATALOG } from "./catalog";
 import GridEditor from "./components/GridEditor.vue";
 import EditTileModal from "./components/EditTileModal.vue";
 import BoardModal from "./components/BoardModal.vue";
+import SettingsOverlay from "./components/SettingsOverlay.vue";
 
 const boards = ref([]);
 const currentId = ref(null);
@@ -15,10 +16,6 @@ const touchMode = ref(false);
 const touchBoardId = ref(null);
 const knownInputs = ref([]);
 const audioDevices = ref([]);
-const lanAddresses = ref([]); // {name, ipv4, qr} - "Connect a tablet" popover
-const activeAddress = ref(0);
-const pairMode = ref("legacy"); // 'legacy' (stock client) | 'v2' (new client)
-const pairingOffer = ref(null); // {code, expires_in_secs, addresses} | null
 
 // Live state mirrors of the original client: customValues holds pushed
 // values (APP_CUSTOM_VALUE), appStates per-integration status (APP_OBS...).
@@ -151,11 +148,7 @@ const typeMeta = computed(() => {
   return map;
 });
 
-const hotkey = ref("Ctrl+Alt+D");
-const hotkeyDraft = ref("");
-const hotkeyError = ref("");
-const editingHotkey = ref(false);
-const autostart = ref(false);
+const settingsOpen = ref(false);
 
 // custom right-click context menu, replacing the WebView2 default menu
 // everywhere: {x, y, items: [{label, icon, danger, run}]}
@@ -321,7 +314,6 @@ const boardNames = computed(() =>
 // and listBoards ships every board with its base64 images).
 async function loadCore() {
   status.value = await api.serverStatus();
-  hotkey.value = (await api.getSettings()).hotkey;
   knownInputs.value = await api.listKnownInputs();
   audioDevices.value = await api.listAudioDevices().catch(() => []);
 }
@@ -342,38 +334,10 @@ async function load() {
   await loadBoards();
 }
 
-// Open (or close) the server-status popover; on open, refresh the LAN
-// addresses so the tablet pairing QR never shows a stale interface.
+// Open (or close) the server-status popover; pairing itself lives in the
+// settings overlay, the popover only hands off to it.
 function toggleStatusPopover() {
-  const opening = railPopover.value !== "status";
-  railPopover.value = opening ? "status" : null;
-  if (opening) {
-    activeAddress.value = 0;
-    api
-      .listLanAddresses()
-      .then((a) => (lanAddresses.value = a))
-      .catch(() => (lanAddresses.value = []));
-  }
-}
-
-function refreshLanAddresses() {
-  api
-    .listLanAddresses()
-    .then((a) => {
-      lanAddresses.value = a;
-      activeAddress.value = 0;
-    })
-    .catch(() => {});
-}
-
-// Mint a one-time pairing code for the new (protocol v2) client; codes
-// live 5 minutes and are burned on first use.
-async function generatePairingCode() {
-  try {
-    pairingOffer.value = await api.createPairingCode();
-  } catch (e) {
-    console.error("pairing code", e);
-  }
+  railPopover.value = railPopover.value === "status" ? null : "status";
 }
 
 async function newBoard() {
@@ -484,27 +448,6 @@ async function deleteCurrentBoard() {
   await loadBoards();
 }
 
-async function saveHotkey() {
-  const combo = hotkeyDraft.value.trim();
-  try {
-    await api.setHotkey(combo);
-    hotkey.value = combo;
-    hotkeyError.value = "";
-    editingHotkey.value = false;
-  } catch (e) {
-    hotkeyError.value = String(e);
-  }
-}
-
-async function toggleAutostart() {
-  autostart.value = !autostart.value;
-  try {
-    await api.setAutostart(autostart.value);
-  } catch {
-    autostart.value = !autostart.value;
-  }
-}
-
 function toggleTouch() {
   touchBoardId.value = touchMode.value ? touchBoardId.value : currentId.value;
   touchMode.value = !touchMode.value;
@@ -517,7 +460,6 @@ function bumpZoom(dir) {
 let unlisteners = [];
 onMounted(async () => {
   await load();
-  autostart.value = await api.getAutostart();
   unlisteners.push(
     await listen("toggle-touch-mode", toggleTouch),
     await listen("change-board", (e) => {
@@ -591,133 +533,24 @@ function onKeydown(event) {
             <div class="pop-row tnum">{{ status.clients }} client(s) connected</div>
             <template v-if="status.dbOk">
               <div class="pop-sep"></div>
-              <div class="pop-label">Connect a tablet (same Wi-Fi/LAN)</div>
-              <div class="pair-tabs">
-                <button
-                  class="pair-tab"
-                  :class="{ on: pairMode === 'legacy' }"
-                  @click="pairMode = 'legacy'"
-                >Stock client</button>
-                <button
-                  class="pair-tab"
-                  :class="{ on: pairMode === 'v2' }"
-                  @click="pairMode = 'v2'"
-                >New client (v2)</button>
-              </div>
-
-              <template v-if="pairMode === 'legacy'">
-                <template v-if="lanAddresses.length">
-                  <div class="lan-row">
-                    <img
-                      class="lan-qr"
-                      :src="lanAddresses[activeAddress]?.qr"
-                      alt="QR code with the desktop IP address"
-                    />
-                    <div class="lan-list">
-                      <button
-                        v-for="(a, i) in lanAddresses"
-                        :key="a.ipv4"
-                        class="lan-addr"
-                        :class="{ sel: i === activeAddress }"
-                        @click="activeAddress = i"
-                      >
-                        <span class="lan-ip tnum">{{ a.ipv4 }}:{{ status.port }}</span>
-                        <span class="lan-name">{{ a.name }}</span>
-                      </button>
-                      <button class="mini" @click="refreshLanAddresses">
-                        <i class="fas fa-sync-alt"></i> Refresh
-                      </button>
-                    </div>
-                  </div>
-                  <div class="pop-row muted">
-                    Scan the QR in the Deckboard app, or type the address.
-                  </div>
-                </template>
-                <div v-else class="pop-row muted">
-                  Not connected to any local network.
-                </div>
-              </template>
-
-              <template v-else>
-                <div v-if="!pairingOffer" class="pair-empty">
-                  <button class="mini accent" @click="generatePairingCode">
-                    <i class="fas fa-key"></i> Generate pairing code
-                  </button>
-                  <div class="pop-row muted">One-time code, valid 5 minutes.</div>
-                </div>
-                <template v-else>
-                  <div class="lan-row">
-                    <img
-                      class="lan-qr"
-                      :src="pairingOffer.addresses[activeAddress % pairingOffer.addresses.length]?.qr"
-                      alt="QR code with the pairing payload"
-                    />
-                    <div class="lan-list">
-                      <div class="pair-code tnum">{{ pairingOffer.code }}</div>
-                      <div class="lan-name">valid {{ Math.round(pairingOffer.expires_in_secs / 60) }} min, one device</div>
-                      <button class="mini" @click="generatePairingCode">
-                        <i class="fas fa-sync-alt"></i> New code
-                      </button>
-                    </div>
-                  </div>
-                  <div class="pop-row muted">
-                    Scan the QR in the new Pulpit client, or enter the code
-                    with the address {{ pairingOffer.addresses[0]?.ipv4 }}.
-                  </div>
-                </template>
-              </template>
+              <button
+                class="mini accent"
+                @click="railPopover = null; settingsOpen = true"
+              >
+                <i class="fas fa-cog"></i> Ustawienia i parowanie tabletów
+              </button>
             </template>
           </div>
         </Transition>
       </div>
 
-      <div class="rail-anchor">
-        <button
-          class="rail-btn"
-          :class="{ on: railPopover === 'settings' }"
-          title="Settings"
-          @click="railPopover = railPopover === 'settings' ? null : 'settings'"
-        >
-          <i class="fas fa-cog"></i>
-        </button>
-        <Transition name="pop">
-          <div v-if="railPopover === 'settings'" class="rail-pop">
-            <div class="pop-label">Touch mode hotkey</div>
-            <template v-if="!editingHotkey">
-              <div class="pop-row hotkey-row">
-                <kbd class="combo">{{ hotkey }}</kbd>
-                <button
-                  class="mini"
-                  :disabled="!status.dbOk"
-                  @click="editingHotkey = true; hotkeyDraft = hotkey"
-                >Edit</button>
-              </div>
-            </template>
-            <template v-else>
-              <div class="pop-row">
-                <input
-                  v-model="hotkeyDraft"
-                  class="hotkey-input"
-                  placeholder="Ctrl+Alt+D"
-                  @keyup.enter="saveHotkey"
-                />
-                <button class="mini accent" @click="saveHotkey">Set</button>
-                <button class="mini" @click="editingHotkey = false">Cancel</button>
-              </div>
-              <div v-if="hotkeyError" class="pop-error">{{ hotkeyError }}</div>
-            </template>
-
-            <label class="pop-check">
-              <input type="checkbox" :checked="autostart" @change="toggleAutostart" />
-              Launch at startup
-            </label>
-
-            <div class="pop-row muted tnum">
-              Editor v{{ status.version || "0.1.1" }}
-            </div>
-          </div>
-        </Transition>
-      </div>
+      <button
+        class="rail-btn"
+        title="Ustawienia"
+        @click="settingsOpen = true"
+      >
+        <i class="fas fa-cog"></i>
+      </button>
 
       <div class="rail-spacer"></div>
 
@@ -892,6 +725,14 @@ function onKeydown(event) {
       />
     </Transition>
 
+    <Transition name="modal">
+      <SettingsOverlay
+        v-if="settingsOpen"
+        :status="status"
+        @close="settingsOpen = false"
+      />
+    </Transition>
+
     <!-- custom right-click menu, shown anywhere via the context handlers -->
     <div
       v-if="contextMenu"
@@ -1011,73 +852,7 @@ function onKeydown(event) {
 .pop-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13.5px; }
 .pop-row.strong { font-weight: 500; }
 .pop-row.muted { color: var(--modal-muted); font-size: 12.5px; margin-top: 6px; }
-.pop-label { font-size: 12px; color: var(--modal-muted); margin-bottom: 2px; }
 .pop-sep { border-top: 1px solid var(--modal-line); margin: 8px 0; }
-.lan-row { display: flex; gap: 10px; align-items: flex-start; margin-top: 4px; }
-.lan-qr {
-  width: 96px;
-  height: 96px;
-  flex: none;
-  border-radius: 4px;
-  background: #fff;
-}
-.lan-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.lan-addr {
-  text-align: left;
-  padding: 3px 6px;
-  border-radius: 4px;
-  display: flex;
-  flex-direction: column;
-  transition: background 120ms ease-out;
-}
-.lan-addr:hover { background: var(--modal-field); }
-.lan-addr.sel { background: var(--modal-field); }
-.lan-ip { font-size: 13px; }
-.lan-addr.sel .lan-ip { font-weight: 700; }
-.lan-name {
-  font-size: 11.5px;
-  color: var(--modal-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.pair-tabs { display: flex; gap: 4px; margin: 2px 0 6px; }
-.pair-tab {
-  font-size: 12px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  color: var(--modal-muted);
-  background: transparent;
-  transition: background 120ms ease-out, color 120ms ease-out;
-}
-.pair-tab:hover { background: var(--modal-field); }
-.pair-tab.on { background: var(--modal-field); color: var(--modal-text); font-weight: 500; }
-.pair-empty { display: flex; flex-direction: column; gap: 2px; }
-.pair-code {
-  font-size: 21px;
-  font-weight: 700;
-  letter-spacing: 2px;
-  line-height: 1.1;
-}
-.pop-error { font-size: 12px; color: var(--danger); padding-top: 4px; overflow-wrap: anywhere; }
-.hotkey-row { justify-content: space-between; }
-.hotkey-input { flex: 1; min-width: 0; padding: 5px 8px; font-size: 13px; }
-.combo {
-  font-size: 12.5px;
-  background: var(--modal-field);
-  border: 1px solid var(--modal-line);
-  border-radius: 4px;
-  padding: 3px 8px;
-}
-.pop-check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13.5px;
-  padding: 8px 0 2px;
-  cursor: pointer;
-}
-.pop-check input { width: auto; }
 .mini {
   font-size: 12.5px;
   padding: 5px 10px;
