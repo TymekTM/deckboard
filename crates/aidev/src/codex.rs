@@ -116,6 +116,9 @@ pub struct Limits {
 pub struct RateLimit {
     pub used_percent: f64,
     pub window_minutes: u64,
+    /// Unix epoch seconds when the window resets; rollout events spell it
+    /// `resets_at`, the wham/usage API `reset_at`.
+    pub resets_at: Option<i64>,
 }
 
 impl RateLimit {
@@ -210,12 +213,17 @@ fn parse_limits(rl: &serde_json::Value) -> Option<Limits> {
     let window = |key: &str| {
         let w = rl.get(key)?;
         let used_percent = w.get("used_percent")?.as_f64()?;
+        let resets_at = w
+            .get("resets_at")
+            .or_else(|| w.get("reset_at"))
+            .and_then(|x| x.as_i64());
         Some(RateLimit {
             used_percent,
             window_minutes: w
                 .get("window_minutes")
                 .and_then(|x| x.as_u64())
                 .unwrap_or(0),
+            resets_at,
         })
     };
     Some(Limits {
@@ -318,6 +326,7 @@ mod tests {
         let primary = limits.primary.expect("primary window");
         assert_eq!(primary.used_percent, 59.0);
         assert_eq!(primary.window_label(), "30d");
+        assert_eq!(primary.resets_at, Some(1_790_000_000));
         assert!(limits.secondary.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -6,7 +6,7 @@ agent progress and token burn. Ships four catalog entries under
 
 | Tile | Mode | Shows |
 |---|---|---|
-| `ai-plan-limits` | `status` | One bar row per provider window (5h, week): fill and value are the usage percentage, colored by threshold |
+| `ai-plan-limits` | `status` | One bar row per provider window (5h, week): fill is the usage percentage, the value says how much is left and - when the source reports it - when the window resets |
 | `ai-agent-status` | `status` | Active agents grouped by project: provider glyph, session title, state |
 | `ai-tokens-today` | `graph` | Sparkline of tokens consumed today, all providers combined |
 | `ai-tokens-hour` | `graph` | Rolling last-60-minutes window, refreshed with every poll (~15 s); a tap flips it to the per-provider breakdown |
@@ -43,23 +43,50 @@ not accepted there and Codex usage is subscription-based.
 
 ## Plan-limit bars
 
-Every window renders as its own row: label (`GLM 5h`), value (`34%`) and
-a thin bar whose fill is that percentage, colored by the threshold
-palette (green ok, amber over 60%, red over 85%). Percentage is the one
-metric every source shares, so it is the only value shown.
+Every window renders as its own row: label (`GLM 5h`), the bar whose fill
+is the usage percentage (colored by the threshold palette: green ok, amber
+over 60%, red over 85%), and a value text spoken in the remaining limit -
+`67% left`, or `35% left, reset 1h 23m` when the source carries a reset
+time (a reset that already passed drops its countdown until fresh data
+arrives). Providers whose sources expose only raw sums keep the sum as the
+value; nothing invents a percentage.
 
-Percentage sources per provider: Codex's embedded `rate_limits`, Claude
-OAuth utilization, Antigravity's quota endpoint, and the z.ai monitor
-API for GLM (CodexBar's mapping: `data.limits[]`, TOKENS_LIMIT /
-CREDIT_LIMIT windows; `usage` + `currentValue`/`remaining` counts only
-refine the percentage the API reports). Without any of those, GLM and
-Claude fall back to token sums against ceilings configured in
-`~/deckboard/aidev.json` (`glm_five_hour_tokens` / `glm_week_tokens`
-and the `claude_*` pair) - a ceiling turns the local sum into a
-percentage bar. With neither source nor ceiling there is no percentage
-to show, so the row stays a raw sum; ZCode does not expose its plan
-quota locally (its own protocol, credentials stay in the encrypted
-keystore).
+Reset times come only from sources that report them: Codex (the
+`resets_at` embedded in every rollout `token_count` event, or the
+`reset_at` of the optional `wham/usage` lane). Claude's OAuth usage API,
+the z.ai monitor endpoint and Antigravity's quota endpoint carry
+utilization only, so their rows have no countdown.
+
+Percentage sources per provider: Codex's embedded `rate_limits` (or the
+opt-in `wham/usage` API lane, which wins when it answers - real limits
+beat locally cached ones), Claude OAuth utilization, Antigravity's quota
+endpoint, and the z.ai monitor API for GLM (CodexBar's mapping:
+`data.limits[]`, TOKENS_LIMIT / CREDIT_LIMIT windows; `usage` +
+`currentValue`/`remaining` counts only refine the percentage the API
+reports). Without any of those, GLM and Claude fall back to token sums
+against ceilings configured in `~/deckboard/aidev.json`
+(`glm_five_hour_tokens` / `glm_week_tokens` and the `claude_*` pair) - a
+ceiling turns the local sum into a percentage bar. With neither source nor
+ceiling there is no percentage to show, so the row stays a raw sum; ZCode
+does not expose its plan quota locally (its own protocol, credentials stay
+in the encrypted keystore).
+
+The optional Codex API lane reads the CLI's own `~/.codex/auth.json`
+(`tokens.access_token` + `tokens.account_id`) and polls
+`https://chatgpt.com/backend-api/wham/usage` at the `http_poll_secs`
+cadence; it is enabled by listing an (empty) `codex` object under
+`providers`. The token file is read-only for this lane - the CLI owns it
+and a parallel refresh would corrupt its token rotation - so on a missing
+or expired token the lane silently drops back to the rollout-embedded
+limits:
+
+```json
+{
+  "providers": {
+    "codex": {}
+  }
+}
+```
 
 The z.ai lane needs the plan's API key pasted into `aidev.json` - it
 cannot be pulled out of ZCode's keystore:

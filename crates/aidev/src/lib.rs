@@ -112,11 +112,24 @@ pub struct Providers {
     /// GLM Coding Plan (z.ai / BigModel): the same API key the plan page
     /// issues, queried against the monitor quota endpoint.
     pub zai: Option<ZaiProvider>,
+    /// Codex OAuth usage lane (`wham/usage`): reads the CLI's own
+    /// auth.json, no key to configure - presence under `providers.codex`
+    /// (as `{}`) enables it.
+    pub codex: Option<CodexProvider>,
 }
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Apikey {
     pub api_key: Option<String>,
+}
+
+/// Codex wham/usage lane knobs; all optional, the empty object is the
+/// normal configuration.
+#[derive(serde::Deserialize, Clone, Default)]
+pub struct CodexProvider {
+    /// Override of the Codex CLI home (defaults to the parent of the
+    /// sessions directory, usually `~/.codex`).
+    pub home: Option<String>,
 }
 
 #[derive(serde::Deserialize, Clone, Default)]
@@ -385,7 +398,7 @@ mod tests {
     fn config_parses_provider_keys_and_custom_endpoints() {
         let text = r#"{
             "poll_secs": 30,
-            "providers": {"openrouter": {"api_key": "sk-or-1"}},
+            "providers": {"openrouter": {"api_key": "sk-or-1"}, "codex": {}},
             "custom": [{
                 "name": "My gateway",
                 "url": "https://gw.example/usage",
@@ -399,6 +412,8 @@ mod tests {
             cfg.providers.openrouter.and_then(|a| a.api_key).as_deref(),
             Some("sk-or-1")
         );
+        // an empty codex object turns the wham/usage lane on
+        assert!(cfg.providers.codex.is_some());
         assert_eq!(cfg.custom.len(), 1);
         assert_eq!(cfg.custom[0].unit.as_deref(), Some("credits"));
         // unspecified knobs keep their defaults
@@ -414,8 +429,10 @@ mod tests {
                 state: "ok".into(),
                 text: "used $4.00 / $10.00".into(),
                 percent: Some(40.0),
+                reset_at: None,
             }],
             claude_oauth: None,
+            codex_wham: None,
         };
         let paths = Paths {
             config: "unused".into(),
