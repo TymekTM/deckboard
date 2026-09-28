@@ -3,6 +3,8 @@ import { computed, reactive, ref } from "vue";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { CATALOG } from "../catalog";
 import { api } from "../api";
+import SelectField from "./SelectField.vue";
+import ActionPicker from "./ActionPicker.vue";
 
 const props = defineProps({
   button: { type: Object, default: null }, // null = create mode
@@ -124,17 +126,21 @@ const actionGroups = computed(() => {
     }
   }
   if (extInputs.value.length) {
-    groups.push({
-      header: "Extensions",
-      items: extInputs.value.map((i) => ({
+    // one group per extension package, named after the plugin
+    const byExt = new Map();
+    for (const i of extInputs.value) {
+      const name = i.extension || "Extensions";
+      if (!byExt.has(name)) byExt.set(name, []);
+      byExt.get(name).push({
         value: i.value,
         label: i.label || prettify(i.value),
         icon: i.icon || "puzzle-piece",
         color: i.color || "#7f8c8d",
         extInput: i,
         fields: (i.fields || []).map(extFieldShape),
-      })),
-    });
+      });
+    }
+    for (const [header, items] of byExt) groups.push({ header, items });
   }
   return groups;
 });
@@ -164,7 +170,6 @@ const catalogEntry = computed(
       .find((c) => c.value === form.type) ||
     null
 );
-const isKnownType = computed(() => catalogEntry.value !== null);
 const showDual = computed(
   () =>
     Boolean(catalogEntry.value?.dual) ||
@@ -243,6 +248,14 @@ function onTypeChange() {
   }
   if (entry?.mode) form.mode = entry.mode;
   loadFields();
+}
+
+// ActionPicker owns the action <select> replacement; keep the side effects
+// of the old native @change in one place, in order
+function onActionPicked(value) {
+  form.type = value;
+  onTypeChange();
+  closeProps();
 }
 
 // board select (type "board": command is {"id": <boardId>})
@@ -553,15 +566,14 @@ function colorOr(val, fallback) {
             <input v-model="form.title" placeholder="Button label" @keydown.enter.prevent />
           </label>
 
-          <label class="field">
-            Action
-            <select v-model="form.type" @change="onTypeChange(); closeProps()">
-              <optgroup v-for="g in actionGroups" :key="g.header" :label="g.header">
-                <option v-for="c in g.items" :key="c.value" :value="c.value">{{ c.label }}</option>
-              </optgroup>
-              <option v-if="!isKnownType" :value="form.type">{{ form.type }} (custom)</option>
-            </select>
-          </label>
+          <div class="field sel-field">
+            <span class="sel-label">Action</span>
+            <ActionPicker
+              :model-value="form.type"
+              :groups="actionGroups"
+              @update:model-value="onActionPicked"
+            />
+          </div>
 
           <!-- board picker -->
           <label v-if="form.type === 'board'" class="field">
@@ -617,29 +629,30 @@ function colorOr(val, fallback) {
 
           <!-- structured / generic fields (catalog + extension-declared) -->
           <template v-else-if="catalogFields.length">
-            <label
-              v-for="f in catalogFields.filter(fieldVisible)"
-              :key="f.key"
-              class="field"
-            >
-              {{ f.label }}
-              <select v-if="f.kind === 'select'" v-model="fields[f.key]">
-                <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
-              </select>
-              <textarea
-                v-else-if="f.kind === 'textarea'"
-                v-model="fields[f.key]"
-                rows="3"
-                :placeholder="f.placeholder"
-              ></textarea>
-              <input
-                v-else
-                v-model="fields[f.key]"
-                :inputmode="f.kind === 'number' ? 'numeric' : undefined"
-                :placeholder="f.placeholder"
-                @keydown.enter.prevent
-              />
-            </label>
+            <template v-for="f in catalogFields.filter(fieldVisible)" :key="f.key">
+              <!-- select leaves the <label>: clicking a label would forward
+                   the click to the first chip / trigger inside -->
+              <div v-if="f.kind === 'select'" class="field sel-field">
+                <span class="sel-label">{{ f.label }}</span>
+                <SelectField v-model="fields[f.key]" :options="f.options" :label="f.label" />
+              </div>
+              <label v-else class="field">
+                {{ f.label }}
+                <textarea
+                  v-if="f.kind === 'textarea'"
+                  v-model="fields[f.key]"
+                  rows="3"
+                  :placeholder="f.placeholder"
+                ></textarea>
+                <input
+                  v-else
+                  v-model="fields[f.key]"
+                  :inputmode="f.kind === 'number' ? 'numeric' : undefined"
+                  :placeholder="f.placeholder"
+                  @keydown.enter.prevent
+                />
+              </label>
+            </template>
           </template>
 
           <!-- extension action without declared options: command is fixed -->
