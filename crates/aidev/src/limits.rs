@@ -18,13 +18,16 @@ use crate::util::truncate;
 use crate::{local_usage::fmt_tokens, local_usage::Sums, Apikey, Config, Paths};
 
 /// One display row of the plan-limits tile. `state` colors the dot:
-/// ok | warn | high | error.
+/// ok | warn | high | error. `percent` is the usage fill of the bar; the
+/// value text speaks in the remaining limit and, when the source reports
+/// it, the reset countdown (`reset_at`, unix epoch seconds).
 #[derive(Clone)]
 pub struct ProviderRow {
     pub name: String,
     pub state: String,
     pub text: String,
     pub percent: Option<f64>,
+    pub reset_at: Option<i64>,
 }
 
 pub fn row_json(row: &ProviderRow) -> serde_json::Value {
@@ -33,6 +36,7 @@ pub fn row_json(row: &ProviderRow) -> serde_json::Value {
         "value": row.text,
         "state": row.state,
         "percent": row.percent,
+        "reset_at": row.reset_at,
     })
 }
 
@@ -43,6 +47,10 @@ pub struct HttpState {
     /// the token is missing, scope-less or the call fails - the tile then
     /// falls back to local sums against configured ceilings.
     pub claude_oauth: Option<(Option<f64>, Option<f64>)>,
+    /// Codex windows from the wham/usage API; `None` when the lane is not
+    /// configured, the CLI is not logged in, or the call fails - the tile
+    /// then falls back to the limits embedded in local rollouts.
+    pub codex_wham: Option<crate::codex::Limits>,
 }
 
 impl HttpState {
@@ -53,6 +61,7 @@ impl HttpState {
         self.rows = poll_all(config);
         self.rows.extend(antigravity_quota_rows());
         self.claude_oauth = claude_oauth_usage(paths);
+        self.codex_wham = codex_wham_limits(config, paths);
     }
 }
 
@@ -97,7 +106,13 @@ pub fn plan_rows(
     // ceilings stopgap - real limits beat configured guesses
     let zai_live = rows.iter().any(|r| r.name.starts_with(GLM_LANE));
 
-    if let Some(limits) = crate::codex::limits(&paths.codex_sessions, now) {
+    if let Some(limits) = http
+        .codex_wham
+        .clone()
+        // the API answers only when the lane is enabled and logged in; the
+        // rollout-embedded limits are the always-there fallback
+        .or_else(|| crate::codex::limits(&paths.codex_sessions, now))
+    {
         rows.extend(codex_rows("Codex", &limits));
     }
 
@@ -227,6 +242,7 @@ fn anthropic_row(key: &str) -> ProviderRow {
                     state: "ok".into(),
                     text: format!("{} today", fmt_tokens(t)),
                     percent: None,
+                    reset_at: None,
                 },
                 _ => error_row("Anthropic API", "no totals in response"),
             }
@@ -294,21 +310,69 @@ fn custom_row(custom: &crate::CustomProvider) -> ProviderRow {
 
 const GLM_LANE: &str = "GLM";
 
-/// One window of one provider as a bar row: the fill and the value are
-/// both the usage percentage - the one metric every source shares.
-fn window_row(provider: &str, window: &str, percent: f64) -> ProviderRow {
+/// One window of one provider as a bar row: the fill is the usage
+/// percentage, the value text says how much is left and (when the source
+/// reports it) when the window resets.
+fn window_row(provider: &str, window: &str, percent: f64, reset_at: Option<i64>) -> ProviderRow {
     let percent = percent.clamp(0.0, 100.0);
-    let text = if percent >= 10.0 || percent == 0.0 {
-        format!("{percent:.0}%")
-    } else {
-        format!("{percent:.1}%")
-    };
     ProviderRow {
         name: format!("{provider} {window}"),
         state: threshold_state(Some(percent)).to_string(),
-        text,
+        text: limit_text(percent, reset_at, crate::unix_now()),
         percent: Some((percent * 10.0).round() / 10.0),
+        reset_at,
     }
+}
+
+/// Value text of a window bar: remaining limit ("66% left"), plus the
+/// countdown to the reset when the source carries one. `now` is injectable
+/// so tests can pin the countdown wording.
+fn limit_text(percent: f64, reset_at: Option<i64>, now: i64) -> String {
+    let left = 100.0 - percent.clamp(0.0, 100.0);
+    let left = if left.fract() == 0.0 {
+        format!("{left:.0}%")
+    } else {
+        format!("{left:.1}%")
+    };
+    match reset_at.and_then(|r| countdown(r, now)) {
+        Some(c) => format!("{left} left, reset {c}"),
+        None => format!("{left} left"),
+    }
+}
+
+/// Human countdown to a unix epoch: "1h 23m", "45m", "3d 4h"; zero tails
+/// are dropped ("2h", "1w"), and a reset that already passed yields None -
+/// the stale countdown is dropped until fresh data arrives.
+fn countdown(reset_at: i64, now: i64) -> Option<String> {
+    let secs = reset_at - now;
+    if secs <= 0 {
+        return None;
+    }
+    if secs < 60 {
+        return Some("<1m".into());
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return Some(format!("{mins}m"));
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return Some(match mins % 60 {
+            0 => format!("{hours}h"),
+            m => format!("{hours}h {m}m"),
+        });
+    }
+    let days = hours / 24;
+    if days < 7 {
+        return Some(match hours % 24 {
+            0 => format!("{days}d"),
+            h => format!("{days}d {h}h"),
+        });
+    }
+    Some(match days % 7 {
+        0 => format!("{}w", days / 7),
+        d => format!("{}w {d}d", days / 7),
+    })
 }
 
 /// Codex rows from the rate limits embedded in the rollout files: one bar
@@ -322,6 +386,7 @@ fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
             name,
             &primary.window_label(),
             primary.used_percent,
+            primary.resets_at,
         ));
     }
     if let Some(secondary) = &limits.secondary {
@@ -329,6 +394,7 @@ fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
             name,
             &secondary.window_label(),
             secondary.used_percent,
+            secondary.resets_at,
         ));
     }
     if rows.is_empty() {
@@ -337,6 +403,7 @@ fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
             state: "ok".into(),
             text: format!("{} plan", limits.plan_type.as_deref().unwrap_or("limited")),
             percent: None,
+            reset_at: None,
         });
     }
     rows
@@ -399,6 +466,7 @@ fn zai_rows_from(v: serde_json::Value) -> Vec<ProviderRow> {
                 None => "no quota windows".into(),
             },
             percent: None,
+            reset_at: None,
         }];
     }
     windows.into_iter().map(|(_, row)| row).collect()
@@ -443,9 +511,10 @@ fn zai_window(raw: &serde_json::Value) -> Option<(u64, ProviderRow)> {
     let window = crate::codex::RateLimit {
         used_percent: 0.0,
         window_minutes: minutes,
+        resets_at: None,
     }
     .window_label();
-    Some((minutes, window_row(GLM_LANE, &window, percent)))
+    Some((minutes, window_row(GLM_LANE, &window, percent, None)))
 }
 
 /// Local lanes from token sums, one row per window: a window with a
@@ -471,12 +540,14 @@ fn local_rows(
                 name,
                 window,
                 100.0 * used as f64 / ceiling as f64,
+                None,
             )),
             None => rows.push(ProviderRow {
                 name: format!("{name} {window}"),
                 state: "ok".into(),
                 text: fmt_tokens(used),
                 percent: None,
+                reset_at: None,
             }),
         }
     }
@@ -486,6 +557,7 @@ fn local_rows(
             state: "ok".into(),
             text: "no usage".into(),
             percent: None,
+            reset_at: None,
         });
     }
     rows
@@ -499,10 +571,10 @@ fn percent_rows(name: &str, five_hour: Option<f64>, week: Option<f64>) -> Vec<Pr
     let week = normalize(week);
     let mut rows = Vec::new();
     if let Some(p) = five {
-        rows.push(window_row(name, "5h", p));
+        rows.push(window_row(name, "5h", p, None));
     }
     if let Some(p) = week {
-        rows.push(window_row(name, "week", p));
+        rows.push(window_row(name, "week", p, None));
     }
     if rows.is_empty() {
         rows.push(ProviderRow {
@@ -510,6 +582,7 @@ fn percent_rows(name: &str, five_hour: Option<f64>, week: Option<f64>) -> Vec<Pr
             state: "ok".into(),
             text: "no data".into(),
             percent: None,
+            reset_at: None,
         });
     }
     rows
@@ -546,6 +619,88 @@ fn claude_oauth_usage(paths: &Paths) -> Option<(Option<f64>, Option<f64>)> {
     Some((lane("five_hour"), lane("seven_day")))
 }
 
+/// ---- Codex wham/usage lane -----------------------------------------------------
+
+/// Codex OAuth usage lane: read the CLI's own `auth.json` and poll
+/// `wham/usage` so limits and resets stay fresh even when no Codex session
+/// has run lately. Read-only on the token file - the CLI owns it and a
+/// parallel refresh would corrupt its token rotation - so any failure just
+/// drops the lane and the rollout-embedded limits keep the bar alive.
+fn codex_wham_limits(config: &Config, paths: &Paths) -> Option<crate::codex::Limits> {
+    let provider = config.providers.codex.as_ref()?;
+    let home = match provider.home.as_deref().filter(|h| !h.is_empty()) {
+        Some(h) => std::path::PathBuf::from(h),
+        None => paths.codex_sessions.parent()?.to_path_buf(),
+    };
+    let (token, account) = codex_auth(&home)?;
+    let mut headers = vec![
+        ("Authorization", format!("Bearer {token}")),
+        ("accept", "application/json".to_string()),
+        ("User-Agent", "pulpit-aidev".to_string()),
+    ];
+    if let Some(acc) = account {
+        headers.push(("ChatGPT-Account-Id", acc));
+    }
+    let v = match get_json("https://chatgpt.com/backend-api/wham/usage", &headers) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(error = %e, "codex wham/usage failed, using rollout limits");
+            return None;
+        }
+    };
+    let limits = codex_wham_limits_from(v);
+    if limits.is_none() {
+        tracing::debug!("codex wham/usage response had no rate_limit windows");
+    }
+    limits
+}
+
+/// `tokens.access_token` + `tokens.account_id` from the Codex CLI's
+/// credential file. No login, no refresh: the lane exists only while the
+/// CLI's own tokens are valid.
+fn codex_auth(codex_home: &std::path::Path) -> Option<(String, Option<String>)> {
+    let text = std::fs::read_to_string(codex_home.join("auth.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let tokens = v.get("tokens")?;
+    let access = tokens.get("access_token")?.as_str()?;
+    let account = tokens
+        .get("account_id")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    Some((access.to_string(), account))
+}
+
+/// Map a wham/usage response onto `Limits`; split from the HTTP call so
+/// tests can feed fixtures directly. Window shape: `used_percent`,
+/// `reset_at` (epoch seconds) and `limit_window_seconds` (5h session and
+/// one-week windows on paid plans).
+fn codex_wham_limits_from(v: serde_json::Value) -> Option<crate::codex::Limits> {
+    let rl = v.get("rate_limit")?;
+    let window = |key: &str| {
+        let w = rl.get(key)?;
+        let used_percent = w.get("used_percent")?.as_f64()?;
+        let resets_at = w
+            .get("reset_at")
+            .or_else(|| w.get("resets_at"))
+            .and_then(|x| x.as_i64());
+        let window_minutes = w
+            .get("limit_window_seconds")
+            .and_then(|x| x.as_u64())
+            .map(|s| s / 60)
+            .unwrap_or(0);
+        Some(crate::codex::RateLimit {
+            used_percent,
+            window_minutes,
+            resets_at,
+        })
+    };
+    Some(crate::codex::Limits {
+        plan_type: v.get("plan_type").and_then(|x| x.as_str()).map(str::to_string),
+        primary: window("primary_window"),
+        secondary: window("secondary_window"),
+    })
+}
+
 /// Antigravity lane from the running IDE's local quota endpoint, as
 /// per-window bar rows.
 fn antigravity_quota_rows() -> Vec<ProviderRow> {
@@ -554,10 +709,10 @@ fn antigravity_quota_rows() -> Vec<ProviderRow> {
     };
     let mut rows = Vec::new();
     if let Some(p) = quota.five_hour_used {
-        rows.push(window_row("Antigravity", "5h", p));
+        rows.push(window_row("Antigravity", "5h", p, None));
     }
     if let Some(p) = quota.weekly_used {
-        rows.push(window_row("Antigravity", "week", p));
+        rows.push(window_row("Antigravity", "week", p, None));
     }
     rows
 }
@@ -587,6 +742,7 @@ fn numeric_row(name: &str, used: f64, limit: Option<f64>, unit: Option<&str>) ->
         state: threshold_state(percent).to_string(),
         text,
         percent: percent.map(|p| (p * 10.0).round() / 10.0),
+        reset_at: None,
     }
 }
 
@@ -596,6 +752,7 @@ fn error_row(name: &str, error: &str) -> ProviderRow {
         state: "error".into(),
         text: error.to_string(),
         percent: None,
+        reset_at: None,
     }
 }
 
@@ -705,14 +862,14 @@ mod tests {
         // a ceiling turns its window into a percentage bar
         let rows = local_rows("GLM", 100_000, 1_000_000, Some(1_000_000), None);
         assert_eq!(rows[0].name, "GLM 5h");
-        assert_eq!(rows[0].text, "10%");
+        assert_eq!(rows[0].text, "90% left");
         assert_eq!(rows[0].percent, Some(10.0));
         assert_eq!(rows[1].text, "1.0M");
 
         // both ceilings: each window gets its own bar and its own dot
         let rows = local_rows("GLM", 100_000, 950_000, Some(1_000_000), Some(1_000_000));
-        assert_eq!(rows[0].text, "10%");
-        assert_eq!(rows[1].text, "95%");
+        assert_eq!(rows[0].text, "90% left");
+        assert_eq!(rows[1].text, "5% left");
         assert_eq!(rows[1].state, "high");
 
         // zero usage without a ceiling collapses to a quiet row
@@ -721,12 +878,37 @@ mod tests {
 
         // a ceiling with zero usage still shows the limit exists
         let rows = local_rows("GLM", 0, 0, Some(1_000_000), None);
-        assert_eq!(rows[0].text, "0%");
+        assert_eq!(rows[0].text, "100% left");
         assert_eq!(rows[0].percent, Some(0.0));
     }
 
     #[test]
+    fn limit_text_speaks_in_remaining_and_resets() {
+        // no reset: the remaining share is the whole message
+        assert_eq!(limit_text(34.0, None, 0), "66% left");
+        // sub-10% remaining keeps one decimal
+        assert_eq!(limit_text(93.4, None, 0), "6.6% left");
+        assert_eq!(limit_text(100.0, None, 0), "0% left");
+        assert_eq!(limit_text(0.0, None, 0), "100% left");
+
+        let now = 1_800_000_000;
+        assert_eq!(limit_text(34.0, Some(now + 3600), now), "66% left, reset 1h");
+        assert_eq!(limit_text(34.0, Some(now + 3600 + 60 * 23), now), "66% left, reset 1h 23m");
+        assert_eq!(limit_text(34.0, Some(now + 60 * 45), now), "66% left, reset 45m");
+        assert_eq!(limit_text(34.0, Some(now + 30), now), "66% left, reset <1m");
+        assert_eq!(limit_text(34.0, Some(now + 86_400 * 3), now), "66% left, reset 3d");
+        assert_eq!(
+            limit_text(34.0, Some(now + 86_400 * 3 + 3600 * 4), now),
+            "66% left, reset 3d 4h"
+        );
+        assert_eq!(limit_text(34.0, Some(now + 86_400 * 14), now), "66% left, reset 2w");
+        // a reset in the past drops the stale countdown instead of lying
+        assert_eq!(limit_text(34.0, Some(now - 10), now), "66% left");
+    }
+
+    #[test]
     fn window_rows_carry_the_bar_data() {
+        let now = crate::unix_now();
         let rows = codex_rows(
             "Codex",
             &crate::codex::Limits {
@@ -734,20 +916,25 @@ mod tests {
                 primary: Some(crate::codex::RateLimit {
                     used_percent: 65.0,
                     window_minutes: 300,
+                    resets_at: Some(now + 3600 * 2),
                 }),
                 secondary: Some(crate::codex::RateLimit {
                     used_percent: 12.0,
                     window_minutes: 10_080,
+                    resets_at: None,
                 }),
             },
         );
-        // one bar row per window, API-provided window labels
+        // one bar row per window, API-provided window labels; the value
+        // text says what is left and when the window resets
         let labels: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(labels, ["Codex 5h", "Codex week"]);
-        assert_eq!(rows[0].text, "65%");
+        assert_eq!(rows[0].text, "35% left, reset 2h");
         assert_eq!(rows[0].percent, Some(65.0));
         assert_eq!(rows[0].state, "warn");
+        assert_eq!(rows[0].reset_at, Some(now + 3600 * 2));
         assert_eq!(rows[1].percent, Some(12.0));
+        assert_eq!(rows[1].text, "88% left");
 
         // a plan with no windows still shows something readable
         let bare = crate::codex::Limits {
@@ -756,6 +943,48 @@ mod tests {
             secondary: None,
         };
         assert_eq!(codex_rows("Codex", &bare)[0].text, "free plan");
+    }
+
+    #[test]
+    fn wham_usage_response_maps_to_limits() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"plan_type":"pro","rate_limit":{
+                "primary_window":{"used_percent":34,"reset_at":1790000000,"limit_window_seconds":18000},
+                "secondary_window":{"used_percent":12,"reset_at":1790900000,"limit_window_seconds":604800}
+            }}"#,
+        )
+        .unwrap();
+        let limits = codex_wham_limits_from(v).expect("windows in response");
+        assert_eq!(limits.plan_type.as_deref(), Some("pro"));
+        let primary = limits.primary.expect("primary window");
+        assert_eq!(primary.used_percent, 34.0);
+        assert_eq!(primary.window_label(), "5h");
+        assert_eq!(primary.resets_at, Some(1_790_000_000));
+        let secondary = limits.secondary.expect("secondary window");
+        assert_eq!(secondary.window_label(), "week");
+        assert_eq!(secondary.resets_at, Some(1_790_900_000));
+
+        // a response without rate_limit windows drops the lane
+        assert!(codex_wham_limits_from(serde_json::json!({"plan_type":"free"})).is_none());
+    }
+
+    #[test]
+    fn codex_auth_reads_token_and_account() {
+        let dir = std::env::temp_dir().join(format!("aidev-wham-auth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("auth.json"),
+            r#"{"tokens":{"access_token":"abc","refresh_token":"r","account_id":"acc-1"},"last_refresh":"2026-09-20T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let (token, account) = codex_auth(&dir).expect("auth file parsed");
+        assert_eq!(token, "abc");
+        assert_eq!(account.as_deref(), Some("acc-1"));
+
+        // no auth.json: the lane stays off
+        assert!(codex_auth(&dir.join("nope")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -784,11 +1013,11 @@ mod tests {
         // TIME_LIMIT is not a coding-plan window; windows sort by length
         let labels: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(labels, ["GLM 5h", "GLM week"]);
-        // rows show percentages; the counts only keep them honest
-        assert_eq!(rows[0].text, "34%");
+        // rows speak in the remaining share; the counts only keep them honest
+        assert_eq!(rows[0].text, "66% left");
         assert_eq!(rows[0].percent, Some(34.0));
         // remaining is honored when currentValue is zeroed
-        assert_eq!(rows[1].text, "10%");
+        assert_eq!(rows[1].text, "90% left");
         assert_eq!(rows[1].percent, Some(10.0));
     }
 
@@ -819,8 +1048,10 @@ mod tests {
                 state: "ok".into(),
                 text: "used $4.00 / $10.00".into(),
                 percent: Some(40.0),
+                reset_at: None,
             }],
             claude_oauth: None,
+            codex_wham: None,
         };
         let paths = Paths {
             config: "unused".into(),
@@ -869,17 +1100,20 @@ mod tests {
                 ProviderRow {
                     name: "GLM 5h".into(),
                     state: "ok".into(),
-                    text: "34%".into(),
+                    text: "66% left".into(),
                     percent: Some(34.0),
+                    reset_at: None,
                 },
                 ProviderRow {
                     name: "GLM week".into(),
                     state: "ok".into(),
-                    text: "10%".into(),
+                    text: "90% left".into(),
                     percent: Some(10.0),
+                    reset_at: None,
                 },
             ],
             claude_oauth: None,
+            codex_wham: None,
         };
         let rows = plan_rows(&config, &http, &sums, &paths, crate::unix_now());
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
