@@ -29,7 +29,12 @@ pub fn build_boards(
         .iter()
         .map(|board| {
             let rows = buttons.get(&board.id);
-            build_board(board, rows.map(Vec::as_slice).unwrap_or(&[]), assets, engine)
+            build_board(
+                board,
+                rows.map(Vec::as_slice).unwrap_or(&[]),
+                assets,
+                engine,
+            )
         })
         .collect()
 }
@@ -452,7 +457,10 @@ mod tests {
         let state = tile.manifest.state.expect("type channel for status mode");
         assert_eq!(state.channel, "ext.ai-plan-limits");
         assert_eq!(state.shape, StateShape::Scalar);
-        assert_eq!(engine.catalog()["ext.ai-plan-limits"].shape, StateShape::Scalar);
+        assert_eq!(
+            engine.catalog()["ext.ai-plan-limits"].shape,
+            StateShape::Scalar
+        );
     }
 
     fn asset_store() -> (AssetStore, tempfile::TempDir) {
