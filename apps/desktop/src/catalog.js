@@ -70,7 +70,7 @@ export const CATALOG = [
     },
   },
   { divider: true },
-  { header: "General" },
+  { header: "Keyboard & Mouse" },
   {
     value: "key",
     label: "Keyboard Macro",
@@ -120,6 +120,8 @@ export const CATALOG = [
     color: "#16a085",
     fields: [{ key: "", label: "Text", kind: "textarea" }],
   },
+  { divider: true },
+  { header: "System" },
   {
     value: "url",
     label: "Open URL",
@@ -380,7 +382,7 @@ export const CATALOG = [
     mode: "graph",
   },
   { divider: true },
-  { header: "Integrations (extensions / native bridges)" },
+  { header: "Variables & Logic" },
   {
     value: "custom-value",
     label: "Variable Value (display)",
@@ -388,6 +390,8 @@ export const CATALOG = [
     color: "#171A21",
     fields: [{ key: "", label: "Variable key", placeholder: "set by the Variables & Logic extension" }],
   },
+  { divider: true },
+  { header: "Discord" },
   {
     value: "discord-voice-channel",
     label: "Discord: Join Voice Channel",

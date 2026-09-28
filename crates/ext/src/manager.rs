@@ -79,6 +79,9 @@ pub struct ExtInputInfo {
     pub command: Option<String>,
     /// Human action label from the extension declaration.
     pub label: Option<String>,
+    /// Display name of the extension package that declared this action;
+    /// the editor groups extension actions under it.
+    pub extension: String,
     /// Per-action parameter fields declared by the extension (`inputs`).
     pub fields: Vec<ExtFieldInfo>,
 }
@@ -365,7 +368,7 @@ impl ExtManager {
                 }
             };
 
-            all_inputs.extend(parse_inputs(&meta.inputs));
+            all_inputs.extend(parse_inputs(&meta.inputs, &meta.name));
             match dispatch {
                 Some(dispatch) => {
                     tracing::info!(package = %package, name = %meta.name, actions = ?meta.actions, "extension resident (timers)");
@@ -527,8 +530,9 @@ impl ExtManager {
     }
 }
 
-/// Parse raw input JSON objects into mapper-ready style infos.
-fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
+/// Parse raw input JSON objects into mapper-ready style infos. `extension`
+/// is the declaring package's display name, stamped on every input.
+fn parse_inputs(raw: &[Value], extension: &str) -> Vec<ExtInputInfo> {
     raw.iter()
         .filter_map(|i| {
             let value = i.get("value").and_then(Value::as_str)?.to_string();
@@ -579,6 +583,7 @@ fn parse_inputs(raw: &[Value]) -> Vec<ExtInputInfo> {
                 mode: i.get("mode").and_then(Value::as_str).map(str::to_string),
                 command: i.get("command").and_then(Value::as_str).map(str::to_string),
                 label: i.get("label").and_then(Value::as_str).map(str::to_string),
+                extension: extension.to_string(),
                 fields,
             })
         })

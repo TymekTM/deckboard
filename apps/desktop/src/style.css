@@ -168,6 +168,13 @@ label.field {
   font-size: 13.5px;
   color: var(--modal-muted);
 }
+
+/* select fields render via SelectField (chips/popover) outside a <label> */
+.sel-field {
+  font-size: 13.5px;
+  color: var(--modal-muted);
+}
+.sel-label { display: block; }
 label.field > input, label.field > select, label.field > textarea {
   margin-top: 5px;
   font-size: 14px;
