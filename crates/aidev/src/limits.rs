@@ -695,7 +695,10 @@ fn codex_wham_limits_from(v: serde_json::Value) -> Option<crate::codex::Limits> 
         })
     };
     Some(crate::codex::Limits {
-        plan_type: v.get("plan_type").and_then(|x| x.as_str()).map(str::to_string),
+        plan_type: v
+            .get("plan_type")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
         primary: window("primary_window"),
         secondary: window("secondary_window"),
     })
@@ -892,16 +895,31 @@ mod tests {
         assert_eq!(limit_text(0.0, None, 0), "100% left");
 
         let now = 1_800_000_000;
-        assert_eq!(limit_text(34.0, Some(now + 3600), now), "66% left, reset 1h");
-        assert_eq!(limit_text(34.0, Some(now + 3600 + 60 * 23), now), "66% left, reset 1h 23m");
-        assert_eq!(limit_text(34.0, Some(now + 60 * 45), now), "66% left, reset 45m");
+        assert_eq!(
+            limit_text(34.0, Some(now + 3600), now),
+            "66% left, reset 1h"
+        );
+        assert_eq!(
+            limit_text(34.0, Some(now + 3600 + 60 * 23), now),
+            "66% left, reset 1h 23m"
+        );
+        assert_eq!(
+            limit_text(34.0, Some(now + 60 * 45), now),
+            "66% left, reset 45m"
+        );
         assert_eq!(limit_text(34.0, Some(now + 30), now), "66% left, reset <1m");
-        assert_eq!(limit_text(34.0, Some(now + 86_400 * 3), now), "66% left, reset 3d");
+        assert_eq!(
+            limit_text(34.0, Some(now + 86_400 * 3), now),
+            "66% left, reset 3d"
+        );
         assert_eq!(
             limit_text(34.0, Some(now + 86_400 * 3 + 3600 * 4), now),
             "66% left, reset 3d 4h"
         );
-        assert_eq!(limit_text(34.0, Some(now + 86_400 * 14), now), "66% left, reset 2w");
+        assert_eq!(
+            limit_text(34.0, Some(now + 86_400 * 14), now),
+            "66% left, reset 2w"
+        );
         // a reset in the past drops the stale countdown instead of lying
         assert_eq!(limit_text(34.0, Some(now - 10), now), "66% left");
     }
