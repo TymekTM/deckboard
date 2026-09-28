@@ -1,0 +1,273 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-28",
+  "title": "Design System: Pulpit — ŚCIANA (Settings Wall)",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "Accent Teal",
+        "canonical": "#1abc9c",
+        "tonalRamp": ["#094338", "#117964", "#18af91", "#23e1bb", "#59e8cc", "#8ff0dc", "#bcf6ea", "#e9fcf8"]
+      },
+      "accent-deep": {
+        "role": "primary",
+        "displayName": "Accent Deep",
+        "canonical": "#16a085",
+        "tonalRamp": ["#094338", "#117965", "#18af91", "#23e1bc", "#59e8cc", "#8ff0dd", "#bcf6ea", "#e9fcf8"]
+      },
+      "ok": {
+        "role": "state",
+        "displayName": "OK Teal (accent alias)",
+        "canonical": "#1abc9c",
+        "tonalRamp": ["#094338", "#117964", "#18af91", "#23e1bb", "#59e8cc", "#8ff0dc", "#bcf6ea", "#e9fcf8"]
+      },
+      "bad": {
+        "role": "state",
+        "displayName": "Bad Red",
+        "canonical": "#e74c3c",
+        "tonalRamp": ["#440e08", "#7b190f", "#b12416", "#e43320", "#ea6557", "#f1978d", "#f7c0bb", "#fceae8"]
+      },
+      "bad-ink": {
+        "role": "state",
+        "displayName": "Bad Ink",
+        "canonical": "#f19488",
+        "tonalRamp": ["#440f08", "#7b1b0e", "#b22715", "#e5361f", "#eb6756", "#f2988d", "#f7c1bb", "#fceae8"]
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "Ground",
+        "canonical": "#171c21",
+        "tonalRamp": ["#171c21", "#1d2a36", "#262e36", "#313a44", "#3a4753", "#8b97a1", "#95a5a6", "#ecf0f1"]
+      },
+      "tile": {
+        "role": "neutral",
+        "displayName": "Tile",
+        "canonical": "#262e36",
+        "tonalRamp": ["#171c21", "#1d2a36", "#262e36", "#313a44", "#3a4753", "#8b97a1", "#95a5a6", "#ecf0f1"]
+      },
+      "tile-raised": {
+        "role": "neutral",
+        "displayName": "Tile Raised",
+        "canonical": "#313a44",
+        "tonalRamp": ["#171c21", "#1d2a36", "#262e36", "#313a44", "#3a4753", "#8b97a1", "#95a5a6", "#ecf0f1"]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Line",
+        "canonical": "#1d2a36",
+        "tonalRamp": ["#171c21", "#1d2a36", "#262e36", "#313a44", "#3a4753", "#8b97a1", "#95a5a6", "#ecf0f1"]
+      },
+      "well": {
+        "role": "neutral",
+        "displayName": "Well",
+        "canonical": "#171c21",
+        "tonalRamp": ["#171c21", "#1d2a36", "#262e36", "#313a44", "#3a4753", "#8b97a1", "#95a5a6", "#ecf0f1"]
+      },
+      "lift": {
+        "role": "neutral",
+        "displayName": "Lift",
+        "canonical": "#3a4753",
+        "tonalRamp": ["#171c21", "#1d2a36", "#262e36", "#313a44", "#3a4753", "#8b97a1", "#95a5a6", "#ecf0f1"]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#ecf0f1",
+        "tonalRamp": ["#171c21", "#1d2a36", "#262e36", "#313a44", "#3a4753", "#8b97a1", "#95a5a6", "#ecf0f1"]
+      },
+      "ink-2": {
+        "role": "neutral",
+        "displayName": "Ink 2",
+        "canonical": "#95a5a6",
+        "tonalRamp": ["#171c21", "#1d2a36", "#262e36", "#313a44", "#3a4753", "#8b97a1", "#95a5a6", "#ecf0f1"]
+      },
+      "ink-3": {
+        "role": "neutral",
+        "displayName": "Ink 3",
+        "canonical": "#8b97a1",
+        "tonalRamp": ["#171c21", "#1d2a36", "#262e36", "#313a44", "#3a4753", "#8b97a1", "#95a5a6", "#ecf0f1"]
+      }
+    },
+    "typographyMeta": {
+      "bar-title": { "displayName": "Bar Title", "purpose": "The overlay's single heading (\"Ustawienia\") in the 64px top bar." },
+      "section-label": { "displayName": "Section Label", "purpose": "Row headers OGÓLNE / SERWER / TABLETY; the wall's only uppercase." },
+      "tile-title": { "displayName": "Tile Title", "purpose": "Tile names on the wall." },
+      "control-label": { "displayName": "Control Label", "purpose": "Names inside expanded control rows and fact values." },
+      "body": { "displayName": "Body", "purpose": "Tile summaries — the always-visible voice of the wall." },
+      "note": { "displayName": "Note", "purpose": "Explanatory footnotes inside details; the honest-state copy." },
+      "chip": { "displayName": "Chip", "purpose": "Live status pills." },
+      "data": { "displayName": "Data", "purpose": "Mono for hotkeys, IP:port, log paths — always tabular numerals." },
+      "data-display": { "displayName": "Data Display", "purpose": "The 30px mono port and pairing code; code adds +6px letter-spacing." }
+    },
+    "shadows": [
+      {
+        "name": "focus-ambient",
+        "value": "0 14px 40px rgba(0, 0, 0, 0.5)",
+        "purpose": "The wall's only elevation declaration; marks the single focused tile."
+      },
+      {
+        "name": "knob-micro",
+        "value": "0 1px 3px rgba(0, 0, 0, 0.4)",
+        "purpose": "Part of the switch knob itself, not a wall token; keeps the 20px knob readable on both track colors."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-out",
+        "value": "ease-out, 140–200ms",
+        "purpose": "Default state transitions: buttons, close, chip surfaces, dim opacity."
+      },
+      {
+        "name": "ease-focus",
+        "value": "cubic-bezier(0.2, 0, 0, 1), 240ms (focus) / 160ms (knob)",
+        "purpose": "Focus expansion (flex-grow to 2.4) and switch knob travel."
+      },
+      {
+        "name": "rise",
+        "value": "rise 200ms ease-out — opacity 0→1, translateY(4px)→0",
+        "purpose": "Single reveal when a focused tile's detail appears; no page-load choreography."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Wall Tile — focused",
+      "kind": "card",
+      "refersTo": "tile",
+      "description": "The signature state: the one expanded tile on the wall — teal-tinted border, the world's only shadow, detail risen in.",
+      "html": "<article class=\"ds-tile ds-tile--focused\"><header class=\"ds-tile-head\"><h3>Uruchamianie</h3><span class=\"ds-chip ds-chip--ok\">autostart wł.</span></header><p class=\"ds-sum\">Zachowanie Pulpitu po zalogowaniu i przy zamykaniu okna.</p><div class=\"ds-detail\"><div class=\"ds-ctl\"><div class=\"ds-ctl-text\"><span class=\"ds-ctl-name\">Uruchamiaj po zalogowaniu</span><span class=\"ds-ctl-note\">Rejestruje Pulpit w autostarcie systemu.</span></div><button class=\"ds-switch\" role=\"switch\" aria-checked=\"true\"><span class=\"ds-switch-knob\"></span></button></div><div class=\"ds-ctl\"><div class=\"ds-ctl-text\"><span class=\"ds-ctl-name\">Zamykanie do zasobnika</span><span class=\"ds-ctl-note\">Zawsze aktywne — zamknięcie okna chowa Pulpit do zasobnika.</span></div><span class=\"ds-locked\"><svg width=\"11\" height=\"11\" viewBox=\"0 0 448 512\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M400 224h-24v-72C376 68.8 307.2 0 224 0S72 68.8 72 152v72H48c-26.5 0-48 21.5-48 48v192c0 26.5 21.5 48 48 48h352c26.5 0 48-21.5 48-48V272c0-26.5-21.5-48-48-48zM152 152c0-39.7 32.3-72 72-72s72 32.3 72 72v72H152v-72z\"/></svg> stałe</span></div></div></article>",
+      "css": ".ds-tile{--ds-accent:#1abc9c;position:relative;flex:1 1 300px;min-width:240px;background:#262e36;border:1px solid #1d2a36;border-radius:12px;padding:18px 20px;color:#ecf0f1;font-family:Roboto,'Segoe UI',system-ui,sans-serif;box-sizing:border-box}.ds-tile--focused{flex-grow:2.4;border-color:color-mix(in srgb,var(--ds-accent) 40%,#1d2a36);box-shadow:0 14px 40px rgba(0,0,0,.5)}.ds-tile-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}.ds-tile-head h3{font-size:15px;font-weight:600;flex:1;min-width:0;margin:0}.ds-sum{font-size:12.5px;line-height:1.55;color:#95a5a6;margin:0}.ds-detail{padding-top:12px;animation:ds-rise 200ms ease-out}@keyframes ds-rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}.ds-ctl{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:11px 0}.ds-ctl+.ds-ctl{border-top:1px solid #313a44}.ds-ctl-name{display:block;font-size:13.5px;font-weight:500}.ds-ctl-note{display:block;font-size:12px;color:#8b97a1;margin-top:2px;line-height:1.5}.ds-locked{flex:none;display:flex;align-items:center;gap:6px;font-size:11.5px;color:#8b97a1}.ds-chip{flex:none;font-size:11px;padding:3px 9px;border-radius:999px;background:#313a44;color:#95a5a6;white-space:nowrap}.ds-chip--ok{color:#1abc9c;background:rgba(26,188,156,.14)}.ds-switch{flex:none;position:relative;width:46px;height:26px;border-radius:13px;background:#1abc9c;transition:background 160ms ease-out;cursor:pointer}.ds-switch:hover{background:#16a085}.ds-switch-knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#f2f4f6;box-shadow:0 1px 3px rgba(0,0,0,.4);transition:transform 160ms cubic-bezier(.2,0,0,1)}.ds-switch[aria-checked=\"true\"] .ds-switch-knob{transform:translateX(20px)}"
+    },
+    {
+      "name": "Wall Tile — dim",
+      "kind": "card",
+      "refersTo": "tile",
+      "description": "A waiting tile: muted at 0.42, whole surface is a hit zone; hover lifts to 0.62 with a neutral border hint.",
+      "html": "<article class=\"ds-tile-dim\" tabindex=\"0\" role=\"button\" aria-label=\"Rozwiń: Status serwera\"><header class=\"ds-tile-head\"><h3>Status</h3><span class=\"ds-chip ds-chip--ok\">działa</span></header><p class=\"ds-sum\">Nasłuch na 0.0.0.0:8500 — legacy i v2 dzielą jeden port.</p></article>",
+      "css": ".ds-tile-dim{background:#262e36;border:1px solid #1d2a36;border-radius:12px;padding:18px 20px;color:#ecf0f1;font-family:Roboto,'Segoe UI',system-ui,sans-serif;box-sizing:border-box;opacity:.42;cursor:pointer;transition:opacity 170ms ease-out,border-color 170ms ease-out}.ds-tile-dim:hover,.ds-tile-dim:focus-visible{opacity:.62;border-color:#43505c}.ds-tile-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}.ds-tile-head h3{font-size:15px;font-weight:600;flex:1;min-width:0;margin:0}.ds-sum{font-size:12.5px;line-height:1.55;color:#95a5a6;margin:0}.ds-chip{flex:none;font-size:11px;padding:3px 9px;border-radius:999px;background:#313a44;color:#95a5a6;white-space:nowrap}.ds-chip--ok{color:#1abc9c;background:rgba(26,188,156,.14)}"
+    },
+    {
+      "name": "Switch",
+      "kind": "input",
+      "refersTo": "switch",
+      "description": "46×26px track with a 20px traveling knob; teal only when on. role=switch with aria-checked; rolls back on backend failure.",
+      "html": "<div class=\"ds-switch-row\"><button class=\"ds-switch\" role=\"switch\" aria-checked=\"true\"><span class=\"ds-switch-knob\"></span></button><button class=\"ds-switch ds-switch--off\" role=\"switch\" aria-checked=\"false\"><span class=\"ds-switch-knob\"></span></button></div>",
+      "css": ".ds-switch-row{display:flex;gap:16px;align-items:center;font-family:Roboto,'Segoe UI',system-ui,sans-serif}.ds-switch{flex:none;position:relative;width:46px;height:26px;border-radius:13px;background:#1abc9c;transition:background 160ms ease-out;cursor:pointer;border:none;padding:0}.ds-switch:hover{background:#16a085}.ds-switch--off{background:#313a44}.ds-switch--off:hover{background:#3a4753}.ds-switch-knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#f2f4f6;box-shadow:0 1px 3px rgba(0,0,0,.4);transition:transform 160ms cubic-bezier(.2,0,0,1)}.ds-switch[aria-checked=\"true\"] .ds-switch-knob{transform:translateX(20px)}.ds-switch:focus-visible{outline:2px solid #1abc9c;outline-offset:1px}"
+    },
+    {
+      "name": "Act Button — default",
+      "kind": "button",
+      "refersTo": "act",
+      "description": "The workhorse rank: raised fill, ink text — Zmień, Anuluj, Nowy kod, Odśwież.",
+      "html": "<button class=\"ds-act\">Zmień</button> <button class=\"ds-act\" disabled>Odśwież</button>",
+      "css": ".ds-act{flex:none;font:inherit;font-size:12.5px;padding:7px 12px;border-radius:6px;background:#313a44;color:#ecf0f1;border:none;cursor:pointer;font-family:Roboto,'Segoe UI',system-ui,sans-serif;transition:background 140ms ease-out}.ds-act:hover{background:#3a4753}.ds-act:disabled{opacity:.45;cursor:default}.ds-act:focus-visible{outline:2px solid #1abc9c;outline-offset:1px}"
+    },
+    {
+      "name": "Act Button — accent",
+      "kind": "button",
+      "refersTo": "act-accent",
+      "description": "The confirming step inside a flow (\"Ustaw\"): same body, teal text, weight 500. Still one per context.",
+      "html": "<button class=\"ds-act-accent\">Ustaw</button>",
+      "css": ".ds-act-accent{flex:none;font:inherit;font-size:12.5px;font-weight:500;padding:7px 12px;border-radius:6px;background:#313a44;color:#1abc9c;border:none;cursor:pointer;font-family:Roboto,'Segoe UI',system-ui,sans-serif;transition:background 140ms ease-out}.ds-act-accent:hover{background:#3a4753}.ds-act-accent:focus-visible{outline:2px solid #1abc9c;outline-offset:1px}"
+    },
+    {
+      "name": "Act Button — primary",
+      "kind": "button",
+      "refersTo": "act-primary",
+      "description": "The one main action of a tile (\"Generuj kod parowania\"): teal fill, near-black-teal text, slightly larger.",
+      "html": "<button class=\"ds-act-primary\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 512 512\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M512 176.001C512 273.203 433.202 352 336 352c-11.22 0-22.19-1.062-32.827-3.069l-24.012 27.014A23.999 23.999 0 0 1 261.223 384H224v40c0 13.255-10.745 24-24 24h-40v40c0 13.255-10.745 24-24 24H24c-13.255 0-24-10.745-24-24v-78.059c0-6.365 2.529-12.47 7.029-16.971l161.802-161.802C163.108 213.814 162 202.041 162 190 162 92.798 240.798 14 338 14s174 78.798 174 162.001zM336 128c0 26.51 21.49 48 48 48s48-21.49 48-48-21.49-48-48-48-48 21.49-48 48z\"/></svg> Generuj kod parowania</button>",
+      "css": ".ds-act-primary{flex:none;font:inherit;font-size:12.5px;font-weight:600;padding:9px 14px;border-radius:6px;background:#1abc9c;color:#0c2a24;border:none;cursor:pointer;font-family:Roboto,'Segoe UI',system-ui,sans-serif;transition:background 140ms ease-out}.ds-act-primary:hover{background:#16a085}.ds-act-primary:disabled{opacity:.45;cursor:default}.ds-act-primary:focus-visible{outline:2px solid #1abc9c;outline-offset:1px}"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "Read-only live operate-state pill in three flavors: neutral, ok (green), bad (red). Never a filter, never an action.",
+      "html": "<span class=\"ds-chip-row\"><span class=\"ds-chip\">brak sieci</span><span class=\"ds-chip ds-chip--ok\">gotowy do parowania</span><span class=\"ds-chip ds-chip--bad\">serwer wył.</span></span>",
+      "css": ".ds-chip-row{display:flex;gap:8px;align-items:center;font-family:Roboto,'Segoe UI',system-ui,sans-serif}.ds-chip{flex:none;font-size:11px;padding:3px 9px;border-radius:999px;background:#313a44;color:#95a5a6;white-space:nowrap}.ds-chip--ok{color:#1abc9c;background:rgba(26,188,156,.14)}.ds-chip--bad{color:#f19488;background:rgba(231,76,60,.14)}"
+    },
+    {
+      "name": "Hotkey Combo",
+      "kind": "input",
+      "refersTo": "combo",
+      "description": "kbd plate for the current combo plus the recessed well input for a new one; focus is a teal border + 1px teal ring, no glow.",
+      "html": "<div class=\"ds-combo-line\"><kbd class=\"ds-combo\">Ctrl+Alt+D</kbd><button class=\"ds-act\">Zmień</button></div><div class=\"ds-combo-line\" style=\"margin-top:8px\"><input class=\"ds-combo-input\" value=\"Ctrl+Alt+F13\" aria-label=\"Nowy skrót\" placeholder=\"Ctrl+Alt+D\" /><button class=\"ds-act ds-act--accent\">Ustaw</button><button class=\"ds-act\">Anuluj</button></div><p class=\"ds-err\">Ten skrót jest zajęty lub niedozwolony — wybierz inną kombinację.</p>",
+      "css": ".ds-combo-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-family:Roboto,'Segoe UI',system-ui,sans-serif}.ds-combo{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-size:13px;font-variant-numeric:tabular-nums;background:#313a44;border:1px solid #1d2a36;border-radius:6px;padding:7px 12px;color:#ecf0f1}.ds-combo-input{flex:1;min-width:120px;max-width:200px;padding:7px 10px;font-size:13px;background:#171c21;border:1px solid #1d2a36;border-radius:6px;color:#ecf0f1;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-variant-numeric:tabular-nums}.ds-combo-input:focus{outline:none;border-color:#1abc9c;box-shadow:0 0 0 1px #1abc9c}.ds-act{flex:none;font:inherit;font-size:12.5px;padding:7px 12px;border-radius:6px;background:#313a44;color:#ecf0f1;border:none;cursor:pointer;transition:background 140ms ease-out}.ds-act:hover{background:#3a4753}.ds-act--accent{color:#1abc9c;font-weight:500}.ds-err{font-size:12px;color:#f19488;margin:8px 0 0;overflow-wrap:anywhere}"
+    },
+    {
+      "name": "Pairing Code",
+      "kind": "custom",
+      "refersTo": "code-display",
+      "description": "One-time v2 code as 30px mono digits with +6px letter-spacing on a recessed well plate; the tile's green chip runs the countdown.",
+      "html": "<div class=\"ds-code-wrap\"><span class=\"ds-chip ds-chip--ok\">kod żyje 4:59</span><div class=\"ds-code\">419286</div><p class=\"ds-note\">Wpisz kod w nowym kliencie razem z adresem. Wygasa za 4:59.</p><button class=\"ds-act\">Nowy kod</button></div>",
+      "css": ".ds-code-wrap{font-family:Roboto,'Segoe UI',system-ui,sans-serif;color:#ecf0f1}.ds-code{display:inline-block;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-variant-numeric:tabular-nums;font-size:30px;font-weight:700;letter-spacing:6px;line-height:1;background:#171c21;border:1px solid #1d2a36;border-radius:8px;padding:14px 18px;margin-bottom:10px}.ds-note{font-size:12px;line-height:1.6;color:#8b97a1;margin:0 0 10px}.ds-act{flex:none;font:inherit;font-size:12.5px;padding:7px 12px;border-radius:6px;background:#313a44;color:#ecf0f1;border:none;cursor:pointer;transition:background 140ms ease-out}.ds-act:hover{background:#3a4753}.ds-chip{display:inline-block;font-size:11px;padding:3px 9px;border-radius:999px;background:rgba(26,188,156,.14);color:#1abc9c;white-space:nowrap;margin-bottom:12px;font-variant-numeric:tabular-nums}"
+    },
+    {
+      "name": "QR Panel + Address List",
+      "kind": "custom",
+      "refersTo": "qr",
+      "description": "White 108px QR plate — the world's only white surface — beside a vertical list of mono ip:port address rows; selected and hover share the raised fill.",
+      "html": "<div class=\"ds-pair\"><div class=\"ds-qr\"><svg viewBox=\"0 0 21 21\" width=\"96\" height=\"96\" shape-rendering=\"crispEdges\" aria-label=\"Kod QR z adresem pulpitu\"><path fill=\"#171c21\" d=\"M0 0h7v7H0zM2 2h3v3H2zM14 0h7v7h-7zM16 2h3v3h-3zM0 14h7v7H0zM2 16h3v3H2zM9 0h1v2H9zM11 1h2v1h-2zM9 3h2v2H9zM12 4h1v2h-1zM0 9h2v1H0zM3 9h2v2H3zM6 9h1v1H6zM1 11h1v2H1zM4 12h2v1H4zM9 8h1v3H9zM11 9h3v1h-3zM15 9h2v1h-2zM18 9h2v2h-2zM12 11h2v2h-2zM15 12h1v2h-1zM18 12h1v1h-1zM9 13h2v2H9zM12 14h1v2h-1zM14 15h2v1h-2zM17 15h2v1h-2zM9 16h1v2H9zM11 17h2v2h-2zM15 17h1v2h-1zM18 16h2v2h-2zM19 19h1v1h-1z\"/></svg></div><div class=\"ds-addr-list\"><button class=\"ds-addr ds-addr--sel\"><span class=\"ds-addr-mono\">192.168.1.24:8500</span><span class=\"ds-addr-name\">Wi-Fi — domowa</span></button><button class=\"ds-addr\"><span class=\"ds-addr-mono\">192.168.1.31:8500</span><span class=\"ds-addr-name\">Ethernet</span></button><button class=\"ds-act\"><svg width=\"11\" height=\"11\" viewBox=\"0 0 512 512\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M370.72 133.28C339.458 104.008 298.888 87.962 255.848 88c-77.458.068-144.328 53.178-162.791 126.85-1.344 5.363-6.122 9.15-11.651 9.15H24.103c-7.498 0-13.194-6.807-11.807-14.176C33.433 106.683 136.621 8 256 8c66.448 0 126.791 26.136 171.314 68.685L463.03 40.97C478.149 25.851 504 36.559 504 57.941V192c0 13.255-10.745 24-24 24H345.941c-21.382 0-32.09-25.851-16.971-40.971l41.75-41.749zM48 296h134.059c21.382 0 32.09 25.851 16.971 40.971l-41.75 41.75c31.262 29.273 71.835 45.319 114.876 45.28 77.418-.07 144.315-53.144 162.787-126.849 1.344-5.363 6.122-9.15 11.651-9.15h57.397c7.498 0 13.194 6.807 11.807 14.176C478.567 405.317 375.379 504 256 504c-66.448 0-126.791-26.136-171.314-68.685L48.97 471.03C33.851 486.149 8 475.441 8 454.059V320c0-13.255 10.745-24 24-24z\"/></svg> Odśwież</button></div></div>",
+      "css": ".ds-pair{display:flex;gap:14px;align-items:flex-start;font-family:Roboto,'Segoe UI',system-ui,sans-serif;color:#ecf0f1}.ds-qr{flex:none;width:108px;height:108px;background:#fff;border-radius:8px;padding:6px;box-sizing:border-box}.ds-addr-list{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}.ds-addr{text-align:left;padding:6px 9px;border-radius:6px;display:flex;flex-direction:column;border:none;cursor:pointer;background:none;color:inherit;font:inherit;font-size:13px;transition:background 140ms ease-out}.ds-addr:hover,.ds-addr--sel{background:#313a44}.ds-addr-mono{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-variant-numeric:tabular-nums}.ds-addr--sel .ds-addr-mono{font-weight:700}.ds-addr-name{font-size:11.5px;color:#8b97a1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ds-act{flex:none;align-self:flex-start;font:inherit;font-size:12.5px;padding:7px 12px;border-radius:6px;background:#313a44;color:#ecf0f1;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:background 140ms ease-out}.ds-act:hover{background:#3a4753}.ds-act:disabled{opacity:.45;cursor:default}"
+    }
+  ],
+  "narrative": {
+    "northStar": "ŚCIANA — the streaming wall",
+    "overview": "Settings is a wall of content, not a form. A full-screen dark overlay replaces the editor window; every setting lives inside a tile — a live state container that shows its status before you touch it (a chip, a summary, a QR, a pairing code). Exactly one tile is expanded at a time: focus is the only mechanism that reveals controls, and the rest of the wall dims in response. There is no sidebar, no row of form fields, no wizard. The wall reads like a streaming service's shelf of title cards: scan first, expand one thing, act, leave.\n\nThe world is deliberately quiet. Depth comes from tonal steps (ground → tile → raised, with wells dipping back to ground) plus 1px lines, not from stacked shadows — elevation is declared exactly once, on the focused tile. Color is rationed: a three-stop gray ink scale does all the talking, and the teal accent appears only where attention or life must land (focus border, switch-on state, one primary action per tile, focus rings, and \"working\" status chips). Red stays out of the accent conversation entirely — it is the error channel, with a lightened ink tint for small text. Type is Roboto for voice and a monospace stack with tabular numerals for every technical value: ports, IPs, hotkeys, pairing codes.\n\nŚCIANA currently owns exactly one surface: the settings overlay. The wall's palette is sourced from the incumbent shell tokens (style.css :root: --titlebar, --rail, --rail-hover, --border, --text, --text-muted, --accent, --danger), so settings and shell share one color source; the rest of the editor (light sidebar, canvas, light modal system) remains the incumbent world. The remaining drift is structural — modal language, radii, shadow vocabulary — recorded, not repaired. Future surfaces decide world by world; settings is the first step of the renovation.",
+    "keyCharacteristics": [
+      "Wall of tiles, one always focused; siblings dim to 0.42 opacity",
+      "Tiles are live state containers (chips, summaries, QR, pairing code) before they are forms",
+      "Tonal depth only; a single soft shadow marks the focused tile",
+      "Teal accent strictly for focus, primary actions, and status-ok; red is the error channel only",
+      "Roboto for prose, mono + tabular numerals for every technical value",
+      "Motion budget: 140–250ms ease-out state changes, one rise reveal per detail, no page-load choreography"
+    ],
+    "rules": [
+      {
+        "name": "The Two-Channel Rule",
+        "body": "Teal and red are different channels and never mix. Teal = focus, primary actions, and status-ok (intent and life — matching the incumbent app's teal status dots); red = error, surfaced as Bad Ink when it must be read as small text. This separation is a reviewed decision (2026-09-28 settings review, re-affirmed at the charcoal re-tint): state vocabulary stays legible even when every accent is spent on focus.",
+        "section": "colors"
+      },
+      {
+        "name": "The Rationed Accent Rule",
+        "body": "On any view of the wall, teal covers a sliver of the pixels: one border tint, at most one filled button, at most one switch. If a second element wants teal, the design is wrong, not the budget.",
+        "section": "colors"
+      },
+      {
+        "name": "The Mono-Values Rule",
+        "body": "Every technical value — port, IP, hotkey combo, pairing code, log path — is monospace with tabular numerals. Prose never imitates it, mono never carries prose.",
+        "section": "typography"
+      },
+      {
+        "name": "The One-Shadow Rule",
+        "body": "Elevation is declared exactly once in the world, on the focused tile. No hover shadows, no stacked modal shadows, no shadow escalation — if something new needs depth, it takes a tonal step, not a shadow.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Dim Wall Rule",
+        "body": "Depth of attention is expressed as opacity: siblings of the focused tile sit at 0.42 and rise only to 0.62 on hover. Dead tiles (server off) are pinned at 0.42 and cannot be hovered back.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep exactly one tile expanded per wall; focus is exclusive (flex-grow: 2.4, 240ms).",
+      "Do dim siblings to 0.42 (hover 0.62) and mute dead tiles at 0.42 with no hit zone.",
+      "Do put every port, IP, hotkey, code and path in mono with tabular numerals (.tnum).",
+      "Do reserve teal (#1abc9c) for the focus border tint, switch-on, one primary button, focus rings, and status-ok chips.",
+      "Do use teal ok-chips and Bad Ink red as live operate-state (\"działa\", \"serwer wył.\", countdowns).",
+      "Do step depth with the tonal scale (ground/well #171c21 → tile #262e36 → raised #313a44) before reaching for a shadow.",
+      "Do keep transitions in the 140–250ms ease-out family and reveal a detail with one 200ms rise.",
+      "Do render QR codes on the white plate — the single sanctioned white surface."
+    ],
+    "donts": [
+      "Don't introduce a second box-shadow elevation; the focus ambient (0 14px 40px rgba(0,0,0,.5)) is the only one.",
+      "Don't spend red as decoration, hover tints, or accent-adjacent color — red is the error channel only (as Bad Ink when small text), separate from teal by reviewed decision.",
+      "Don't animate the wall on load; motion begins only as a response to interaction.",
+      "Don't place real controls under the invisible hit zone, or keep a hit zone on a dead tile.",
+      "Don't widen ŚCIANA into the sidebar, canvas, or the light modal system without an explicit world decision — those remain the incumbent world (light modals, teal #1abc9c, Roboto). Color is now shared with the shell; the unrepaired drift is structural: modal language, radii (4px vs 6/8/12px), and shadow vocabulary.",
+      "Don't import incumbent modal idioms into the wall (uppercase flat text buttons, 4px radius, white dialogs) or wall idioms into them.",
+      "Don't fake state: a chip that can't read the backend stays honest (\"brak sieci\"), and a dead tile never pretends to be clickable."
+    ]
+  }
+}

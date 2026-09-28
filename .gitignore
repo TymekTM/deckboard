@@ -19,3 +19,9 @@ apps/desktop/dist/
 
 # Tauri generated schemas (rebuilt on every build)
 apps/desktop/src-tauri/gen/
+
+# local design/QA session artifacts (regenerable)
+.playwright-mcp/
+.impeccable/review/
+.impeccable/mocks/
+.impeccable/build/
