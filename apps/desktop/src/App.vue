@@ -178,10 +178,54 @@ function runContextItem(item) {
   item.run();
 }
 
+// tile clipboard: plain snapshot of the copied button; survives board
+// switches, lives for the editor session only
+const tileClipboard = ref(null);
+
+function copyTile(tile) {
+  // shallow spread is enough: button fields are all primitives, and the
+  // snapshot must not follow later edits of the original
+  tileClipboard.value = { ...tile };
+}
+
+function clamp(v, min, max) {
+  return Math.min(max, Math.max(min, v));
+}
+
+// Paste a copied button at an empty cell: create the row with the copied
+// type, then apply the full snapshot (styling, command, dual state) in one
+// update - the same two-step the New Button flow uses.
+async function pasteTile(snapshot, pos) {
+  const board = boards.value.find((b) => b.id === currentId.value);
+  if (!board) return;
+  const w = Math.max(1, snapshot.w || 1);
+  const h = Math.max(1, snapshot.h || 1);
+  const x = clamp(pos.x, 0, Math.max(0, board.width - w));
+  const y = clamp(pos.y, 0, Math.max(0, board.height - h));
+  const id = await api.createButton(
+    board.id,
+    snapshot.type || "key",
+    snapshot.mode || "button",
+    x,
+    y
+  );
+  await api.updateButton({
+    ...snapshot,
+    id,
+    board_id: board.id,
+    x,
+    y,
+    w,
+    h,
+  });
+  await loadBoards();
+}
+
 function tileContextMenu(tile, event) {
   openContextMenu(event, [
     { label: "Edit tile", icon: "pen", run: () => (editingTile.value = tile) },
     { label: "Run now", icon: "play", run: () => api.execButton(tile.id) },
+    { label: "Copy", icon: "copy", run: () => copyTile(tile) },
     {
       label: "Delete",
       icon: "trash",
@@ -198,6 +242,15 @@ function emptyContextMenu(pos, event) {
       icon: "plus",
       run: () => (createFlow.value = { ...pos, boardId: currentId.value }),
     },
+    ...(tileClipboard.value
+      ? [
+          {
+            label: "Paste button here",
+            icon: "paste",
+            run: () => pasteTile(tileClipboard.value, pos),
+          },
+        ]
+      : []),
   ]);
 }
 
