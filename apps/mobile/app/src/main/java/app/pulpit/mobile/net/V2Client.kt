@@ -20,6 +20,7 @@ import app.pulpit.mobile.proto.InteractionPayload
 import app.pulpit.mobile.proto.StateSync
 import app.pulpit.mobile.proto.V2
 import app.pulpit.mobile.proto.Welcome
+import app.pulpit.mobile.proto.decodeDeltaOps
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.json.Json
@@ -259,7 +260,16 @@ class V2Client(
             }
             V2.TYPE_BOARDS_DELTA -> {
                 val delta = json.decodeFromJsonElement(BoardsDelta.serializer(), payload)
-                val ops = delta.ops.mapNotNull { BoardOp.from(it, json) }
+                val ops = decodeDeltaOps(delta.ops, json)
+                if (ops == null) {
+                    // One op this client cannot parse: the local board
+                    // snapshot is no longer trustworthy. Close the socket
+                    // so the reconnect path fetches a fresh boards.sync -
+                    // staying would drift silently from the desktop.
+                    Log.w(TAG, "rejected boards.delta op - reconnecting for a fresh snapshot")
+                    webSocket?.close(1000, "delta op rejected")
+                    return
+                }
                 _events.trySend(V2Event.Delta(delta.generation, ops))
             }
             V2.TYPE_BOARD_OPEN -> {
@@ -317,7 +327,11 @@ class V2Client(
             .pingInterval(KEEPALIVE_SECONDS, TimeUnit.SECONDS)
             .build()
         const val CLIENT = "pulpit-mobile"
-        const val VERSION = "0.2.0"
+        /** Client version reported in hello. Derived from versionName,
+         *  which build.gradle.kts reads out of the workspace Cargo.toml -
+         *  the single version source (this used to be a drifting
+         *  literal). */
+        val VERSION = app.pulpit.mobile.BuildConfig.VERSION_NAME
         /** OkHttp ping interval; a missing pong fails the socket. */
         const val KEEPALIVE_SECONDS = 30L
         /** Fatal errors close the socket; no point retrying with the same auth. */
