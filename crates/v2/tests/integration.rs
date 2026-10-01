@@ -740,6 +740,87 @@ async fn slow_hold_actions_do_not_starve_other_sessions() {
     );
 }
 
+async fn wait_for_exec(backend: &MockBackend, expected: (i64, bool)) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if backend.execs.lock().unwrap().contains(&expected) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "exec {expected:?} never landed: {:?}",
+            backend.execs.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn held_keys_release_when_the_socket_drops() {
+    let backend = sample_backend();
+    let (state, _dir) = test_state(backend.clone(), |_| {});
+    let device = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    // press-start a key tile: the exec drives key-down (tap-start
+    // semantics). The socket then dies without a press-end - §6
+    // promises the key is released when the connection dies.
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "k1",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    wait_for_exec(&backend, (23, true)).await;
+    drop(ws);
+    wait_for_exec(&backend, (23, false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hub_teardown_ends_the_session_and_releases_held_keys() {
+    let backend = sample_backend();
+    let (state, _dir) = test_state(backend.clone(), |_| {});
+    let device = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "k1",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    wait_for_exec(&backend, (23, true)).await;
+    // Stop reading (never poll the socket again) and flood it: the hub
+    // must tear the wedged session down. The key release only happens
+    // in the session task's tail, so observing it also proves the
+    // session task finished (no zombie read loop).
+    let _ws = ws;
+    let fat = Frame::push(
+        TYPE_STATE_PATCH,
+        serde_json::json!({"changes": [{"channel": "ext.flood", "value": "x".repeat(8192)}]}),
+    );
+    for _ in 0..600 {
+        state.hub.broadcast_frame(&fat);
+        if state.hub.count() == 0 {
+            break;
+        }
+    }
+    assert_eq!(state.hub.count(), 0, "wedged session must be torn down");
+    wait_for_exec(&backend, (23, false)).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn undeclared_interactions_are_rejected() {
     let (state, _dir) = test_state(sample_backend(), |_| {});

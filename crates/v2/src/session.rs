@@ -82,11 +82,24 @@ pub(super) async fn run(state: Arc<V2State>, socket: WebSocket, auth: Auth) {
     // through the session; the handle lives there, not in a local.
     session.set_pump(pump);
 
-    if run_session(&state, &session, &mut stream, &out_tx, auth)
-        .await
-        .is_fatal()
-    {
-        // Fatal: let the pump flush the queued error frames, then close
+    // The session body races hub-side teardown (queue overflow, silence
+    // watchdog, server exit): those paths cancel the session so the task
+    // ends promptly instead of lingering on a dead socket, and the tail
+    // below always runs its cleanup.
+    let mut cancelled = session.cancelled();
+    let outcome = tokio::select! {
+        outcome = run_session(&state, &session, &mut stream, &out_tx, auth) => outcome,
+        _ = cancelled.wait_for(|v| *v) => End::Cancelled,
+    };
+    // Unconditional teardown on every path: stop repeat loops, then run
+    // the release phase for keys whose press-start never got a
+    // press-end (§6: a repeat loop "is released when the connection
+    // dies").
+    session.abort_holds();
+    release_held_keys(&state, &session).await;
+    if outcome.flushes_pump() {
+        // Fatal or cancelled by the hub: let the pump flush the queued
+        // frames (error bursts, the shutdown goodbye), then close
         // politely - an abort would drop them.
         let _ = out_tx.try_send(WsOut::Close);
         session.finish_pump(Duration::from_millis(500)).await;
@@ -104,13 +117,18 @@ enum End {
     Closed,
     /// Server decided the connection must die (auth/size violations).
     Fatal,
+    /// Hub-side teardown (queue overflow, silence watchdog, exit).
+    Cancelled,
     // Reaching the end of `run_session` without either just means the
     // stream ended; it maps to Closed.
 }
 
 impl End {
-    fn is_fatal(&self) -> bool {
-        *self == End::Fatal
+    /// Whether the pump should flush queued frames before the close.
+    /// Cancelled sessions may still owe the client frames (the shutdown
+    // goodbye), so they flush like fatal ones.
+    fn flushes_pump(&self) -> bool {
+        !matches!(self, End::Closed)
     }
 }
 
@@ -394,6 +412,12 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
         Interaction::PressStart => {
             ack_ok();
             exec_once(state, button.clone(), true);
+            // tap-start only holds something down for key tiles; their
+            // release phase must run even if this socket never sends
+            // press-end (dropped tablet, overflow teardown, exit).
+            if button.kind == "key" {
+                session.key_pressed(payload.tile, button.clone());
+            }
             let params: Value = serde_json::from_str(button.options.as_deref().unwrap_or(""))
                 .unwrap_or(Value::Null);
             if let Some((delay_ms, interval_ms)) = crate::boards::hold_repeat_config(&params) {
@@ -408,6 +432,7 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
         }
         Interaction::PressEnd => {
             session.stop_hold(payload.tile);
+            session.key_released(payload.tile);
             ack_ok();
             exec_once(state, button, false);
         }
@@ -479,6 +504,27 @@ fn exec_once(state: &Arc<V2State>, button: ButtonRow, is_tap_start: bool) {
     tokio::task::spawn_blocking(move || {
         exec_blocking(&backend, &engine, &hub, button, is_tap_start)
     });
+}
+
+/// Runs the release phase for every key the session left pressed. The
+/// exec is blocking work (enigo key-ups), so it runs on the blocking
+/// pool; the session task has nothing else to do afterwards, so the
+/// await is harmless even for slow backends.
+async fn release_held_keys(state: &Arc<V2State>, session: &Arc<V2Session>) {
+    let held = session.take_held_keys();
+    if held.is_empty() {
+        return;
+    }
+    tracing::info!(session = session.id, tiles = held.len(), "releasing keys held by the closing session");
+    let backend = state.backend.clone();
+    let engine = state.engine.clone();
+    let hub = state.hub.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        for button in held {
+            exec_blocking(&backend, &engine, &hub, button, false);
+        }
+    })
+    .await;
 }
 
 fn exec_blocking(
