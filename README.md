@@ -73,12 +73,12 @@ Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
 `settings.json`, `editor.json`, `devices.json`, `extensions/`, `assets/`,
 `logs/`. Environment overrides:
 
-| Variable         | Default                   | Purpose                                     |
-| ---------------- | ------------------------- | ------------------------------------------- |
-| `PULPIT_PORT`    | `8500`                    | Server port (legacy + v2 share it)          |
-| `PULPIT_DB`      | `~/pulpitApp/database.db` | Database location (profiling/hermetic runs) |
-| `PULPIT_EXT_DIR` | `~/pulpitApp/extensions`  | Extension directory                         |
-| `PULPIT_AIDEV_CONFIG` | `~/pulpitApp/aidev.json` | AI dev-work config (hermetic runs)     |
+| Variable              | Default                   | Purpose                                     |
+| --------------------- | ------------------------- | ------------------------------------------- |
+| `PULPIT_PORT`         | `8500`                    | Server port (legacy + v2 share it)          |
+| `PULPIT_DB`           | `~/pulpitApp/database.db` | Database location (profiling/hermetic runs) |
+| `PULPIT_EXT_DIR`      | `~/pulpitApp/extensions`  | Extension directory                         |
+| `PULPIT_AIDEV_CONFIG` | `~/pulpitApp/aidev.json`  | AI dev-work config (hermetic runs)          |
 
 ## Architecture
 
