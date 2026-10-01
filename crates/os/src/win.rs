@@ -265,16 +265,22 @@ impl Speaker for WinSpeaker {
         wide.push(0);
         // roles: 0 = console, 1 = multimedia, 2 = communications - set all
         // three so every consumer follows the switch (what the Settings
-        // app and SoundSwitch do)
+        // app and SoundSwitch do). A failing role must not skip the
+        // others: a partial switch is worse than a reported error, so
+        // every role runs and the first failure is surfaced afterwards.
+        let mut first_err = None;
         for role in 0..3i32 {
             let hr = HRESULT(unsafe {
                 ((*config.vtbl).set_default_endpoint)(config.raw, PCWSTR(wide.as_ptr()), role)
             });
-            if hr.is_err() {
-                return Err(OsError::Failed(format!("set default endpoint: {hr}")));
+            if hr.is_err() && first_err.is_none() {
+                first_err = Some(hr);
             }
         }
-        Ok(())
+        match first_err {
+            Some(hr) => Err(OsError::Failed(format!("set default endpoint: {hr}"))),
+            None => Ok(()),
+        }
     }
 }
 
