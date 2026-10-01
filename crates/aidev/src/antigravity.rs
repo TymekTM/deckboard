@@ -190,14 +190,17 @@ fn step_timestamp(meta: &[u8]) -> Option<i64> {
             i += 4;
         } else if wire == 2 {
             let (len, consumed) = read_varint(&meta[i..])?;
-            i += consumed;
-            if i + len as usize > meta.len() {
+            // untrusted length: checked advance only, a wrap could loop
+            let next = i
+                .checked_add(consumed)?
+                .checked_add(usize::try_from(len).ok()?)?;
+            if next > meta.len() {
                 return None;
             }
             if ((key >> 3) & 0xFFFFF) as u32 == 1 && wrapped.is_none() {
-                wrapped = Some(&meta[i..i + len as usize]);
+                wrapped = Some(&meta[i + consumed..next]);
             }
-            i += len as usize;
+            i = next;
         } else {
             return None;
         }
@@ -271,10 +274,18 @@ fn walk_top_level(buf: &[u8], visit: &mut impl FnMut(u32, u64)) {
                 let Some((len, consumed)) = read_varint(&buf[i..]) else {
                     return;
                 };
-                i += consumed + len as usize;
-                if i > buf.len() {
+                // untrusted length: checked advance, never overflow or
+                // wrap (a wrap could loop forever)
+                let Some(next) = i
+                    .checked_add(consumed)
+                    .and_then(|i| i.checked_add(usize::try_from(len).ok()?))
+                else {
+                    return;
+                };
+                if next > buf.len() {
                     return;
                 }
+                i = next;
             }
             5 => i += 4,
             _ => return,
@@ -493,6 +504,23 @@ mod tests {
         blob.extend(varint(999));
         blob.extend_from_slice(&[0xFF; 4]);
         assert_eq!(count_blob(&blob), None);
+    }
+
+    #[test]
+    fn hostile_varint_lengths_end_the_walk() {
+        // a hostile length varint (u64::MAX) must end the walk through
+        // checked arithmetic, not overflow-panic or wrap into a loop
+        let mut blob = varint((2 << 3) | 2);
+        blob.extend(varint(u64::MAX));
+        blob.extend_from_slice(&[0xFF; 8]);
+        assert_eq!(count_blob(&blob), None);
+        assert_eq!(step_timestamp(&blob), None);
+
+        // same hostility inside the steps metadata walk
+        let mut meta = varint((1 << 3) | 2);
+        meta.extend(varint(u64::MAX));
+        meta.extend_from_slice(&[0xFF; 8]);
+        assert_eq!(step_timestamp(&meta), None);
     }
 
     #[test]
