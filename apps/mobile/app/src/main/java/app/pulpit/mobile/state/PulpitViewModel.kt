@@ -24,6 +24,7 @@ import app.pulpit.mobile.proto.V2
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,7 +45,12 @@ data class ServerConfig(
 
 class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val scope = CoroutineScope(Job())
+    /** Every field below is confined to the main thread: Compose calls in
+     *  from there, and this scope runs every coroutine there too. Blocking
+     *  work hops to Dispatchers.IO explicitly (ensureAsset); frame decoding
+     *  already happens on OkHttp's thread inside V2Client. SupervisorJob so
+     *  one failed child cannot cancel the reconnect loop and the probe. */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val prefs = app.getSharedPreferences("pulpit", Context.MODE_PRIVATE)
 
@@ -100,8 +106,9 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     private val _bitmaps = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
     val bitmaps: StateFlow<Map<String, ImageBitmap>> = _bitmaps
 
-    /** Hashes with a fetch in flight or failed this process; failures are
-     *  not retried - a 404 stays a 404 until the app restarts. */
+    /** Hashes fetched, in flight, or failed this process (main thread
+     *  only). Failures retry ASSET_RETRIES times with backoff; forgetPairing
+     *  clears the set together with the bitmaps it guards. */
     private val assetFetches = mutableSetOf<String>()
 
     private var client: V2Client? = null
@@ -251,6 +258,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         _series.value = emptyMap()
         _channelMeta.value = emptyMap()
         _bitmaps.value = emptyMap()
+        assetFetches.clear()
     }
 
     /** The user tapped the shutdown overlay: leave the standby state and
