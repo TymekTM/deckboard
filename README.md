@@ -61,7 +61,8 @@ npx tauri build --no-bundle   # exe at ../../target/release/pulpit-desktop.exe
 Tests and lints run from the repo root:
 
 ```sh
-cargo test --workspace        # includes real device tests: audio, screen capture
+cargo test --workspace        # device tests (audio, capture, ...) are
+                              # #[ignore]d; run them with -- --ignored
 cargo clippy --workspace --all-targets
 cd apps/desktop && npx vite build
 ```
@@ -77,6 +78,7 @@ Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
 | `PULPIT_PORT`    | `8500`                    | Server port (legacy + v2 share it)          |
 | `PULPIT_DB`      | `~/pulpitApp/database.db` | Database location (profiling/hermetic runs) |
 | `PULPIT_EXT_DIR` | `~/pulpitApp/extensions`  | Extension directory                         |
+| `PULPIT_AIDEV_CONFIG` | `~/pulpitApp/aidev.json` | AI dev-work config (hermetic runs)     |
 
 ## Architecture
 
@@ -95,6 +97,7 @@ One Cargo workspace, thin crates with a single job each:
 | `crates/ext`     | Extension host: original Deckboard extensions on an embedded JS engine|
 | `crates/vm`      | Native Voicemeeter integration                                         |
 | `crates/discord` | Native Discord local-RPC integration                                   |
+| `crates/aidev`   | Native AI dev-work source: agent sessions, plan limits, token burn    |
 | `apps/desktop`   | Tauri 2 + Vue 3 editor and touch surface                               |
 | `apps/server`    | Headless server binary (legacy + v2)                                  |
 | `apps/mobile`    | Kotlin/Compose Android client (in development)                        |
