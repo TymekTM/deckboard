@@ -71,6 +71,9 @@ pub fn parse_key_name(raw: &str) -> Option<KeyName> {
         "down" => KeyName::Down,
         "left" => KeyName::Left,
         "right" => KeyName::Right,
+        // "+" cannot appear in a hotkey string (it is the separator),
+        // so the plus key gets its own name
+        "plus" => KeyName::Char('+'),
         other => {
             if let Some(rest) = other.strip_prefix('f') {
                 if let Ok(n) = rest.parse::<u8>() {
@@ -492,7 +495,18 @@ fn run_open_file(input: &mut dyn Input, cmd: &Command) -> Result<()> {
 
 /// Parse `"CTRL + SHIFT + K"` into modifier+key lists (original hotkey format).
 pub fn parse_hotkey(raw: &str) -> Vec<KeyName> {
-    raw.split('+').filter_map(parse_key_name).collect()
+    if raw.trim() == "+" {
+        return vec![KeyName::Char('+')];
+    }
+    raw.split('+')
+        .filter_map(|part| {
+            let name = parse_key_name(part);
+            if name.is_none() {
+                tracing::warn!(part = part.trim(), "unknown key name in hotkey - skipped");
+            }
+            name
+        })
+        .collect()
 }
 
 /// Real OS backend.
@@ -780,6 +794,16 @@ mod tests {
         assert_eq!(keys, vec![Control, Shift, Char('k')]);
         assert_eq!(parse_hotkey("f5"), vec![Function(5)]);
         assert_eq!(parse_hotkey("ENTER"), vec![Return]);
+    }
+
+    #[test]
+    fn hotkey_parsing_plus_key_and_unknown_names() {
+        // "+" is the separator, so the plus key needs its own name
+        assert_eq!(parse_hotkey("plus"), vec![Char('+')]);
+        assert_eq!(parse_hotkey("+"), vec![Char('+')]);
+        assert_eq!(parse_hotkey("CTRL+plus"), vec![Control, Char('+')]);
+        // unknown names are skipped (with a warning), not silently
+        assert_eq!(parse_hotkey("CTRL+bogus+P"), vec![Control, Char('p')]);
     }
 
     #[test]
