@@ -918,7 +918,9 @@ mod tests {
         backend.exec_tap(url, &mut RecSink::default());
         assert_eq!(
             input.effects(),
-            vec![pulpit_actions::Effect::OpenUrl("https://example.com".into())]
+            vec![pulpit_actions::Effect::OpenUrl(
+                "https://example.com".into()
+            )]
         );
     }
 

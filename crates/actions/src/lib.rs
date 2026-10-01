@@ -898,11 +898,17 @@ mod tests {
         // must not stall every later action
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
-        let c = cmd("multiaction", Some(r#"[{"type":"delay","command":"999999"}]"#));
+        let c = cmd(
+            "multiaction",
+            Some(r#"[{"type":"delay","command":"999999"}]"#),
+        );
         run_command(&mut input, &mut sink, &c, false).unwrap();
         assert_eq!(input.effects, vec![Effect::Sleep(MAX_DELAY_MS)]);
 
-        let adv = cmd("advance-key", Some(r#"[{"action":"delay","value":999999}]"#));
+        let adv = cmd(
+            "advance-key",
+            Some(r#"[{"action":"delay","value":999999}]"#),
+        );
         run_command(&mut input, &mut sink, &adv, false).unwrap();
         assert_eq!(input.effects[1], Effect::Sleep(MAX_DELAY_MS));
     }
