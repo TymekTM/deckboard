@@ -189,6 +189,47 @@ pub fn run_command(
     cmd: &Command,
     is_tap_start: bool,
 ) -> Result<()> {
+    let mut steps = BuiltinSteps;
+    run_command_dispatched(input, sink, cmd, is_tap_start, &mut steps)
+}
+
+/// Multiaction step dispatcher. Built-in commands go through
+/// [`run_command`] directly; a host with native/extension dispatchers
+/// (see `crates/backend`) implements this trait so every multiaction
+/// step runs through the same chain as a top-level tile press instead
+/// of only the built-in kinds.
+pub trait StepDispatch {
+    fn dispatch_step(
+        &mut self,
+        input: &mut dyn Input,
+        sink: &mut dyn EventSink,
+        cmd: &Command,
+    ) -> Result<()>;
+}
+
+/// Default dispatcher: built-ins only, the historical multiaction
+/// behavior for callers without a native chain.
+struct BuiltinSteps;
+impl StepDispatch for BuiltinSteps {
+    fn dispatch_step(
+        &mut self,
+        input: &mut dyn Input,
+        sink: &mut dyn EventSink,
+        cmd: &Command,
+    ) -> Result<()> {
+        run_command(input, sink, cmd, false)
+    }
+}
+
+/// Like [`run_command`], but multiaction steps are dispatched through
+/// `dispatch` instead of the built-in-only fallback.
+pub fn run_command_dispatched(
+    input: &mut dyn Input,
+    sink: &mut dyn EventSink,
+    cmd: &Command,
+    is_tap_start: bool,
+    dispatch: &mut dyn StepDispatch,
+) -> Result<()> {
     // Sliders are driven by exec_slider, not exec_shortcut.
     if cmd.mode == "slider" {
         return run_slider_command(input, cmd, 0.0);
@@ -227,7 +268,7 @@ pub fn run_command(
             tracing::warn!(kind = k, "command type not implemented yet");
             Ok(())
         }
-        "multiaction" => run_multiaction(input, sink, cmd),
+        "multiaction" => run_multiaction(input, sink, cmd, dispatch),
         "advance-key" => run_advance_key(input, cmd),
         "type" => {
             let text = cmd.command.as_deref().unwrap_or_default();
@@ -295,7 +336,12 @@ fn parse_board_id(command: Option<&str>) -> Option<i64> {
         .or_else(|| command.and_then(|s| s.trim().parse().ok()))
 }
 
-fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Command) -> Result<()> {
+fn run_multiaction(
+    input: &mut dyn Input,
+    sink: &mut dyn EventSink,
+    cmd: &Command,
+    dispatch: &mut dyn StepDispatch,
+) -> Result<()> {
     let raw = cmd.command.as_deref().unwrap_or("[]");
     let steps: Vec<Value> = serde_json::from_str(raw)
         .map_err(|e| ActionError::BadPayload("multiaction".into(), e.to_string()))?;
@@ -339,7 +385,7 @@ fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Comman
                     input.key_up(&keys)?;
                 }
             }
-            _ => run_command(input, sink, &step_cmd, false)?,
+            _ => dispatch.dispatch_step(input, sink, &step_cmd)?,
         }
     }
     Ok(())
@@ -808,6 +854,48 @@ mod tests {
             .effects
             .contains(&Effect::OpenUrl("https://example.com".into())));
         assert_eq!(sink.boards, vec![7]);
+    }
+
+    /// Host dispatcher: claims everything it is asked to run.
+    #[derive(Default)]
+    struct ClaimingDispatch {
+        claimed: Vec<String>,
+    }
+    impl StepDispatch for ClaimingDispatch {
+        fn dispatch_step(
+            &mut self,
+            _input: &mut dyn Input,
+            _sink: &mut dyn EventSink,
+            cmd: &Command,
+        ) -> Result<()> {
+            self.claimed.push(cmd.kind.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn multiaction_steps_go_through_the_host_dispatcher() {
+        let mut input = MockInput::default();
+        let mut sink = MockSink::default();
+        let c = cmd(
+            "multiaction",
+            Some(
+                r#"[
+                {"type":"key","command":"ENTER"},
+                {"type":"board","command":"{\"id\":7}"},
+                {"type":"delay","command":"100"},
+                {"type":"speaker-device","command":"{}"}
+            ]"#,
+            ),
+        );
+        let mut dispatch = ClaimingDispatch::default();
+        run_command_dispatched(&mut input, &mut sink, &c, false, &mut dispatch).unwrap();
+        // only the non-special step is handed to the host dispatcher
+        assert_eq!(dispatch.claimed, vec!["speaker-device".to_string()]);
+        // the delay/board/key special cases keep running locally
+        assert_eq!(sink.boards, vec![7]);
+        assert!(input.effects.contains(&Effect::KeyDown(vec![Return])));
+        assert!(input.effects.contains(&Effect::Sleep(100)));
     }
 
     #[test]
