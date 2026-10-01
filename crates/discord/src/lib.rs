@@ -41,12 +41,28 @@ pub type Result<T> = std::result::Result<T, DiscordError>;
 
 /// Credentials read from `~/pulpitApp/settings.json` (the original app's
 /// config fields for the discord-deckboard package).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct DiscordConfig {
     pub client_id: String,
     pub client_secret: String,
     pub access_token: String,
     pub refresh_token: Option<String>,
+}
+
+impl std::fmt::Debug for DiscordConfig {
+    /// Secrets must never reach logs (kept 14 days): every credential is
+    /// redacted, only the public client id prints for correlation.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscordConfig")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Scopes the original extension requests - voice control needs
@@ -91,9 +107,28 @@ pub struct AuthTokens {
     pub refresh_token: Option<String>,
 }
 
+impl std::fmt::Debug for AuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthTokens")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// Bound on a single HTTP call to Discord (OAuth exchange): a wedged
+/// network must not pin the calling action thread indefinitely.
+const HTTP_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Local port probes answer instantly or refuse the connection; anything
+/// still silent after this is not Discord.
+const HTTP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Discord's local HTTP endpoint (the port that answers 404 on /).
 fn find_endpoint() -> Result<String> {
-    let agent = http_agent();
+    let agent = http_agent(HTTP_PROBE_TIMEOUT);
     for port in 6463..6473 {
         let url = format!("http://127.0.0.1:{port}");
         // ureq reports 404 as an error unless configured otherwise, and
@@ -108,10 +143,11 @@ fn find_endpoint() -> Result<String> {
 }
 
 /// HTTP client that returns every status as a Response (Discord's local
-/// API answers 404/400 on purpose).
-fn http_agent() -> ureq::Agent {
+/// API answers 404/400 on purpose), with a per-call timeout.
+fn http_agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .timeout_global(Some(timeout))
         .build()
         .new_agent()
 }
@@ -139,7 +175,7 @@ fn urlencode(s: &str) -> String {
 }
 
 fn post_form(url: &str, body: &str) -> Result<Value> {
-    let resp = http_agent()
+    let resp = http_agent(HTTP_CALL_TIMEOUT)
         .post(url)
         .content_type("application/x-www-form-urlencoded")
         .header("Authorization", "Bearer null") // discord-rpc sends this too
@@ -383,6 +419,12 @@ const OP_FRAME: u32 = 1;
 const OP_PING: u32 = 3;
 const OP_PONG: u32 = 4;
 
+/// Largest inbound frame the client will ever assemble; real Discord
+/// frames are a few KB of JSON. A length header beyond this means desync
+/// or a hostile peer - the receive buffer is dropped instead of growing
+/// toward the claimed size (up to 2 GiB).
+const MAX_FRAME_LEN: usize = 1 << 20; // 1 MiB
+
 pub fn encode_frame(op: u32, payload: &str) -> Vec<u8> {
     let mut buf = Vec::with_capacity(8 + payload.len());
     buf.extend_from_slice(&(op as i32).to_le_bytes());
@@ -391,13 +433,27 @@ pub fn encode_frame(op: u32, payload: &str) -> Vec<u8> {
     buf
 }
 
-/// Parse `[op][len][payload]` from a buffer; None while incomplete.
+/// Payload length claimed by the frame header at the front of `buf`.
+fn frame_len(buf: &[u8]) -> usize {
+    let bytes: [u8; 4] = buf
+        .get(4..8)
+        .and_then(|s| s.try_into().ok())
+        .unwrap_or([0; 4]);
+    i32::from_le_bytes(bytes).max(0) as usize
+}
+
+/// Parse `[op][len][payload]` from a buffer; None while incomplete. A
+/// claimed length beyond [`MAX_FRAME_LEN`] also yields None - the caller
+/// drops such buffers instead of waiting the claimed bytes out.
 pub fn decode_frame(buf: &[u8]) -> Option<(u32, &[u8])> {
     if buf.len() < 8 {
         return None;
     }
     let op = u32::from_le_bytes(buf[0..4].try_into().ok()?) as i32;
-    let len = i32::from_le_bytes(buf[4..8].try_into().ok()?).max(0) as usize;
+    let len = frame_len(buf);
+    if len > MAX_FRAME_LEN {
+        return None;
+    }
     if buf.len() < 8 + len {
         return None;
     }
@@ -409,7 +465,19 @@ pub fn decode_frame(buf: &[u8]) -> Option<(u32, &[u8])> {
 /// (it cannot participate in request/reply matching anyway).
 fn extract_frames(buf: &mut Vec<u8>) -> Vec<(u32, Value)> {
     let mut frames = Vec::new();
-    while let Some((op, payload)) = decode_frame(buf) {
+    while buf.len() >= 8 {
+        if frame_len(buf) > MAX_FRAME_LEN {
+            tracing::warn!(
+                claimed = frame_len(buf),
+                cap = MAX_FRAME_LEN,
+                "discord frame length beyond cap, dropping the receive buffer"
+            );
+            buf.clear();
+            break;
+        }
+        let Some((op, payload)) = decode_frame(buf) else {
+            break;
+        };
         let payload = payload.to_vec();
         buf.drain(..8 + payload.len());
         match serde_json::from_slice(&payload) {
@@ -1362,8 +1430,8 @@ mod tests {
 
         // missing file: the only case that starts from `{}`
         save_tokens(&path, &tokens).unwrap();
-        let created: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
-            .unwrap();
+        let created: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             created["discord-deckboard"]["discordRefreshToken"]["value"],
             "fake-refresh-token"
@@ -1376,11 +1444,9 @@ mod tests {
         )
         .unwrap();
         save_tokens(&path, &tokens).unwrap();
-        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
-            .unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            saved["other-package"]["someSetting"]["value"],
-            "keep-me",
+            saved["other-package"]["someSetting"]["value"], "keep-me",
             "merging must not wipe unrelated extensions' settings"
         );
         assert_eq!(
@@ -1448,6 +1514,72 @@ mod tests {
         // if Discord runs this opens a real pipe and drops it again; either
         // way it must not panic
         let _ = Pipe::open();
+    }
+
+    #[test]
+    fn config_debug_redacts_credentials() {
+        // logs are kept for 14 days; the derived Debug would have printed
+        // every credential verbatim
+        let config = DiscordConfig {
+            client_id: "123456789012345678".into(),
+            client_secret: "fake-client-secret".into(),
+            access_token: "fake-access-token".into(),
+            refresh_token: Some("fake-refresh-token".into()),
+        };
+        let printed = format!("{config:?}");
+        assert!(!printed.contains("fake-client-secret"));
+        assert!(!printed.contains("fake-access-token"));
+        assert!(!printed.contains("fake-refresh-token"));
+        assert!(
+            printed.contains("123456789012345678"),
+            "client id is public"
+        );
+    }
+
+    #[test]
+    fn auth_tokens_debug_redacts_credentials() {
+        let tokens = AuthTokens {
+            access_token: "fake-access-token".into(),
+            refresh_token: Some("fake-refresh-token".into()),
+        };
+        let printed = format!("{tokens:?}");
+        assert!(!printed.contains("fake-access-token"));
+        assert!(!printed.contains("fake-refresh-token"));
+    }
+
+    #[test]
+    fn extract_frames_drops_a_buffer_with_an_absurd_frame_length() {
+        // a corrupted or hostile length header must not let the receive
+        // buffer grow toward the claimed size (up to 2 GiB)
+        let mut buf = encode_frame(OP_FRAME, "{}");
+        buf[4..8].copy_from_slice(&i32::MAX.to_le_bytes());
+        buf.extend_from_slice(b"junk-after-the-lie");
+        let frames = extract_frames(&mut buf);
+        assert!(frames.is_empty());
+        assert!(
+            buf.is_empty(),
+            "the poisoned buffer is dropped, not retained"
+        );
+    }
+
+    #[test]
+    fn http_agent_times_out_against_a_silent_server() {
+        // accept the connection, then never answer: an agent without a
+        // timeout blocks the calling action thread until OS defaults
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let agent = http_agent(Duration::from_millis(300));
+        let started = Instant::now();
+        let result = agent.get(format!("http://{addr}/")).call();
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the agent must carry a real timeout, got {:?}",
+            started.elapsed()
+        );
     }
 
     /// Live probe: reads the saved token from settings.json, connects and
