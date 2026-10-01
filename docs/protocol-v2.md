@@ -12,8 +12,8 @@ covers v2.
 ## 1. Transport
 
 - Plain WebSocket, JSON text frames, endpoint `/v2/ws` on the same port as
-  the legacy server (8500 long-term; 8501 while the original app owns the
-  port). One TCP connection per client session.
+  the legacy server (8500; `PULPIT_PORT` overrides). One TCP connection
+  per client session.
 - Max inbound frame: 1 MiB. Larger frames get an `error` frame
   (`code: "too-large"`) and close the connection.
 - Keepalive: the server sends a WebSocket protocol-level ping every 60 s.
