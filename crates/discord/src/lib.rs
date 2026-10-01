@@ -1362,8 +1362,8 @@ mod tests {
 
         // missing file: the only case that starts from `{}`
         save_tokens(&path, &tokens).unwrap();
-        let created: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
-            .unwrap();
+        let created: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             created["discord-deckboard"]["discordRefreshToken"]["value"],
             "fake-refresh-token"
@@ -1376,11 +1376,9 @@ mod tests {
         )
         .unwrap();
         save_tokens(&path, &tokens).unwrap();
-        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
-            .unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            saved["other-package"]["someSetting"]["value"],
-            "keep-me",
+            saved["other-package"]["someSetting"]["value"], "keep-me",
             "merging must not wipe unrelated extensions' settings"
         );
         assert_eq!(

@@ -545,9 +545,23 @@ still open here; E3's AGENTS.md part -> plan 011 (SUPERSEDED).
 
 | Item | Status |
 |------|--------|
-| A1-A9 | TODO |
-| B1-B3 | TODO |
+| A1 | TODO (lane L2a in flight; A2 already landed, see below) |
+| A2 | DONE (`8627a7a`, lane L2a; table test 1..=24) |
+| A3 | DONE (`0f01c39`, lane L5; `claude_oauth_credentials` + fixture tests, fake tokens only) |
+| A4, A9 | TODO (lane L1, not dispatched yet) |
+| A5 | PARTIAL (helper `db::write_atomic` `83ad3d7` + discord site `14b1e63` landed; editor.json site, corrupt-file test, A6/A8 sites pending - lane L2b resumed) |
+| A6, A8 | TODO (lane L2b in flight) |
+| A7 | TODO (lane L3, not dispatched yet) |
+| B1-B3 | TODO (B1 can never be DONE without a manual tablet test - NEEDS-MANUAL-TEST at best) |
 | C1-C5 | TODO |
-| D1 (phantom tap only), D4 | TODO |
+| D1 (phantom tap only), D4 | TODO (lane L4 in flight) |
 | D2, D3 | SUPERSEDED by 006, 007 |
-| E1-E3 | TODO |
+| E1 | TODO (lane L3; required before Wave-2 C5) |
+| E2 | DONE (`b0d809a`, lane L6; clippy `-D warnings` with a 9-lint baseline allowlist, mobile job, npm cache, concurrency, permissions) |
+| E3 | DONE except apps/mobile naming (`cc18631`/`a7ab021`/`dcbd341`/`0bd7148`, lane L6; apps/mobile README + build.gradle "Deckboard" naming handed to L4) |
+
+Lower-priority items: aidev antigravity varint (`eb0fd38`), codex tail
+reads + per-line continues (`4953a1e`), zai plaintext-http refusal
+(`eeb705e`), os PolicyConfig ABI (`ef35bed`), os set_active_device role
+loop (`5d1bfc3`) - DONE (lane L5). Remaining lower-priority: os
+clipboard/capture/MCI, sysinfo push_loop, actions/discord/ext/vm items.
