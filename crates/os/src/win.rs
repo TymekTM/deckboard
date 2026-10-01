@@ -112,8 +112,7 @@ struct PolicyConfigVtbl {
     set_share_mode: *mut std::ffi::c_void,
     get_property_value: *mut std::ffi::c_void,
     set_property_value: *mut std::ffi::c_void,
-    set_default_endpoint:
-        unsafe extern "system" fn(*mut std::ffi::c_void, PCWSTR, i32) -> i32,
+    set_default_endpoint: unsafe extern "system" fn(*mut std::ffi::c_void, PCWSTR, i32) -> i32,
     set_endpoint_visibility: *mut std::ffi::c_void,
 }
 

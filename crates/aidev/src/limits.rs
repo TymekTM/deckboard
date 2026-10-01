@@ -1124,10 +1124,9 @@ mod tests {
         assert!(claude_oauth_credentials(&v, 0).is_none());
 
         // no scope list at all: the grant is unknown, the call decides
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"claudeAiOauth":{"accessToken":"test-oauth-token"}}"#,
-        )
-        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"claudeAiOauth":{"accessToken":"test-oauth-token"}}"#)
+                .unwrap();
         assert!(claude_oauth_credentials(&v, 0).is_some());
 
         // no token in either spelling
@@ -1177,7 +1176,10 @@ mod tests {
             zai_base_url(Some(" open.bigmodel.cn ")).unwrap(),
             "https://open.bigmodel.cn"
         );
-        assert_eq!(zai_base_url(Some("https://api.z.ai/")).unwrap(), "https://api.z.ai");
+        assert_eq!(
+            zai_base_url(Some("https://api.z.ai/")).unwrap(),
+            "https://api.z.ai"
+        );
         // plain http would send the Bearer key in plaintext: loopback only
         assert!(zai_base_url(Some("http://api.z.ai")).is_err());
         assert!(zai_base_url(Some("http://example.com/x")).is_err());
