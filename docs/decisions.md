@@ -72,6 +72,9 @@ connection loop in a foreground service and prompts the user to exempt the
 app from battery optimization on first run. Without this the "live
 controller" silently dies with the screen off.
 
+Not implemented as of 2026-10: the client still runs its connection loop
+inside the activity process (see `plans/008-mobile-link-lifecycle-standby.md`).
+
 ## ADR-008: LAN trust with one-time pairing codes and per-device tokens
 
 The legacy layer stays unauthenticated (LAN trust, like the original) - do
@@ -85,6 +88,12 @@ ships with the desktop UI). Trusting creates a per-device entry in
 every later connect uses `?token=...`. Revoking a device = deleting its
 entry, so a leaked token never widens beyond one tablet. The tablet keeps
 its token in EncryptedSharedPreferences.
+
+Partially implemented as of 2026-10: pairing codes and per-device tokens
+are live, but the desktop trust prompt is not (pairing auto-accepts with a
+warning log) and the tablet stores its token in plain SharedPreferences,
+not EncryptedSharedPreferences (`plans/012-audit-findings-2026-10-01.md`,
+item B2).
 
 ## ADR-009: Structured logging from day one
 
