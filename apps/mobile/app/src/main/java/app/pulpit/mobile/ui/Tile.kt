@@ -260,6 +260,10 @@ private fun ButtonTile(
     // (board.delta) swaps the callbacks underneath it, so read the newest
     val pressStart by rememberUpdatedState(onPressStart)
     val pressEnd by rememberUpdatedState(onPressEnd)
+    // the tile object swaps too (an edit can change press modes): the
+    // cancel decision must use the current interactions, not the ones
+    // from the composition that started the gesture
+    val currentTile by rememberUpdatedState(tile)
     // icon-only faces (discord voice toggles): the color and the glyph
     // carry the state, a label would only repeat it
     val title = if (iconOnly) "" else listOfNotNull(
@@ -279,11 +283,11 @@ private fun ButtonTile(
                             // tryAwaitRelease is false when the touch was
                             // cancelled (finger slid off, parent stole it)
                             released = tryAwaitRelease()
-                        } finally {
+                        }                         finally {
                             // a cancelled touch is not a tap, but a hold
                             // tile's key is still down: its press-end must
                             // go out even then
-                            if (released || tile.interacts(V2.INT_PRESS_END)) {
+                            if (released || currentTile.interacts(V2.INT_PRESS_END)) {
                                 pressEnd()
                             } else {
                                 onPressCancel()
