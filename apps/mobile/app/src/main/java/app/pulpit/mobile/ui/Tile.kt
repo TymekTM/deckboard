@@ -30,6 +30,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -248,6 +249,10 @@ private fun ButtonTile(
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
 ) {
+    // the gesture block below lives as long as tile.id; a live tile edit
+    // (board.delta) swaps the callbacks underneath it, so read the newest
+    val pressStart by rememberUpdatedState(onPressStart)
+    val pressEnd by rememberUpdatedState(onPressEnd)
     // icon-only faces (discord voice toggles): the color and the glyph
     // carry the state, a label would only repeat it
     val title = if (iconOnly) "" else listOfNotNull(
@@ -261,11 +266,11 @@ private fun ButtonTile(
             .pointerInput(tile.id) {
                 detectTapGestures(
                     onPress = {
-                        onPressStart()
+                        pressStart()
                         try {
                             awaitRelease()
                         } finally {
-                            onPressEnd()
+                            pressEnd()
                         }
                     },
                 )
@@ -322,6 +327,8 @@ private fun SliderTile(
 ) {
     var value by remember(tile.id) { mutableFloatStateOf(0.5f) }
     val slide = remember(tile.id) { SlideThrottle() }
+    // see ButtonTile: the drag block outlives a live tile edit
+    val sendSlide by rememberUpdatedState(onSlider)
     val fill = tile.style?.color2?.let { hex(it, baseColor.copy(alpha = 0.6f)) }
         ?: baseColor.copy(alpha = 0.55f)
 
@@ -332,17 +339,17 @@ private fun SliderTile(
                 detectDragGestures(
                     onDragStart = { offset ->
                         value = (1f - offset.y / size.height).coerceIn(0f, 1f)
-                        slide.push(value, force = true, send = onSlider)
+                        slide.push(value, force = true, send = sendSlide)
                     },
                     onDrag = { change, _ ->
                         change.consume()
                         value = (1f - change.position.y / size.height).coerceIn(0f, 1f)
-                        slide.push(value, send = onSlider)
+                        slide.push(value, send = sendSlide)
                     },
                     onDragEnd = {
                         // converge: the last sampled value always reaches
                         // the server, throttling only smooths the path
-                        slide.push(value, force = true, send = onSlider)
+                        slide.push(value, force = true, send = sendSlide)
                     },
                 )
             },

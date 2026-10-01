@@ -31,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -342,6 +343,8 @@ fun KnobTile(
 ) {
     var value by remember(tile.id) { mutableFloatStateOf(0.5f) }
     val slide = remember(tile.id) { SlideThrottle() }
+    // see ButtonTile (Tile.kt): the drag block outlives a live tile edit
+    val sendSlide by rememberUpdatedState(onSlider)
     val arcColor = tile.style?.color2?.let { hex(it, titleColor) } ?: titleColor
 
     Box(
@@ -365,13 +368,13 @@ fun KnobTile(
                         val scaled = if (radius < dead) value else clamped
                         if (scaled != value) {
                             value = scaled
-                            slide.push(value, send = onSlider)
+                            slide.push(value, send = sendSlide)
                         }
                     },
                     onDragEnd = {
                         // converge: the last sampled value always reaches
                         // the server, throttling only smooths the path
-                        slide.push(value, force = true, send = onSlider)
+                        slide.push(value, force = true, send = sendSlide)
                     },
                 )
             },

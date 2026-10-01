@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -309,33 +310,38 @@ private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
         val tileHeight = maxHeight / board.height.coerceAtLeast(1)
 
         board.tiles.forEach { t ->
-            val watchChannel = t.state?.channel
-            val live = liveValues[watchChannel]
-            t.assetHash?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
-            val active = when {
-                watchChannel != null -> isActiveValue(live)
-                else -> positions[t.id] ?: false
-            }
-            Box(
-                Modifier
-                    .offset(x = tile * t.x, y = tileHeight * t.y)
-                    .width(tile * t.w)
-                    .height(tileHeight * t.h),
-            ) {
-                Tile(
-                    tile = t,
-                    tileSize = tile,
-                    active = active,
-                    liveText = displayText(live),
-                    series = SeriesWindow(series[watchChannel] ?: emptyList()),
-                    channel = watchChannel?.let { channelMeta[it] },
-                    items = TileItems(listItems(t, live)),
-                    status = statusData(t, live),
-                    image = t.assetHash?.let { bitmaps[it] },
-                    onPressStart = { vm.pressStart(board.id, t) },
-                    onPressEnd = { vm.pressEnd(board.id, t) },
-                    onSlider = { v -> vm.slider(board.id, t, v) },
-                )
+            // identity by tile id, not list position: a delta that adds or
+            // removes a tile must not hand its neighbors' animation and
+            // gesture state to the wrong tile
+            key(t.id) {
+                val watchChannel = t.state?.channel
+                val live = liveValues[watchChannel]
+                t.assetHash?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
+                val active = when {
+                    watchChannel != null -> isActiveValue(live)
+                    else -> positions[t.id] ?: false
+                }
+                Box(
+                    Modifier
+                        .offset(x = tile * t.x, y = tileHeight * t.y)
+                        .width(tile * t.w)
+                        .height(tileHeight * t.h),
+                ) {
+                    Tile(
+                        tile = t,
+                        tileSize = tile,
+                        active = active,
+                        liveText = displayText(live),
+                        series = SeriesWindow(series[watchChannel] ?: emptyList()),
+                        channel = watchChannel?.let { channelMeta[it] },
+                        items = TileItems(listItems(t, live)),
+                        status = statusData(t, live),
+                        image = t.assetHash?.let { bitmaps[it] },
+                        onPressStart = { vm.pressStart(board.id, t) },
+                        onPressEnd = { vm.pressEnd(board.id, t) },
+                        onSlider = { v -> vm.slider(board.id, t, v) },
+                    )
+                }
             }
         }
     }
