@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex, Notify};
 
+use crate::service::Backend;
+
 pub const ACCESS_KEY_PRO: &str = "DCKBRD_PRO_1_3_0";
 
 /// Anything a session can receive while its transport is a websocket.
@@ -49,6 +51,13 @@ pub struct Session {
     transport: Mutex<Transport>,
     /// Last client activity (poll, packet); drives the ping-timeout reaper.
     last_seen: Mutex<std::time::Instant>,
+    /// Execution seam for releasing keys the session left pressed (the
+    /// hub owns teardown, so it owns the undo).
+    backend: Arc<dyn Backend>,
+    /// Tiles with an un-ended key press-start (`isTapStart: true`): only
+    /// key tiles hold anything down, and their release phase must run on
+    /// every teardown path - websocket close, poll silence, anything.
+    held_keys: Mutex<HashMap<i64, pulpit_db::ButtonRow>>,
 }
 
 impl Session {
@@ -120,6 +129,37 @@ impl Session {
     pub async fn idle_secs(&self) -> u64 {
         self.last_seen.lock().await.elapsed().as_secs()
     }
+
+    /// Records a key press-start (`isTapStart: true` on a key tile).
+    pub async fn hold_key(&self, button: pulpit_db::ButtonRow) {
+        self.held_keys.lock().await.insert(button.id, button);
+    }
+
+    /// The matching tap end arrived: nothing left to release.
+    pub async fn key_released(&self, id: i64) {
+        self.held_keys.lock().await.remove(&id);
+    }
+
+    /// Runs the release phase (`isTapStart: false`) for every key the
+    /// session left pressed. Key-ups are blocking input work, so they
+    /// run on the blocking pool.
+    pub async fn release_held_keys(&self) {
+        let held: Vec<pulpit_db::ButtonRow> = self
+            .held_keys
+            .lock()
+            .await
+            .drain()
+            .map(|(_, b)| b)
+            .collect();
+        for button in held {
+            let backend = self.backend.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let mut sink = pulpit_actions::NullSink;
+                backend.exec(button, false, &mut sink);
+            })
+            .await;
+        }
+    }
 }
 
 /// All connected devices. Cheap clones behind the scenes: sessions are Arc'd.
@@ -133,12 +173,14 @@ impl Hub {
         Hub::default()
     }
 
-    pub async fn create(&self, is_pro: bool) -> Arc<Session> {
+    pub async fn create(&self, backend: Arc<dyn Backend>, is_pro: bool) -> Arc<Session> {
         let sid = new_sid();
         let session = Arc::new(Session {
             sid: sid.clone(),
             is_pro,
             last_seen: Mutex::new(std::time::Instant::now()),
+            backend,
+            held_keys: Mutex::new(HashMap::new()),
             transport: Mutex::new(Transport::Polling(Arc::new(PollState {
                 queue: Mutex::new(VecDeque::new()),
                 notify: Notify::new(),
@@ -154,8 +196,11 @@ impl Hub {
     }
 
     pub async fn remove(&self, sid: &str) {
-        if self.sessions.lock().await.remove(sid).is_some() {
+        if let Some(session) = self.sessions.lock().await.remove(sid) {
             tracing::info!(sid, "client disconnected");
+            // Whatever killed the connection (clean close, error), keys
+            // the client left pressed must not stay down.
+            session.release_held_keys().await;
         }
     }
 
@@ -180,14 +225,19 @@ impl Hub {
             }
         }
         let mut sessions = self.sessions.lock().await;
-        let mut removed = 0;
+        let mut removed = Vec::new();
         for sid in stale {
-            if sessions.remove(&sid).is_some() {
-                removed += 1;
+            if let Some(session) = sessions.remove(&sid) {
+                removed.push(session);
                 tracing::info!(sid, "session reaped (ping timeout)");
             }
         }
-        removed
+        drop(sessions);
+        // releases run their own blocking execs - never under the map lock
+        for session in &removed {
+            session.release_held_keys().await;
+        }
+        removed.len()
     }
 
     /// Emit a socket.io EVENT packet to every connected session.
@@ -233,11 +283,42 @@ fn new_sid() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::Backend;
+
+    /// Backend stub: the hub only needs it for held-key release, which
+    /// these tests never trigger.
+    struct NoBackend;
+    impl Backend for NoBackend {
+        fn get_boards(&self) -> Vec<pulpit_db::BoardRow> {
+            Vec::new()
+        }
+        fn get_board(&self, _board_id: i64) -> Option<pulpit_db::BoardRow> {
+            None
+        }
+        fn get_buttons_by_board(&self, _board_id: i64) -> Vec<pulpit_db::ButtonRow> {
+            Vec::new()
+        }
+        fn get_button(&self, _id: i64) -> Option<pulpit_db::ButtonRow> {
+            None
+        }
+        fn exec(
+            &self,
+            _button: pulpit_db::ButtonRow,
+            _is_tap_start: bool,
+            _sink: &mut dyn pulpit_actions::EventSink,
+        ) {
+        }
+        fn slider(&self, _button: pulpit_db::ButtonRow, _value: f64) {}
+    }
+
+    fn backend() -> Arc<NoBackend> {
+        Arc::new(NoBackend)
+    }
 
     #[tokio::test]
     async fn polling_session_queues_and_upgrades() {
         let hub = Hub::new();
-        let s = hub.create(false).await;
+        let s = hub.create(backend(), false).await;
         s.send(event_packet("get_version", Some(r#"{"version":"1.6.0"}"#)))
             .await;
 
@@ -258,8 +339,8 @@ mod tests {
     #[tokio::test]
     async fn rooms_are_assigned() {
         let hub = Hub::new();
-        let pro = hub.create(true).await;
-        let basic = hub.create(false).await;
+        let pro = hub.create(backend(), true).await;
+        let basic = hub.create(backend(), false).await;
         assert_eq!(pro.room(), "PRO_ROOM");
         assert_eq!(basic.room(), "BASIC_ROOM");
     }
@@ -267,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn poll_times_out_empty() {
         let hub = Hub::new();
-        let s = hub.create(false).await;
+        let s = hub.create(backend(), false).await;
         let started = std::time::Instant::now();
         let got = s.poll(50).await;
         assert!(got.is_empty());

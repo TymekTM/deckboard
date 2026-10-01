@@ -44,7 +44,11 @@ impl Backend for MockBackend {
     }
 
     fn get_button(&self, id: i64) -> Option<ButtonRow> {
-        (id == 10).then(|| url_button(10, 0, 0))
+        match id {
+            10 => Some(url_button(10, 0, 0)),
+            11 => Some(key_button(11)),
+            _ => None,
+        }
     }
 
     fn exec(&self, button: ButtonRow, is_tap_start: bool, _sink: &mut dyn EventSink) {
@@ -89,6 +93,16 @@ fn url_button(id: i64, x: i64, y: i64) -> ButtonRow {
         w: 1,
         h: 1,
         options: None,
+    }
+}
+
+/// Key tiles hold keys down on `isTapStart: true` and release them on
+/// the tap end.
+fn key_button(id: i64) -> ButtonRow {
+    ButtonRow {
+        kind: "key".into(),
+        command: Some("A".into()),
+        ..url_button(id, 0, 1)
     }
 }
 
@@ -326,6 +340,44 @@ async fn health_page_served() {
     let (status, body) = http(addr, "GET", "/", None);
     assert_eq!(status, 200);
     assert!(body.contains("Pulpit server is live"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn key_tiles_release_when_the_socket_drops() {
+    let (addr, backend) = spawn_server().await;
+    let url =
+        format!("ws://{addr}/socket.io/?EIO=3&transport=websocket&access_key=DCKBRD_PRO_1_3_0");
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    // open + connect packets
+    let _ = recv_text(&mut ws).await;
+    let _ = recv_text(&mut ws).await;
+
+    // press-start a key tile: key-down. The socket then dies without the
+    // tap end - the key must still be released.
+    ws.send(Message::Text(
+        r#"42["exec_shortcut",{"id":11,"isTapStart":true}]"#.into(),
+    ))
+    .await
+    .unwrap();
+    wait_for_exec(&backend, (11, true)).await;
+    drop(ws);
+    wait_for_exec(&backend, (11, false)).await;
+}
+
+/// Polls until the detached exec task has recorded `expected`.
+async fn wait_for_exec(backend: &MockBackend, expected: (i64, bool)) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if backend.execs.lock().unwrap().contains(&expected) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "exec {expected:?} never landed: {:?}",
+            backend.execs.lock().unwrap()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 async fn recv_text(

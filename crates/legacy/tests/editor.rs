@@ -77,7 +77,7 @@ async fn refresh_board_carries_both_room_variants() {
     let bc = broadcaster(hub.clone());
 
     // a websocket client in the BASIC room
-    let session = hub.create(false).await;
+    let session = hub.create(Arc::new(MockBackend), false).await;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     session.upgrade_to_ws(tx).await;
 
@@ -110,7 +110,7 @@ async fn refresh_board_carries_both_room_variants() {
 async fn sync_boards_broadcasts_full_list_per_room() {
     let hub = Arc::new(Hub::new());
     let bc = broadcaster(hub.clone());
-    let session = hub.create(true).await; // PRO room
+    let session = hub.create(Arc::new(MockBackend), true).await; // PRO room
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     session.upgrade_to_ws(tx).await;
 

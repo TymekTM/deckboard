@@ -124,7 +124,10 @@ async fn polling_get(state: Arc<AppState>, q: SioQuery) -> Response {
         None => {
             let session = state
                 .hub
-                .create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO))
+                .create(
+                    state.backend.clone(),
+                    q.access_key.as_deref() == Some(ACCESS_KEY_PRO),
+                )
                 .await;
             // socket.io connect packet, delivered on the next poll
             session.send("40".into()).await;
@@ -326,6 +329,16 @@ async fn handle_event(
                 tracing::debug!(id, "exec_shortcut: unknown id");
                 return;
             };
+            // tap-start holds keys down for key tiles; track it so every
+            // teardown path (socket drop, poll silence) can release it
+            // when no tap end arrives
+            if button.kind == "key" {
+                if is_tap_start {
+                    session.hold_key(button.clone()).await;
+                } else {
+                    session.key_released(id).await;
+                }
+            }
             tracing::info!(id, kind = %button.kind, "exec_shortcut");
             let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
             let (val_tx, mut val_rx) = mpsc::unbounded_channel::<(String, String)>();
@@ -419,7 +432,10 @@ async fn ws_loop(state: Arc<AppState>, socket: WebSocket, q: SioQuery) {
             // websocket-only session: open packet + connect go over the wire
             let s = state
                 .hub
-                .create(q.access_key.as_deref() == Some(ACCESS_KEY_PRO))
+                .create(
+                    state.backend.clone(),
+                    q.access_key.as_deref() == Some(ACCESS_KEY_PRO),
+                )
                 .await;
             s.upgrade_to_ws(out_tx.clone()).await;
             let open = json!({
