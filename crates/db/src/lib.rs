@@ -426,18 +426,18 @@ fn map_board_row(row: &rusqlite::Row<'_>) -> std::result::Result<BoardRow, rusql
         id: row.get(0)?,
         name: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
         background: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        layout: row.get::<_, Option<i64>>(3)?.unwrap_or(6),
+        layout: row_int(row, 3, 6)?,
         image: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         // legacy `sort` column has a '' default; coerce non-numeric to 0
-        sort: row.get::<_, Option<i64>>(5).unwrap_or(None).unwrap_or(0),
+        sort: row_int(row, 5, 0)?,
         kind: row
             .get::<_, Option<String>>(6)?
             .unwrap_or_else(|| "buttons".into()),
         args: row.get(7)?,
-        order: row.get(8)?,
-        width: row.get::<_, Option<i64>>(9)?.unwrap_or(4),
-        height: row.get::<_, Option<i64>>(10)?.unwrap_or(3),
-        converted: row.get::<_, Option<i64>>(11)?.unwrap_or(1),
+        order: row_int(row, 8, 0)?,
+        width: row_int(row, 9, 4)?,
+        height: row_int(row, 10, 3)?,
+        converted: row_int(row, 11, 1)?,
     })
 }
 
@@ -1015,6 +1015,43 @@ mod tests {
         assert_eq!(meta.title_position, full.title_position);
         assert_eq!(meta.title_position2, full.title_position2);
         assert!(db.get_button_meta(999).unwrap().is_none());
+    }
+
+    #[test]
+    fn lenient_board_columns_accept_legacy_text_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+
+        // legacy boards carry '' in integer columns (knex defaults); a
+        // strict read fails the whole SELECT and empties the board list
+        db.conn
+            .execute(
+                "INSERT INTO Boards (name, background, layout, image, sort, type, \"order\", \
+                     width, height, converted)
+                 VALUES ('Junk', '#2c3e50', '', '', '7', 'buttons', '', '', '', '')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO Boards (name) VALUES ('Clean')",
+                [],
+            )
+            .unwrap();
+
+        let boards = db.get_boards().unwrap();
+        assert_eq!(boards.len(), 2, "one bad row must not empty the list");
+        let junk = boards.iter().find(|b| b.name == "Junk").unwrap();
+        assert_eq!(junk.layout, 6);
+        assert_eq!((junk.width, junk.height), (4, 3));
+        assert_eq!(junk.order, 0);
+        assert_eq!(junk.converted, 1);
+        assert_eq!(junk.sort, 7, "numeric text parses, like the Shortcuts path");
+
+        // single-board reads are lenient the same way
+        let by_id = db.get_board(junk.id).unwrap().unwrap();
+        assert_eq!(by_id.layout, 6);
+        assert_eq!((by_id.width, by_id.height), (4, 3));
     }
 
     #[test]
