@@ -736,7 +736,11 @@ fn migrate_legacy_data(legacy: &Path, target: &Path) {
         return;
     }
     let mut copied: Vec<&str> = Vec::new();
-    for name in LEGACY_FILES.iter().copied().chain(LEGACY_DIRS.iter().copied()) {
+    for name in LEGACY_FILES
+        .iter()
+        .copied()
+        .chain(LEGACY_DIRS.iter().copied())
+    {
         let from = legacy.join(name);
         let to = staging.join(name);
         if to.exists() {
@@ -876,15 +880,15 @@ mod tests {
 
         // the rerun resumes per-item and completes the migration
         assert_eq!(std::fs::read(target.join("database.db")).unwrap(), b"db");
-        assert_eq!(
-            std::fs::read(target.join("settings.json")).unwrap(),
-            b"{}"
-        );
+        assert_eq!(std::fs::read(target.join("settings.json")).unwrap(), b"{}");
         assert_eq!(
             std::fs::read(target.join("extensions/pkg/index.js")).unwrap(),
             b"module.exports"
         );
-        assert!(!staging.exists(), "the staging dir is renamed away, not kept");
+        assert!(
+            !staging.exists(),
+            "the staging dir is renamed away, not kept"
+        );
     }
 
     #[test]
@@ -900,8 +904,14 @@ mod tests {
 
         migrate_legacy_data(&legacy, &target);
 
-        assert_eq!(std::fs::read(target.join("database.db-wal")).unwrap(), b"wal");
-        assert_eq!(std::fs::read(target.join("database.db-shm")).unwrap(), b"shm");
+        assert_eq!(
+            std::fs::read(target.join("database.db-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(
+            std::fs::read(target.join("database.db-shm")).unwrap(),
+            b"shm"
+        );
     }
 
     #[test]
@@ -1031,7 +1041,9 @@ mod tests {
             )
             .unwrap();
         let result = db.delete_board(a);
-        db.conn.execute("DROP TRIGGER veto_board_delete", []).unwrap();
+        db.conn
+            .execute("DROP TRIGGER veto_board_delete", [])
+            .unwrap();
 
         assert!(result.is_err(), "the vetoed delete must fail");
         assert!(
@@ -1142,10 +1154,7 @@ mod tests {
             )
             .unwrap();
         db.conn
-            .execute(
-                "INSERT INTO Boards (name) VALUES ('Clean')",
-                [],
-            )
+            .execute("INSERT INTO Boards (name) VALUES ('Clean')", [])
             .unwrap();
 
         let boards = db.get_boards().unwrap();

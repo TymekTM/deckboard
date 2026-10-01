@@ -51,7 +51,9 @@ fn non_integer_dimensions_are_rejected() {
 #[test]
 fn a_macros_flood_is_rejected() {
     let backend = backend();
-    let err = backend.import_boards(&[board(json!(32), json!(32), 2000)]).unwrap_err();
+    let err = backend
+        .import_boards(&[board(json!(32), json!(32), 2000)])
+        .unwrap_err();
     assert!(
         err.to_string().to_lowercase().contains("too many"),
         "got: {err}"
