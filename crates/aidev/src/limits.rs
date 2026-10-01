@@ -588,14 +588,25 @@ fn percent_rows(name: &str, five_hour: Option<f64>, week: Option<f64>) -> Vec<Pr
     rows
 }
 
-/// Claude OAuth usage: `GET /api/oauth/usage` with the CLI's own bearer
-/// token. Tokens without the `user:profile` scope cannot see usage, so a
-/// scope list in the credentials file is honored before calling.
-fn claude_oauth_usage(paths: &Paths) -> Option<(Option<f64>, Option<f64>)> {
-    let credentials = paths.claude_projects.parent()?.join(".credentials.json");
-    let text = std::fs::read_to_string(credentials).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let oauth = v.get("claudeAiOauth").unwrap_or(&v);
+/// What the CLI's credentials file yields for the OAuth usage lane: the
+/// access token and whether it has already expired.
+pub(crate) struct ClaudeOauthCredentials {
+    pub(crate) token: String,
+    pub(crate) expired: bool,
+}
+
+/// Extract the Claude CLI's OAuth token from the credentials file JSON.
+/// The file nests the grant under `claudeAiOauth` with camelCase keys
+/// (`accessToken`, `expiresAt`, `scopes`); older writers used snake_case
+/// `access_token`, kept as fallback. `expiresAt` is ms since epoch - a
+/// past expiry means the usage call would 401, so the credentials are
+/// flagged and the caller skips the call. A scope list without
+/// `user:profile` cannot see usage at all.
+pub(crate) fn claude_oauth_credentials(
+    v: &serde_json::Value,
+    now_ms: i64,
+) -> Option<ClaudeOauthCredentials> {
+    let oauth = v.get("claudeAiOauth").unwrap_or(v);
     if let Some(scopes) = oauth.get("scopes").and_then(|s| s.as_array()) {
         let has_profile = scopes
             .iter()
@@ -605,12 +616,50 @@ fn claude_oauth_usage(paths: &Paths) -> Option<(Option<f64>, Option<f64>)> {
             return None; // token cannot see usage; fall back to ceilings
         }
     }
-    let token = oauth.get("access_token")?.as_str()?;
+    let token = oauth
+        .get("accessToken")
+        .or_else(|| oauth.get("access_token"))?
+        .as_str()?;
+    if token.is_empty() {
+        return None;
+    }
+    let expired = oauth
+        .get("expiresAt")
+        .and_then(|e| e.as_i64())
+        .map(|ms| ms <= now_ms)
+        .unwrap_or(false);
+    Some(ClaudeOauthCredentials {
+        token: token.to_string(),
+        expired,
+    })
+}
+
+/// Claude OAuth usage: `GET /api/oauth/usage` with the CLI's own bearer
+/// token; utilization values arrive as 0..1 fractions or straight
+/// percentages, both normalized by [`percent_rows`]. Any failure just
+/// drops the lane and the tile falls back to local sums.
+fn claude_oauth_usage(paths: &Paths) -> Option<(Option<f64>, Option<f64>)> {
+    let credentials = paths.claude_projects.parent()?.join(".credentials.json");
+    let text = std::fs::read_to_string(credentials).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let creds = claude_oauth_credentials(&v, crate::unix_now() * 1000)?;
+    if creds.expired {
+        tracing::debug!("claude oauth token expired, skipping usage api");
+        return None;
+    }
     let headers = [
-        ("Authorization", format!("Bearer {token}")),
+        ("Authorization", format!("Bearer {}", creds.token)),
         ("anthropic-beta", "oauth-2025-04-20".to_string()),
     ];
-    let v = get_json("https://api.anthropic.com/api/oauth/usage", &headers).ok()?;
+    // the error text carries only the HTTP status, the API's own message
+    // or a transport error - never the token or the auth header
+    let v = match get_json("https://api.anthropic.com/api/oauth/usage", &headers) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(error = %e, "claude oauth usage call failed, using local sums");
+            return None;
+        }
+    };
     let lane = |key: &str| {
         v.get(key)
             .and_then(|l| l.get("utilization"))
@@ -1003,6 +1052,55 @@ mod tests {
         // no auth.json: the lane stays off
         assert!(codex_auth(&dir.join("nope")).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_oauth_credentials_read_camel_case_keys() {
+        // fixture shaped like the CLI's credentials file: claudeAiOauth
+        // with camelCase keys and an obvious fake token
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"claudeAiOauth":{
+                "accessToken":"test-oauth-token",
+                "refreshToken":"test-refresh-token",
+                "expiresAt":1900000000000,
+                "scopes":["user:profile","user:inference"]
+            }}"#,
+        )
+        .unwrap();
+        let now_ms = 1_800_000_000_000;
+        let creds = claude_oauth_credentials(&v, now_ms).expect("credentials parsed");
+        assert_eq!(creds.token, "test-oauth-token");
+        assert!(!creds.expired);
+
+        // a past expiry must flag the credentials so the caller skips the call
+        let creds = claude_oauth_credentials(&v, 1_900_000_000_000).expect("credentials parsed");
+        assert!(creds.expired);
+
+        // older writers used snake_case access_token
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"claudeAiOauth":{"access_token":"test-oauth-token","scopes":["user:profile"]}}"#,
+        )
+        .unwrap();
+        let creds = claude_oauth_credentials(&v, 0).expect("credentials parsed");
+        assert_eq!(creds.token, "test-oauth-token");
+
+        // a scope list without user:profile cannot see usage
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"claudeAiOauth":{"accessToken":"test-oauth-token","scopes":["user:inference"]}}"#,
+        )
+        .unwrap();
+        assert!(claude_oauth_credentials(&v, 0).is_none());
+
+        // no scope list at all: the grant is unknown, the call decides
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"claudeAiOauth":{"accessToken":"test-oauth-token"}}"#,
+        )
+        .unwrap();
+        assert!(claude_oauth_credentials(&v, 0).is_some());
+
+        // no token in either spelling
+        let v: serde_json::Value = serde_json::from_str(r#"{"claudeAiOauth":{}}"#).unwrap();
+        assert!(claude_oauth_credentials(&v, 0).is_none());
     }
 
     #[test]
