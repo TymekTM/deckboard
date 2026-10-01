@@ -88,8 +88,12 @@ struct WsQuery {
 async fn ws_connect(
     State(state): State<Arc<V2State>>,
     Query(q): Query<WsQuery>,
+    headers: HeaderMap,
     ws: Option<WebSocketUpgrade>,
 ) -> Response {
+    if !pulpit_legacy::origin_host_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "browser requests are not allowed").into_response();
+    }
     let auth = if let Some(token) = q.token {
         match state.devices.verify(&token) {
             Some(device) => Some(Auth::Device(device)),
@@ -123,9 +127,13 @@ async fn ws_connect(
 async fn pair_create(
     State(state): State<Arc<V2State>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
     if !addr.ip().is_loopback() {
         return (StatusCode::FORBIDDEN, "pairing codes are local-only").into_response();
+    }
+    if !pulpit_legacy::origin_host_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "browser requests are not allowed").into_response();
     }
     let code = state.pairing.new_code();
     // M1 has no desktop UI: log the QR-able URL so the operator can relay

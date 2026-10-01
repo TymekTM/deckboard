@@ -12,6 +12,7 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use pulpit_actions::EventSink;
@@ -284,7 +285,23 @@ async fn http_request(
 async fn http_get(addr: SocketAddr, path: &str) -> (u16, HashMap<String, String>, Vec<u8>) {
     http_request(
         addr,
-        format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"),
+        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .await
+}
+
+async fn http_get_with_headers(
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (u16, HashMap<String, String>, Vec<u8>) {
+    let extra: String = headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
+    http_request(
+        addr,
+        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}Connection: close\r\n\r\n"),
     )
     .await
 }
@@ -294,10 +311,23 @@ async fn http_post_json(
     path: &str,
     body: &str,
 ) -> (u16, HashMap<String, String>, Vec<u8>) {
+    http_post_json_with_headers(addr, path, body, &[]).await
+}
+
+async fn http_post_json_with_headers(
+    addr: SocketAddr,
+    path: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> (u16, HashMap<String, String>, Vec<u8>) {
+    let extra: String = headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
     http_request(
         addr,
         format!(
-            "POST {path} HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         ),
     )
@@ -306,6 +336,53 @@ async fn http_post_json(
 
 // ---------------------------------------------------------------------------
 // tests
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_requests_are_rejected_on_the_sockets() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let device = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+
+    // Websocket upgrade with a foreign Origin: a web page open on this
+    // machine must not reach the socket. Browsers cannot drop the
+    // Origin header, native clients do not send one.
+    let request = (&format!("ws://{addr}/v2/ws?token={}", device.token))
+        .into_client_request()
+        .unwrap();
+    let mut request = request;
+    request
+        .headers_mut()
+        .insert("Origin", "http://evil.example".parse().unwrap());
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(result.is_err(), "foreign-Origin upgrade must be rejected");
+
+    // Same-origin (a loopback page served by this very server): allowed.
+    let mut request = (&format!("ws://{addr}/v2/ws?token={}", device.token))
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Origin", format!("http://{addr}").parse().unwrap());
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(result.is_ok(), "same-host Origin must be allowed");
+
+    // Pairing mint with a foreign Origin: 403 even from loopback.
+    let (status, _, _) =
+        http_post_json_with_headers(addr, "/v2/pair", "{}", &[("Origin", "http://evil.example")])
+            .await;
+    assert_eq!(status, 403, "pairing must refuse browser pages");
+
+    // A non-literal Host is what DNS rebinding produces: rejected even
+    // without an Origin header.
+    let (status, _, _) = http_request(
+        addr,
+        format!(
+            "POST /v2/pair HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        ),
+    )
+    .await;
+    assert_eq!(status, 403, "rebound Host must be rejected");
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unauthenticated_ws_is_rejected() {

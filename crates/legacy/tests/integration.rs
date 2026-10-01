@@ -8,6 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use pulpit_actions::EventSink;
 use pulpit_db::{BoardRow, ButtonRow};
 use pulpit_legacy::{router, AppState, Backend, Hub};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Records exec calls instead of touching the OS.
@@ -122,10 +123,24 @@ async fn spawn_server() -> (std::net::SocketAddr, Arc<MockBackend>) {
 
 /// Minimal blocking HTTP/1.1 client for the polling transport.
 fn http(addr: std::net::SocketAddr, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+    http_with_headers(addr, method, path, body, &[])
+}
+
+fn http_with_headers(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    headers: &[(&str, &str)],
+) -> (u16, String) {
     let mut stream = std::net::TcpStream::connect(addr).unwrap();
     let body = body.unwrap_or("");
+    let extra: String = headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(req.as_bytes()).unwrap();
@@ -340,6 +355,61 @@ async fn health_page_served() {
     let (status, body) = http(addr, "GET", "/", None);
     assert_eq!(status, 200);
     assert!(body.contains("Pulpit server is live"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_requests_are_rejected_on_the_sockets() {
+    let (addr, _backend) = spawn_server().await;
+
+    // Polling handshake with a foreign Origin: a web page open on this
+    // machine must not get a session. Native clients send no Origin.
+    let (status, body) = http_with_headers(
+        addr,
+        "GET",
+        "/socket.io/?EIO=3&transport=polling&t=1",
+        None,
+        &[("Origin", "http://evil.example")],
+    );
+    assert_eq!(status, 403, "foreign Origin must be rejected: {body}");
+
+    // Same-origin (loopback page served by this very server): allowed.
+    let (status, _) = http_with_headers(
+        addr,
+        "GET",
+        "/socket.io/?EIO=3&transport=polling&t=2",
+        None,
+        &[("Origin", &format!("http://{addr}"))],
+    );
+    assert_eq!(status, 200, "same-host Origin must be allowed");
+
+    // A non-literal Host is what DNS rebinding produces: rejected even
+    // without an Origin header.
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .write_all(
+            b"GET /socket.io/?EIO=3&transport=polling&t=3 HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+    let mut buf = String::new();
+    let _ = stream.read_to_string(&mut buf);
+    assert!(
+        buf.starts_with("HTTP/1.1 403"),
+        "rebound Host must be rejected"
+    );
+
+    // Websocket upgrade with a foreign Origin never completes.
+    let mut request = (&format!("ws://{addr}/socket.io/?EIO=3&transport=websocket"))
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Origin", "http://evil.example".parse().unwrap());
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(result.is_err(), "foreign-Origin upgrade must be rejected");
+
+    // No Origin header at all: the stock Android client's normal shape.
+    let (status, _) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=4", None);
+    assert_eq!(status, 200, "Origin-less native requests must work");
 }
 
 #[tokio::test(flavor = "multi_thread")]

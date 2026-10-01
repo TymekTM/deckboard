@@ -226,7 +226,10 @@ impl V2Session {
 
     /// The matching `press-end` arrived: nothing left to release.
     pub fn key_released(&self, tile: i64) {
-        self.held_keys.lock().expect("session poisoned").remove(&tile);
+        self.held_keys
+            .lock()
+            .expect("session poisoned")
+            .remove(&tile);
     }
 
     /// Takes the tiles with un-ended key press-starts for release.
@@ -416,7 +419,10 @@ mod tests {
         let cancelled = stale.cancelled();
         stale.age_last_seen_by(10 * 60_000);
         hub.reap_silent(180_000);
-        assert!(*cancelled.borrow(), "the reaper must cancel the session task");
+        assert!(
+            *cancelled.borrow(),
+            "the reaper must cancel the session task"
+        );
 
         // server exit path
         let (tx_exit, _rx_exit) = mpsc::channel(8);
@@ -424,6 +430,9 @@ mod tests {
         hub.attach(&exit);
         let cancelled = exit.cancelled();
         hub.shutdown();
-        assert!(*cancelled.borrow(), "server exit must cancel the session task");
+        assert!(
+            *cancelled.borrow(),
+            "server exit must cancel the session task"
+        );
     }
 }

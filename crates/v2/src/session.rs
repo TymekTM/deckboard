@@ -515,7 +515,11 @@ async fn release_held_keys(state: &Arc<V2State>, session: &Arc<V2Session>) {
     if held.is_empty() {
         return;
     }
-    tracing::info!(session = session.id, tiles = held.len(), "releasing keys held by the closing session");
+    tracing::info!(
+        session = session.id,
+        tiles = held.len(),
+        "releasing keys held by the closing session"
+    );
     let backend = state.backend.clone();
     let engine = state.engine.clone();
     let hub = state.hub.clone();

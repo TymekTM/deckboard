@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -110,8 +110,12 @@ impl From<HashMap<String, String>> for SioQuery {
 async fn socket_get(
     State(state): State<Arc<AppState>>,
     Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     ws: Option<WebSocketUpgrade>,
 ) -> Response {
+    if !origin_host_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "browser requests are not allowed").into_response();
+    }
     let q = SioQuery::from(q);
     match (q.transport.as_deref(), ws) {
         (Some("websocket"), Some(ws)) => ws.on_upgrade(move |socket| ws_loop(state, socket, q)),
@@ -156,8 +160,12 @@ async fn polling_get(state: Arc<AppState>, q: SioQuery) -> Response {
 async fn socket_post(
     State(state): State<Arc<AppState>>,
     Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     body: String,
 ) -> Response {
+    if !origin_host_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "browser requests are not allowed").into_response();
+    }
     let q = SioQuery::from(q);
     let Some(sid) = q.sid.clone() else {
         return (StatusCode::BAD_REQUEST, "missing sid").into_response();
@@ -411,6 +419,49 @@ async fn handle_event(
         }
         other => tracing::debug!(event = other, "unhandled client event"),
     }
+}
+
+/// Browser-origin guard for the socket endpoints (shared with protocol
+/// v2; see the audit's B1). Browsers always attach an `Origin` header to
+/// cross-origin WebSocket/XHR requests and cannot be told to drop it, so
+/// a page open on any machine that can reach the port is identifiable:
+/// reject whenever `Origin` is present and does not match the `Host` it
+/// connected to. Native clients (stock Deckboard app, pulpit-mobile)
+/// send no `Origin`. `Host` itself must be an IP literal or `localhost`
+/// (the shapes the QR payloads and manual entry produce) - anything
+/// else is what a DNS-rebinding attack produces, and is rejected even
+/// without an `Origin`.
+pub fn origin_host_allowed(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    if !host_is_direct(host) {
+        return false;
+    }
+    match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        None => true,
+        Some(origin) => origin_authority(origin).is_some_and(|a| a.eq_ignore_ascii_case(host)),
+    }
+}
+
+/// `host` / `host:port` / `[v6]:port` with an IP literal or `localhost`.
+fn host_is_direct(host: &str) -> bool {
+    let bare = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        match host.rsplit_once(':') {
+            Some((h, port)) if !port.is_empty() && port.parse::<u16>().is_ok() => h,
+            _ => host,
+        }
+    };
+    bare.parse::<std::net::IpAddr>().is_ok() || bare.eq_ignore_ascii_case("localhost")
+}
+
+/// The `host[:port]` part of an `Origin` value, if it has one.
+fn origin_authority(origin: &str) -> Option<&str> {
+    let rest = origin.split_once("://")?.1;
+    let end = rest.find('/').unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
 async fn ws_loop(state: Arc<AppState>, socket: WebSocket, q: SioQuery) {
