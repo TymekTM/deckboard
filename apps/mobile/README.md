@@ -1,6 +1,6 @@
-# Deckboard Android client (protocol v2)
+# Pulpit Android client (protocol v2)
 
-The tablet client for the deckboard server, speaking protocol v2 only
+The tablet client for the Pulpit server, speaking protocol v2 only
 (`docs/protocol-v2.md`): one plain WebSocket to `/v2/ws`, token pairing,
 `boards.sync` + `boards.delta` for the board snapshot, `state.sync` +
 `state.patch` for live values, `interaction` frames for taps/presses.
