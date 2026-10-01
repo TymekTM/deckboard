@@ -336,6 +336,20 @@ fn parse_board_id(command: Option<&str>) -> Option<i64> {
         .or_else(|| command.and_then(|s| s.trim().parse().ok()))
 }
 
+/// Upper bound for `delay` steps (multiaction, advance-key): the input
+/// mutex is held while a macro sleeps, so one junk value must not stall
+/// every later action for minutes.
+const MAX_DELAY_MS: u64 = 60_000;
+
+fn capped_delay(ms: u64) -> u64 {
+    if ms > MAX_DELAY_MS {
+        tracing::warn!(requested = ms, cap = MAX_DELAY_MS, "delay step capped");
+        MAX_DELAY_MS
+    } else {
+        ms
+    }
+}
+
 fn run_multiaction(
     input: &mut dyn Input,
     sink: &mut dyn EventSink,
@@ -369,7 +383,7 @@ fn run_multiaction(
                     .as_deref()
                     .and_then(|s| s.trim().parse().ok())
                     .unwrap_or(0);
-                input.sleep(ms)?;
+                input.sleep(capped_delay(ms))?;
             }
             "board" => {
                 if let Some(id) = parse_board_id(step_cmd.command.as_deref()) {
@@ -414,7 +428,7 @@ fn run_advance_key(input: &mut dyn Input, cmd: &Command) -> Result<()> {
             }
             "delay" => {
                 let ms = value.as_u64().unwrap_or(0);
-                input.sleep(ms)?;
+                input.sleep(capped_delay(ms))?;
             }
             "type" => {
                 input.text(value.as_str().unwrap_or_default())?;
@@ -827,6 +841,21 @@ mod tests {
             sink.boards.is_empty(),
             "tap-start must not run multiactions"
         );
+    }
+
+    #[test]
+    fn multiaction_and_advance_key_delays_are_capped() {
+        // the input mutex is held while a macro sleeps; one junk delay
+        // must not stall every later action
+        let mut input = MockInput::default();
+        let mut sink = MockSink::default();
+        let c = cmd("multiaction", Some(r#"[{"type":"delay","command":"999999"}]"#));
+        run_command(&mut input, &mut sink, &c, false).unwrap();
+        assert_eq!(input.effects, vec![Effect::Sleep(MAX_DELAY_MS)]);
+
+        let adv = cmd("advance-key", Some(r#"[{"action":"delay","value":999999}]"#));
+        run_command(&mut input, &mut sink, &adv, false).unwrap();
+        assert_eq!(input.effects[1], Effect::Sleep(MAX_DELAY_MS));
     }
 
     #[test]
