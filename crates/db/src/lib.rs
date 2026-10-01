@@ -643,6 +643,41 @@ fn create_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Write `bytes` to `path` atomically: the data lands in a sibling
+/// `<path>.tmp` file, which is flushed and then renamed over the
+/// destination. A crash mid-write leaves the previous file intact
+/// instead of a torn or empty one. Used for every JSON config the app
+/// rewrites in place (settings.json, editor.json).
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let tmp = temp_sibling(path);
+    let attempt = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    };
+    match attempt() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // never leave a stray .tmp behind on failure
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// `<path>.tmp` in the same directory, so the rename stays on one volume.
+fn temp_sibling(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
 /// `~/pulpitApp/database.db`; on first use this is a copy of the original
 /// Deckboard app's database (see [`data_dir`]).
 pub fn default_db_path() -> PathBuf {
@@ -995,6 +1030,26 @@ mod tests {
     fn open_read_write_rejects_missing_file() {
         let err = Db::open_read_write(Some(Path::new("Z:/nope/pulpit.db"))).unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
+    }
+
+    #[test]
+    fn write_atomic_replaces_content_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, b"previous").unwrap();
+
+        write_atomic(&path, b"fresh bytes").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"fresh bytes");
+        assert!(
+            !dir.path().join("settings.json.tmp").exists(),
+            "the temp sibling must be renamed away, not left behind"
+        );
+
+        // a path with no existing file is created directly
+        let fresh = dir.path().join("editor.json");
+        write_atomic(&fresh, b"{}").unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"{}");
     }
 
     #[test]
