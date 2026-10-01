@@ -1279,7 +1279,9 @@ async fn exec_button(
     }
     let _ = tauri::async_runtime::spawn_blocking(move || {
         let mut sink = UiSink(app.clone());
-        backend.exec(button, false, &mut sink);
+        // full tap sequence (press-start + release): a lone release-phase
+        // exec never presses `key` tiles (A1)
+        backend.exec_tap(button, &mut sink);
     })
     .await;
     Ok(())

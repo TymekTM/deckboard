@@ -355,6 +355,17 @@ impl SqlBackend {
             || self.exec_play(cmd)
     }
 
+    /// Full local tap for desktop touch mode and the editor's "Run now":
+    /// the same press-start/press-end sequence a tablet tap produces, so
+    /// `key` tiles press AND release. Every other kind ignores the start
+    /// phase (see [`Backend::exec`]) and still fires exactly once.
+    pub fn exec_tap(&self, button: ButtonRow, sink: &mut dyn EventSink) {
+        self.exec(button.clone(), true, sink);
+        // hold duration matches EnigoInput::key_tap's synthesized tap
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        self.exec(button, false, sink);
+    }
+
     /// Run the action through the extension host if one declared it.
     /// Returns true when handled (the builtin dispatcher is skipped,
     /// mirroring the original `runCommand` default case). Slider taps pass
@@ -874,6 +885,40 @@ mod tests {
                 pulpit_actions::Effect::KeyUp(vec![pulpit_actions::KeyName::Return]),
                 pulpit_actions::Effect::Sleep(25),
             ]
+        );
+    }
+
+    #[test]
+    fn exec_tap_presses_and_releases_keys_and_fires_other_kinds_once() {
+        let backend = test_backend();
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+
+        // key tile: the tap sequence must press AND release, like a
+        // tablet tap (press-start drives key_down, release drives key_up)
+        let key = button_row("key", Some("CTRL+SHIFT+P"));
+        backend.exec_tap(key, &mut RecSink::default());
+        let combo = vec![
+            pulpit_actions::KeyName::Control,
+            pulpit_actions::KeyName::Shift,
+            pulpit_actions::KeyName::Char('p'),
+        ];
+        assert_eq!(
+            input.effects(),
+            vec![
+                pulpit_actions::Effect::KeyDown(combo.clone()),
+                pulpit_actions::Effect::KeyUp(combo),
+            ]
+        );
+
+        // every other kind fires exactly once: the press-start phase is
+        // a no-op for them, so a url tile must not open twice
+        input.0.lock().unwrap().clear();
+        let url = button_row("url", Some("https://example.com"));
+        backend.exec_tap(url, &mut RecSink::default());
+        assert_eq!(
+            input.effects(),
+            vec![pulpit_actions::Effect::OpenUrl("https://example.com".into())]
         );
     }
 
