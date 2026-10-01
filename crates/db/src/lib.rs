@@ -244,16 +244,29 @@ impl Db {
         }
     }
 
-    /// Open the database for reading and writing. The caller becomes the
-    /// single writer - the original desktop app must not have the file open
-    /// (docs/decisions.md ADR-001).
+    /// Open the database for reading and writing, creating an empty
+    /// schema when the file does not exist (a clean install has no legacy
+    /// copy to migrate). The caller becomes the single writer - the
+    /// original desktop app must not have the file open (docs/decisions.md
+    /// ADR-001).
     pub fn open_read_write(path: Option<&Path>) -> Result<Db> {
         let path = match path {
             Some(p) => p.to_path_buf(),
             None => default_db_path(),
         };
         if !path.exists() {
-            return Err(DbError::NotFound(path));
+            // sqlite creates the file but not its parent directories
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let conn = Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+            )?;
+            create_schema(&conn)?;
+            tracing::info!(path = %path.display(), "created empty pulpitApp database");
+            return Ok(Db { conn });
         }
         let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         tracing::info!(path = %path.display(), "opened pulpitApp database (read-write)");
@@ -1197,9 +1210,31 @@ mod tests {
     }
 
     #[test]
-    fn open_read_write_rejects_missing_file() {
+    fn open_read_write_creates_missing_database_with_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("fresh/pulpitApp");
+        let path = nested.join("database.db");
+
+        // a clean install has no legacy copy to migrate; the writer must
+        // still get a database instead of a NotFound dead end
+        let db = Db::open_read_write(Some(&path)).unwrap();
+
+        assert!(path.exists(), "the database file is created");
+        assert!(db.get_boards().unwrap().is_empty());
+        let id = db.insert_board("First", "#2c3e50", 4, 3).unwrap();
+        assert!(db.get_board(id).unwrap().is_some());
+
+        // reopening never clobbers what is already there
+        drop(db);
+        let db = Db::open_read_write(Some(&path)).unwrap();
+        assert_eq!(db.get_boards().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn open_read_write_still_errors_on_an_unwritable_path() {
+        // creation cannot rescue a path whose parent cannot exist
         let err = Db::open_read_write(Some(Path::new("Z:/nope/pulpit.db"))).unwrap_err();
-        assert!(matches!(err, DbError::NotFound(_)));
+        assert!(matches!(err, DbError::Sqlite(_)));
     }
 
     #[test]
