@@ -447,44 +447,62 @@ impl EnigoInput {
         Ok(EnigoInput { enigo })
     }
 
-    fn enigo_key(name: &KeyName) -> enigo::Key {
+    fn enigo_key(name: &KeyName) -> Result<enigo::Key> {
         use enigo::Key;
         match name {
-            KeyName::Control => Key::Control,
-            KeyName::Meta => Key::Meta,
-            KeyName::Alt => Key::Alt,
-            KeyName::Shift => Key::Shift,
-            KeyName::Return => Key::Return,
-            KeyName::Tab => Key::Tab,
-            KeyName::Escape => Key::Escape,
-            KeyName::Space => Key::Space,
-            KeyName::Backspace => Key::Backspace,
-            KeyName::Delete => Key::Delete,
-            KeyName::Insert => Key::Insert,
-            KeyName::Home => Key::Home,
-            KeyName::End => Key::End,
-            KeyName::PageUp => Key::PageUp,
-            KeyName::PageDown => Key::PageDown,
-            KeyName::Up => Key::UpArrow,
-            KeyName::Down => Key::DownArrow,
-            KeyName::Left => Key::LeftArrow,
-            KeyName::Right => Key::RightArrow,
+            KeyName::Control => Ok(Key::Control),
+            KeyName::Meta => Ok(Key::Meta),
+            KeyName::Alt => Ok(Key::Alt),
+            KeyName::Shift => Ok(Key::Shift),
+            KeyName::Return => Ok(Key::Return),
+            KeyName::Tab => Ok(Key::Tab),
+            KeyName::Escape => Ok(Key::Escape),
+            KeyName::Space => Ok(Key::Space),
+            KeyName::Backspace => Ok(Key::Backspace),
+            KeyName::Delete => Ok(Key::Delete),
+            KeyName::Insert => Ok(Key::Insert),
+            KeyName::Home => Ok(Key::Home),
+            KeyName::End => Ok(Key::End),
+            KeyName::PageUp => Ok(Key::PageUp),
+            KeyName::PageDown => Ok(Key::PageDown),
+            KeyName::Up => Ok(Key::UpArrow),
+            KeyName::Down => Ok(Key::DownArrow),
+            KeyName::Left => Ok(Key::LeftArrow),
+            KeyName::Right => Ok(Key::RightArrow),
             KeyName::Function(n) => match n {
-                1 => Key::F1,
-                2 => Key::F2,
-                3 => Key::F3,
-                4 => Key::F4,
-                5 => Key::F5,
-                6 => Key::F6,
-                7 => Key::F7,
-                8 => Key::F8,
-                9 => Key::F9,
-                10 => Key::F10,
-                11 => Key::F11,
-                12 => Key::F12,
-                _ => Key::F12,
+                1 => Ok(Key::F1),
+                2 => Ok(Key::F2),
+                3 => Ok(Key::F3),
+                4 => Ok(Key::F4),
+                5 => Ok(Key::F5),
+                6 => Ok(Key::F6),
+                7 => Ok(Key::F7),
+                8 => Ok(Key::F8),
+                9 => Ok(Key::F9),
+                10 => Ok(Key::F10),
+                11 => Ok(Key::F11),
+                12 => Ok(Key::F12),
+                13 => Ok(Key::F13),
+                14 => Ok(Key::F14),
+                15 => Ok(Key::F15),
+                16 => Ok(Key::F16),
+                17 => Ok(Key::F17),
+                18 => Ok(Key::F18),
+                19 => Ok(Key::F19),
+                20 => Ok(Key::F20),
+                21 => Ok(Key::F21),
+                22 => Ok(Key::F22),
+                23 => Ok(Key::F23),
+                24 => Ok(Key::F24),
+                // parse_key_name only accepts F1-F24; anything else is a
+                // programmatic KeyName misuse and must not inject a wrong
+                // key (F13-F24 used to fall back to F12 here).
+                other => Err(ActionError::BadPayload(
+                    "key".into(),
+                    format!("F{other} is outside the supported F1-F24 range"),
+                )),
             },
-            KeyName::Char(c) => Key::Unicode(*c),
+            KeyName::Char(c) => Ok(Key::Unicode(*c)),
         }
     }
 }
@@ -492,8 +510,9 @@ impl EnigoInput {
 impl Input for EnigoInput {
     fn key_down(&mut self, keys: &[KeyName]) -> Result<()> {
         for k in keys {
+            let key = Self::enigo_key(k)?;
             self.enigo
-                .key(Self::enigo_key(k), enigo::Direction::Press)
+                .key(key, enigo::Direction::Press)
                 .map_err(|e| ActionError::Input(e.to_string()))?;
         }
         Ok(())
@@ -501,8 +520,9 @@ impl Input for EnigoInput {
 
     fn key_up(&mut self, keys: &[KeyName]) -> Result<()> {
         for k in keys {
+            let key = Self::enigo_key(k)?;
             self.enigo
-                .key(Self::enigo_key(k), enigo::Direction::Release)
+                .key(key, enigo::Direction::Release)
                 .map_err(|e| ActionError::Input(e.to_string()))?;
         }
         Ok(())
@@ -700,6 +720,24 @@ mod tests {
         assert_eq!(keys, vec![Control, Shift, Char('k')]);
         assert_eq!(parse_hotkey("f5"), vec![Function(5)]);
         assert_eq!(parse_hotkey("ENTER"), vec![Return]);
+    }
+
+    #[test]
+    fn f_keys_one_to_twenty_four_map_to_distinct_keys() {
+        let mut seen = std::collections::HashSet::new();
+        for n in 1..=24u8 {
+            assert!(
+                seen.insert(EnigoInput::enigo_key(&Function(n)).unwrap()),
+                "F{n} collided with an earlier key"
+            );
+        }
+        assert_eq!(seen.len(), 24);
+    }
+
+    #[test]
+    fn f_keys_outside_the_range_are_an_error() {
+        assert!(EnigoInput::enigo_key(&Function(0)).is_err());
+        assert!(EnigoInput::enigo_key(&Function(25)).is_err());
     }
 
     #[test]
