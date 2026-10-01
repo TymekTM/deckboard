@@ -446,8 +446,21 @@ fn start_hold(
         let _ = tokio::time::timeout(cap, async {
             loop {
                 // each repeat tick executes the action (release phase) -
-                // tap-start would no-op everything except held keys
-                exec_blocking(&backend, &engine, &hub, button.clone(), false);
+                // tap-start would no-op everything except held keys. The
+                // exec is blocking work (actions sleep, fetch URLs,
+                // re-auth): it must run on the blocking pool, and the
+                // await serializes ticks so a slow one is never
+                // overlapped by the next. The server runtime is
+                // single-threaded - calling it inline would stall every
+                // socket for the duration of the action.
+                let tick_button = button.clone();
+                let tick_backend = backend.clone();
+                let tick_engine = engine.clone();
+                let tick_hub = hub.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    exec_blocking(&tick_backend, &tick_engine, &tick_hub, tick_button, false)
+                })
+                .await;
                 tokio::time::sleep(Duration::from_millis(interval_ms)).await;
             }
         })

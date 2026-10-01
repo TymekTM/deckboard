@@ -31,6 +31,9 @@ struct MockBackend {
     buttons: Vec<ButtonRow>,
     execs: Arc<Mutex<Vec<(i64, bool)>>>,
     sliders: Arc<Mutex<Vec<(i64, f64)>>>,
+    /// Artificial exec latency for the starvation test; zero in every
+    /// other fixture.
+    exec_delay: Duration,
 }
 
 impl MockBackend {
@@ -57,6 +60,9 @@ impl Backend for MockBackend {
         self.buttons.iter().find(|b| b.id == id).cloned()
     }
     fn exec(&self, button: ButtonRow, is_tap_start: bool, sink: &mut dyn EventSink) {
+        if !self.exec_delay.is_zero() {
+            std::thread::sleep(self.exec_delay);
+        }
         self.execs.lock().unwrap().push((button.id, is_tap_start));
         if button.kind == "board" {
             sink.change_board(9);
@@ -666,6 +672,71 @@ async fn duplicate_press_start_does_not_leak_a_repeat_loop() {
     assert!(
         settled <= after + 1,
         "leaked repeat loop kept firing ({after} -> {settled})"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn slow_hold_actions_do_not_starve_other_sessions() {
+    // The headless server runtime is single-threaded; a hold tick that
+    // blocks inside the async task (instead of spawn_blocking) freezes
+    // every other session on the runtime - pings, reads, everything. A
+    // second WebSocket client driven from this same runtime would freeze
+    // with it, so the starvation is observed as timer drift: a 50 ms
+    // watchdog must never stall while a hold tick's slow action runs.
+    let mut backend = sample_backend();
+    backend.exec_delay = Duration::from_millis(1000);
+    let (state, _dir) = test_state(backend, |_| {});
+    let device = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    let max_drift_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drift = max_drift_ms.clone();
+    let halted = stop.clone();
+    let watchdog = tokio::spawn(async move {
+        let mut last = std::time::Instant::now();
+        while !halted.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let elapsed = last.elapsed().as_millis() as u64;
+            last = std::time::Instant::now();
+            drift.fetch_max(elapsed, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+
+    // Hold the slow key tile: repeat ticks are due every 20 ms, but each
+    // action sleeps ~1 s.
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "s1",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    // Span at least one full slow tick, then let the press go.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "s2",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-end"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = tokio::time::timeout(Duration::from_secs(2), watchdog).await;
+
+    let drift = max_drift_ms.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        drift < 450,
+        "a slow hold tick froze the runtime for {drift} ms - ticks must run on the blocking pool"
     );
 }
 
