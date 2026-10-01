@@ -51,9 +51,12 @@ class MainActivity : ComponentActivity() {
                     onDispose {}
                 }
 
+                // A refusal (revoked token, bad code) needs the connect screen - its
+                // "Forget pairing" is the way out; the board overlay would eat every tap.
+                val refused = (conn as? app.pulpit.mobile.net.ConnState.Failed)?.retryable == false
                 if (serverDown) {
                     ShutdownScreen(onTap = vm::reconnectFromShutdown)
-                } else if (conn is app.pulpit.mobile.net.ConnState.Connected || boards.isNotEmpty()) {
+                } else if (!refused && (conn is app.pulpit.mobile.net.ConnState.Connected || boards.isNotEmpty())) {
                     // With a snapshot on screen the deck stays up while the
                     // link is down (BoardScreen shows the retrying banner);
                     // the connect screen only owns the no-data states.

@@ -298,10 +298,14 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                             Log.i(TAG, "server announced shutdown - retry loop suspended")
                             _serverDown.value = true
                         }
+                        // A refusal is final: stay on the connect screen with the reason.
+                        is ConnState.Failed -> when {
+                            !st.retryable -> pendingPairCode = null
+                            !_serverDown.value -> scheduleReconnect()
+                        }
                         // While the overlay is up the probe owns reconnects:
                         // failures are expected and stay invisible.
-                        is ConnState.Failed, is ConnState.Disconnected ->
-                            if (!_serverDown.value) scheduleReconnect()
+                        is ConnState.Disconnected -> if (!_serverDown.value) scheduleReconnect()
                         else -> {}
                     }
                 }
@@ -370,12 +374,9 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                 _series.value = series
             }
             is V2Event.ServerError -> {
+                // Fatal codes are already terminal in V2Client
+                // (ConnState.Failed, retryable = false); nothing to do here.
                 Log.w(TAG, "server error: ${ev.code} ${ev.message.orEmpty()}")
-                if (ev.code == "pair-invalid" || ev.code == "pair-expired" || ev.code == "unauthorized") {
-                    // Bad auth: stop retrying; the connect screen explains.
-                    client.disconnect()
-                    _connState.value = ConnState.Failed(authMessage(ev.code))
-                }
             }
             is V2Event.Acked -> {} // interactions are fire-and-confirm
         }
@@ -416,17 +417,11 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             // fire into standby; the probe owns reconnecting from there.
             if (_serverDown.value) return@launch
             val st = _connState.value
-            if (st is ConnState.Failed || st is ConnState.Disconnected) {
+            if ((st is ConnState.Failed && st.retryable) || st is ConnState.Disconnected) {
                 Log.i(TAG, "reconnect attempt $reconnectAttempts")
                 connect()
             }
         }
-    }
-
-    private fun authMessage(code: String): String = when (code) {
-        "pair-invalid" -> "invalid pairing code - generate a new one on the desktop"
-        "pair-expired" -> "pairing code expired - generate a new one on the desktop"
-        else -> "device revoked on the desktop - pair again"
     }
 
     // -- user interactions ------------------------------------------------
