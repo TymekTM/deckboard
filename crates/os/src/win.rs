@@ -91,13 +91,17 @@ fn default_device(enumr: &IMMDeviceEnumerator) -> Result<IMMDevice> {
 
 /// Raw `IPolicyConfig` vtable. The interface is undocumented; this layout
 /// (IUnknown plus twelve methods, `SetDefaultEndpoint` at slot 13) is the
-/// one SoundSwitch/AudioSwitcher have shipped for a decade.
+/// one SoundSwitch/AudioSwitcher have shipped for a decade. Every entry
+/// is the `system` (Win32) calling convention the COM ABI mandates.
 #[repr(C)]
 struct PolicyConfigVtbl {
-    query_interface:
-        unsafe fn(*mut std::ffi::c_void, *const GUID, *mut *mut std::ffi::c_void) -> i32,
-    add_ref: unsafe fn(*mut std::ffi::c_void) -> u32,
-    release: unsafe fn(*mut std::ffi::c_void) -> u32,
+    query_interface: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *const GUID,
+        *mut *mut std::ffi::c_void,
+    ) -> i32,
+    add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
     get_mix_format: *mut std::ffi::c_void,
     get_device_format: *mut std::ffi::c_void,
     reset_device_format: *mut std::ffi::c_void,
@@ -108,7 +112,8 @@ struct PolicyConfigVtbl {
     set_share_mode: *mut std::ffi::c_void,
     get_property_value: *mut std::ffi::c_void,
     set_property_value: *mut std::ffi::c_void,
-    set_default_endpoint: unsafe fn(*mut std::ffi::c_void, PCWSTR, i32) -> i32,
+    set_default_endpoint:
+        unsafe extern "system" fn(*mut std::ffi::c_void, PCWSTR, i32) -> i32,
     set_endpoint_visibility: *mut std::ffi::c_void,
 }
 
