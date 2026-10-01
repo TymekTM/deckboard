@@ -91,13 +91,17 @@ fn default_device(enumr: &IMMDeviceEnumerator) -> Result<IMMDevice> {
 
 /// Raw `IPolicyConfig` vtable. The interface is undocumented; this layout
 /// (IUnknown plus twelve methods, `SetDefaultEndpoint` at slot 13) is the
-/// one SoundSwitch/AudioSwitcher have shipped for a decade.
+/// one SoundSwitch/AudioSwitcher have shipped for a decade. Every entry
+/// is the `system` (Win32) calling convention the COM ABI mandates.
 #[repr(C)]
 struct PolicyConfigVtbl {
-    query_interface:
-        unsafe fn(*mut std::ffi::c_void, *const GUID, *mut *mut std::ffi::c_void) -> i32,
-    add_ref: unsafe fn(*mut std::ffi::c_void) -> u32,
-    release: unsafe fn(*mut std::ffi::c_void) -> u32,
+    query_interface: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *const GUID,
+        *mut *mut std::ffi::c_void,
+    ) -> i32,
+    add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
     get_mix_format: *mut std::ffi::c_void,
     get_device_format: *mut std::ffi::c_void,
     reset_device_format: *mut std::ffi::c_void,
@@ -108,7 +112,7 @@ struct PolicyConfigVtbl {
     set_share_mode: *mut std::ffi::c_void,
     get_property_value: *mut std::ffi::c_void,
     set_property_value: *mut std::ffi::c_void,
-    set_default_endpoint: unsafe fn(*mut std::ffi::c_void, PCWSTR, i32) -> i32,
+    set_default_endpoint: unsafe extern "system" fn(*mut std::ffi::c_void, PCWSTR, i32) -> i32,
     set_endpoint_visibility: *mut std::ffi::c_void,
 }
 
@@ -260,16 +264,22 @@ impl Speaker for WinSpeaker {
         wide.push(0);
         // roles: 0 = console, 1 = multimedia, 2 = communications - set all
         // three so every consumer follows the switch (what the Settings
-        // app and SoundSwitch do)
+        // app and SoundSwitch do). A failing role must not skip the
+        // others: a partial switch is worse than a reported error, so
+        // every role runs and the first failure is surfaced afterwards.
+        let mut first_err = None;
         for role in 0..3i32 {
             let hr = HRESULT(unsafe {
                 ((*config.vtbl).set_default_endpoint)(config.raw, PCWSTR(wide.as_ptr()), role)
             });
-            if hr.is_err() {
-                return Err(OsError::Failed(format!("set default endpoint: {hr}")));
+            if hr.is_err() && first_err.is_none() {
+                first_err = Some(hr);
             }
         }
-        Ok(())
+        match first_err {
+            Some(hr) => Err(OsError::Failed(format!("set default endpoint: {hr}"))),
+            None => Ok(()),
+        }
     }
 }
 
