@@ -479,6 +479,31 @@ fn run_vol(input: &mut dyn Input, cmd: &Command) -> Result<()> {
     input.media(media)
 }
 
+/// Split an `open` options string into argv tokens: whitespace
+/// separated, with double-quoted runs kept together as one token
+/// (quotes stripped). No escape handling - the editor offers no way to
+/// type a literal quote.
+fn split_args(raw: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in raw.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
 fn run_open_file(input: &mut dyn Input, cmd: &Command) -> Result<()> {
     let path = cmd.command.as_deref().unwrap_or_default();
     if path.is_empty() {
@@ -486,7 +511,7 @@ fn run_open_file(input: &mut dyn Input, cmd: &Command) -> Result<()> {
     }
     match &cmd.options {
         Some(opts) if !opts.trim().is_empty() => {
-            let args: Vec<String> = opts.split_whitespace().map(str::to_string).collect();
+            let args = split_args(opts);
             input.spawn(path, &args)
         }
         _ => input.open_url(path),
@@ -949,6 +974,26 @@ mod tests {
         assert_eq!(sink.boards, vec![7]);
         assert!(input.effects.contains(&Effect::KeyDown(vec![Return])));
         assert!(input.effects.contains(&Effect::Sleep(100)));
+    }
+
+    #[test]
+    fn open_options_keep_quoted_arguments_together() {
+        let mut input = MockInput::default();
+        let mut sink = MockSink::default();
+        let c = Command::from_row(
+            "app",
+            Some("C:\\Program Files\\tool.exe"),
+            Some("--msg \"hello world\""),
+            "button",
+        );
+        run_command(&mut input, &mut sink, &c, false).unwrap();
+        assert_eq!(
+            input.effects,
+            vec![Effect::Spawn(
+                "C:\\Program Files\\tool.exe".into(),
+                vec!["--msg".to_string(), "hello world".to_string()],
+            )]
+        );
     }
 
     #[test]
