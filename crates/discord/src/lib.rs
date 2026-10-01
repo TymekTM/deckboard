@@ -268,9 +268,19 @@ pub fn refresh(config: &DiscordConfig) -> Result<AuthTokens> {
 /// (`discord-deckboard.discordAccessToken.value` etc.), leaving every
 /// other field untouched.
 pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Result<()> {
-    let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
-    let mut settings: Value =
-        serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()));
+    // A MISSING file is the only case that starts from `{}`. A file that
+    // exists but cannot be read or parsed must error without writing, or
+    // every other extension's config would be silently wiped by the
+    // merge below.
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+        Err(e) => return Err(e),
+    };
+    let mut settings: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => return Err(corrupt_settings(e)),
+    };
     // A settings.json that parses but is not an object (or whose
     // `discord-deckboard` field is not an object) cannot be merged into.
     // Error instead of panicking: this runs inside a background re-auth
@@ -300,9 +310,19 @@ pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Resu
     if let Some(r) = &tokens.refresh_token {
         field("discordRefreshToken", r);
     }
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(&settings).unwrap_or_default(),
+    // The parsed value is re-serialized, so this cannot realistically
+    // fail - but a silent empty-file write must never happen either.
+    let json = serde_json::to_string_pretty(&settings)
+        .map_err(|e| std::io::Error::other(format!("settings serialization failed: {e}")))?;
+    pulpit_db::write_atomic(path, json.as_bytes())
+}
+
+/// Parse failure of an existing settings.json. The serde message carries
+/// only positions, never file content - the file may hold credentials.
+fn corrupt_settings(e: serde_json::Error) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("settings.json exists but is not valid JSON: {e}"),
     )
 }
 
@@ -1302,6 +1322,70 @@ mod tests {
         assert_eq!(
             saved["discord-deckboard"]["discordAccessToken"]["value"],
             "a"
+        );
+    }
+
+    #[test]
+    fn save_tokens_refuses_to_touch_a_corrupt_settings_file() {
+        // a settings.json that exists but does not parse must not be the
+        // start of a fresh `{}`: silently merging over it would wipe every
+        // other extension's config. Error and leave the bytes untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let tokens = AuthTokens {
+            access_token: "fake-access-token".into(),
+            refresh_token: None,
+        };
+
+        std::fs::write(&path, b"{\"discord-deckboard\": {truncated").unwrap();
+        let err = save_tokens(&path, &tokens).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{\"discord-deckboard\": {truncated",
+            "the corrupt file must be left exactly as it was"
+        );
+        assert!(
+            !dir.path().join("settings.json.tmp").exists(),
+            "no temp file may be left behind by the refused write"
+        );
+    }
+
+    #[test]
+    fn save_tokens_preserves_unrelated_settings_and_creates_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let tokens = AuthTokens {
+            access_token: "fake-access-token".into(),
+            refresh_token: Some("fake-refresh-token".into()),
+        };
+
+        // missing file: the only case that starts from `{}`
+        save_tokens(&path, &tokens).unwrap();
+        let created: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
+            .unwrap();
+        assert_eq!(
+            created["discord-deckboard"]["discordRefreshToken"]["value"],
+            "fake-refresh-token"
+        );
+
+        // an existing file keeps every unrelated field
+        std::fs::write(
+            &path,
+            r#"{"other-package":{"someSetting":{"value":"keep-me"}}}"#,
+        )
+        .unwrap();
+        save_tokens(&path, &tokens).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
+            .unwrap();
+        assert_eq!(
+            saved["other-package"]["someSetting"]["value"],
+            "keep-me",
+            "merging must not wipe unrelated extensions' settings"
+        );
+        assert_eq!(
+            saved["discord-deckboard"]["discordAccessToken"]["value"],
+            "fake-access-token"
         );
     }
 
