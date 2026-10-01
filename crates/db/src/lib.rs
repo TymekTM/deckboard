@@ -322,13 +322,15 @@ impl Db {
     }
 
     /// Delete the board together with its shortcuts (the original leaves
-    /// orphans behind; we prefer the clean invariant).
+    /// orphans behind; we prefer the clean invariant). One transaction, so
+    /// a failure mid-way never strands the shortcuts of a live board.
     pub fn delete_board(&self, id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM Shortcuts WHERE board_id = ?1", [id])?;
-        self.conn
-            .execute("DELETE FROM Boards WHERE id = ?1", [id])?;
-        Ok(())
+        self.with_transaction(|tx| {
+            tx.conn
+                .execute("DELETE FROM Shortcuts WHERE board_id = ?1", [id])?;
+            tx.conn.execute("DELETE FROM Boards WHERE id = ?1", [id])?;
+            Ok(())
+        })
     }
 
     /// Insert a button row; `row.id` is ignored and the new id returned.
@@ -898,6 +900,41 @@ mod tests {
         db.delete_board(a).unwrap();
         assert!(db.get_boards().unwrap().iter().all(|b| b.id != a));
         assert!(db.get_buttons_by_board(a).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_board_is_atomic_when_the_board_row_delete_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+        let a = db.insert_board("A", "#2c3e50", 4, 3).unwrap();
+        let b = db.insert_board("B", "#2c3e50", 4, 3).unwrap();
+        db.insert_button(&sample_button(a, 0, 0)).unwrap();
+        db.insert_button(&sample_button(a, 1, 0)).unwrap();
+        db.insert_button(&sample_button(b, 0, 0)).unwrap();
+
+        // veto the Boards delete only: if the two statements are not one
+        // transaction, the Shortcuts delete stays committed (orphaned rows)
+        db.conn
+            .execute(
+                "CREATE TRIGGER veto_board_delete BEFORE DELETE ON Boards
+                 BEGIN SELECT RAISE(ABORT, 'veto'); END",
+                [],
+            )
+            .unwrap();
+        let result = db.delete_board(a);
+        db.conn.execute("DROP TRIGGER veto_board_delete", []).unwrap();
+
+        assert!(result.is_err(), "the vetoed delete must fail");
+        assert!(
+            db.get_boards().unwrap().iter().any(|row| row.id == a),
+            "the board row must survive the failed delete"
+        );
+        assert_eq!(
+            db.get_buttons_by_board(a).unwrap().len(),
+            2,
+            "its shortcuts must be restored with it, not orphaned"
+        );
+        assert_eq!(db.get_buttons_by_board(b).unwrap().len(), 1);
     }
 
     #[test]
