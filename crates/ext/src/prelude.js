@@ -475,10 +475,11 @@ function __fetch(url, opts) {
         method: opts.method || "GET",
         headers: opts.headers || {},
         body: opts.body === undefined ? null : String(opts.body),
-        timeout_ms: 15000,
+        timeout_ms: opts.timeout_ms || 15000,
     };
     return new Promise(function (resolve, reject) {
-        var res = __host_http(spec);
+        // the native side reads one JSON string, not the object itself
+        var res = __host_http(JSON.stringify(spec));
         if (res.error) {
             reject(new Error(res.error));
             return;

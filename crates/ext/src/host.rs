@@ -438,7 +438,15 @@ native!(host_http, |args, ctx| {
         .get("body")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let value = match do_http(&url, &method, body) {
+    let headers = http_headers(&parsed);
+    let timeout = http_timeout(&parsed);
+    let value = match do_http(
+        &url,
+        &method,
+        body.as_deref().map(str::as_bytes),
+        &headers,
+        timeout,
+    ) {
         Ok((status, text)) => Value::Object(
             [
                 ("status".into(), Value::from(status)),
@@ -461,29 +469,85 @@ native!(host_http, |args, ctx| {
     JsValue::from_json(&value, ctx)
 });
 
+/// `headers` from the request spec: an object of string -> string.
+/// Non-string values (a JS number, null) are skipped, not stringified.
+fn http_headers(spec: &Value) -> Vec<(String, String)> {
+    spec.get("headers")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `timeout_ms` from the request spec: 15 s default, 60 s cap, so an
+/// extension can bound its own call but never pin the runtime forever.
+fn http_timeout(spec: &Value) -> Duration {
+    const DEFAULT_MS: u64 = 15_000;
+    const CAP_MS: u64 = 60_000;
+    Duration::from_millis(
+        spec.get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_MS)
+            .min(CAP_MS),
+    )
+}
+
+/// Apply the per-call timeout and the extension's headers to a request
+/// builder of either body typestate.
+fn prepare_http<B>(
+    mut b: ureq::RequestBuilder<B>,
+    headers: &[(String, String)],
+    timeout: Duration,
+) -> ureq::RequestBuilder<B> {
+    b = b.config().timeout_global(Some(timeout)).build();
+    for (k, v) in headers {
+        b = b.header(k.as_str(), v.as_str());
+    }
+    b
+}
+
 fn do_http(
     url: &str,
     method: &str,
-    body: Option<String>,
+    body: Option<&[u8]>,
+    headers: &[(String, String)],
+    timeout: Duration,
 ) -> std::result::Result<(u16, String), String> {
     // one pooled agent for every extension HTTP call; a fresh agent per
-    // call would pay TLS handshake + connection setup each time
+    // call would pay TLS handshake + connection setup each time. The
+    // agent-level timeout is only a belt: every call carries its own
+    // `timeout_ms`-derived bound.
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    let agent = AGENT.get_or_init(ureq::Agent::new_with_defaults);
+    let agent = AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(60)))
+            .build()
+            .new_agent()
+    });
     let method = method.to_uppercase();
+    let has_content_type = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    // POST/PUT default to a JSON content type unless the extension set one
+    macro_rules! body_request {
+        ($make:expr) => {{
+            let mut req = prepare_http($make, headers, timeout);
+            if !has_content_type {
+                req = req.content_type("application/json");
+            }
+            req
+        }};
+    }
     let result = match (method.as_str(), body) {
-        ("POST", Some(b)) => agent
-            .post(url)
-            .content_type("application/json")
-            .send(b.as_bytes()),
-        ("PUT", Some(b)) => agent
-            .put(url)
-            .content_type("application/json")
-            .send(b.as_bytes()),
-        ("POST", None) => agent.post(url).send(&b""[..]),
-        ("PUT", None) => agent.put(url).send(&b""[..]),
-        ("DELETE", _) => agent.delete(url).call(),
-        _ => agent.get(url).call(),
+        ("POST", Some(b)) => body_request!(agent.post(url)).send(b),
+        ("PUT", Some(b)) => body_request!(agent.put(url)).send(b),
+        ("POST", None) => body_request!(agent.post(url)).send(&b""[..]),
+        ("PUT", None) => body_request!(agent.put(url)).send(&b""[..]),
+        ("DELETE", _) => prepare_http(agent.delete(url), headers, timeout).call(),
+        _ => prepare_http(agent.get(url), headers, timeout).call(),
     };
     let resp = result.map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
@@ -728,5 +792,98 @@ fn register_natives(context: &mut Context) {
     ];
     for (name, f) in fns {
         let _ = context.register_global_callable(boa_engine::JsString::from(name), 1, f);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read as _, Write as _};
+
+    /// One-shot local HTTP server: accepts a single request, hands the
+    /// raw request bytes back over a channel, answers with `response`.
+    fn one_shot_server(
+        response: &'static str,
+    ) -> (std::net::SocketAddr, std::sync::mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            // read until the header block ends (these probes are bodyless)
+            while buf.windows(4).all(|w| w != b"\r\n\r\n") {
+                let Ok(n) = stream.read(&mut chunk) else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+            let _ = stream.write_all(response.as_bytes());
+        });
+        (addr, rx)
+    }
+
+    /// A JS context with the real prelude (shims) and natives registered,
+    /// like a loaded extension runtime minus the package itself.
+    fn context_with_prelude() -> Context {
+        let mut context = Context::default();
+        register_natives(&mut context);
+        let prelude = include_str!("prelude.js")
+            .replace("__EXT_ROOT__", &escape_js("."))
+            .replace("__EXT_PACKAGE__", &escape_js("test-pkg"));
+        run(&mut context, &prelude).unwrap();
+        context
+    }
+
+    fn eval_string(context: &mut Context, code: &str) -> String {
+        run(context, code)
+            .unwrap()
+            .as_string()
+            .map(|s| s.to_std_string_escaped())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn fetch_sends_the_url_and_headers_and_resolves_the_response() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+        let (addr, rx) = one_shot_server(response);
+        let mut context = context_with_prelude();
+        let script = format!(
+            r#"
+            globalThis.__t = {{}};
+            __fetch("http://{addr}/probe", {{ headers: {{ "X-Pulpit-Probe": "probe-42" }} }})
+                .then(function (r) {{ __t.status = r.status; __t.ok = r.ok; return r.text(); }})
+                .then(function (b) {{ __t.body = b; }})
+                .catch(function (e) {{ __t.error = String(e); }});
+            "#
+        );
+        run(&mut context, &script).unwrap();
+        let summary = eval_string(&mut context, "JSON.stringify(__t)");
+        let parsed: Value = serde_json::from_str(&summary).unwrap_or(Value::Null);
+
+        let request = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("server saw no request");
+        assert!(
+            request.starts_with("GET /probe "),
+            "the URL path must reach the server, got: {request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-pulpit-probe: probe-42"),
+            "the custom header must arrive, got: {request}"
+        );
+        assert_eq!(parsed["status"], 200, "summary was {summary}");
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["body"], "hello");
+        assert!(parsed.get("error").is_none());
     }
 }
