@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -25,8 +32,21 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      # Warnings are denied except the lint names that already fire on the
+      # current baseline (pulpit-proto, pulpit-aidev, pulpit-ext). Fix the
+      # baseline and shrink the allowlist until it is empty.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: >-
+          cargo clippy --workspace --all-targets -- -D warnings
+          -A clippy::empty_line_after_doc_comments
+          -A clippy::identity_op
+          -A clippy::large_enum_variant
+          -A clippy::manual_repeat_n
+          -A clippy::match_result_ok
+          -A clippy::redundant_closure
+          -A clippy::too_many_arguments
+          -A clippy::unnecessary_map_or
+          -A unreachable_patterns
 
       - name: Tests
         run: cargo test --workspace
@@ -34,9 +54,37 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
 
       - name: Frontend build
         working-directory: apps/desktop
         run: |
           npm ci
           npx vite build
+
+  mobile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # No Gradle wrapper is committed; 8.7 is the minimum AGP 8.5 needs.
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: 8.7
+          cache-provider: basic
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0'
+
+      - name: Unit tests
+        run: gradle :app:testDebugUnitTest
