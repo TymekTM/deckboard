@@ -414,12 +414,9 @@ fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
 /// CREDIT_LIMIT, each with `unit`+`number` for the window and a
 /// percentage the API computes itself.
 fn zai_rows(key: &str, host: Option<&str>) -> Vec<ProviderRow> {
-    let base = match host.map(str::trim).filter(|h| !h.is_empty()) {
-        Some(h) if h.starts_with("http://") || h.starts_with("https://") => {
-            h.trim_end_matches('/').to_string()
-        }
-        Some(h) => format!("https://{h}"),
-        None => "https://api.z.ai".into(),
+    let base = match zai_base_url(host) {
+        Ok(base) => base,
+        Err(e) => return vec![error_row(GLM_LANE, &e)],
     };
     let url = format!("{base}/api/monitor/usage/quota/limit");
     let headers = [
@@ -431,6 +428,41 @@ fn zai_rows(key: &str, host: Option<&str>) -> Vec<ProviderRow> {
         Err(e) => return vec![error_row(GLM_LANE, &e)],
     };
     zai_rows_from(v)
+}
+
+/// Base URL for the z.ai monitor endpoint. `host` may be a bare host or
+/// a full URL; plain `http://` is refused for anything but loopback -
+/// the request carries the Bearer key, which must not travel in
+/// plaintext off-machine.
+fn zai_base_url(host: Option<&str>) -> std::result::Result<String, String> {
+    let Some(h) = host.map(str::trim).filter(|h| !h.is_empty()) else {
+        return Ok("https://api.z.ai".into());
+    };
+    let base = if h.starts_with("http://") || h.starts_with("https://") {
+        h.trim_end_matches('/').to_string()
+    } else {
+        format!("https://{h}")
+    };
+    if let Some(rest) = base.strip_prefix("http://") {
+        if !is_loopback_host(hostname_of(rest)) {
+            return Err("plain http:// host refused (bearer key would be sent unencrypted)".into());
+        }
+    }
+    Ok(base)
+}
+
+/// Hostname of a URL string's authority part (path and port dropped,
+/// bracketed IPv6 kept intact).
+fn hostname_of(authority: &str) -> &str {
+    let authority = authority.split('/').next().unwrap_or_default();
+    if let Some(stripped) = authority.strip_prefix('[') {
+        return stripped.split(']').next().unwrap_or_default();
+    }
+    authority.split(':').next().unwrap_or_default()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
 }
 
 /// Map a quota response onto bar rows; split from the HTTP call so tests
@@ -1135,6 +1167,29 @@ mod tests {
         // remaining is honored when currentValue is zeroed
         assert_eq!(rows[1].text, "90% left");
         assert_eq!(rows[1].percent, Some(10.0));
+    }
+
+    #[test]
+    fn zai_base_url_refuses_plaintext_non_loopback_hosts() {
+        // defaults and bare hosts upgrade to https
+        assert_eq!(zai_base_url(None).unwrap(), "https://api.z.ai");
+        assert_eq!(
+            zai_base_url(Some(" open.bigmodel.cn ")).unwrap(),
+            "https://open.bigmodel.cn"
+        );
+        assert_eq!(zai_base_url(Some("https://api.z.ai/")).unwrap(), "https://api.z.ai");
+        // plain http would send the Bearer key in plaintext: loopback only
+        assert!(zai_base_url(Some("http://api.z.ai")).is_err());
+        assert!(zai_base_url(Some("http://example.com/x")).is_err());
+        assert_eq!(
+            zai_base_url(Some("http://127.0.0.1:8080")).unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            zai_base_url(Some("http://localhost:9/")).unwrap(),
+            "http://localhost:9"
+        );
+        assert_eq!(zai_base_url(Some("http://[::1]")).unwrap(), "http://[::1]");
     }
 
     #[test]
