@@ -17,6 +17,17 @@ when done.
 | 003 | Frontend: per-tile rendering + hidden gating | P1 | M | - | DONE (commits `4545a11`..`a055327`; TileCell extraction + hidden buffer + stable identity + pointercancel/plugin-fs) |
 | 004 | Quiet idle loops (COM chain, emit gating, change detection) | P2 | M | - | DONE (commit `f74fd6a`; aidev dedupe step dropped with plan 001; review follow-up: change-gates now advance only after the WebView emit succeeded, so a hidden window never loses its last speaker update) |
 | 005 | v2: bounded outbound queues + silence watchdog | P2 | M | - | DONE (commit `cf06cf5`; the non-reading-WS-client integration scenario was impractical to drive - the two hub unit tests `overflowing_queue_closes_the_session` and `reap_silent_drops_stale_and_keeps_fresh_sessions` are the acceptance bar, per the plan's own fallback clause) |
+| 006 | mobile: confine PulpitViewModel state to the main thread | P1 | S | - | TODO |
+| 007 | mobile: terminal auth failures stop the reconnect loop | P1 | S | 006 | TODO |
+| 008 | mobile: close the link in background, release the screen after 3 min offline | P1 | M | 006, 007 | TODO |
+| 009 | mobile: fresh gesture callbacks after live edits + `key(t.id)` | P2 | S | - | TODO |
+| 010 | mobile: recompose only tiles whose channel changed | P3 | M | 009 | TODO |
+| 011 | docs: AGENTS.md - Android client speaks v2 | P3 | S | - | TODO |
+| 012 | Correctness/security audit findings (packages A-E, findings list with fix sketches) | P1 | L | E1 before C5; package D overlaps 006/007/009 - see the file | TODO (per-item status table inside the file) |
+
+Plans 006-011 come from the second audit (see "Round 2: mobile battery
+and bugs" at the end of this file). Order: 006 → 007 → 008 (the battery
+win), 009 → 010 any time, 011 independent.
 
 Plans 002 and 004 both touch `apps/desktop/src-tauri/src/lib.rs` (different
 functions); land them in either order but not simultaneously. Plan 003
@@ -48,12 +59,10 @@ Impact/effort/risk as judged at audit time; confidence in parentheses.
 
 Scope-adjacent (correctness, not perf - surfaced during the perf audit):
 
-- `V2State::publish_delta` (`crates/v2/src/service.rs:201`) has no
-  production caller: the desktop editor's write path never bumps the v2
-  generation or emits `boards.delta`, so connected v2 clients cannot see
-  board edits and the boards cache never invalidates. Only the
-  integration test calls it. Deserves its own fix; interacts with
-  finding 2's rebuild frequency once wired.
+- ~~`V2State::publish_delta` has no production caller~~ - RESOLVED
+  (2026-10-01 audit): the desktop editor calls it
+  (`apps/desktop/src-tauri/src/lib.rs`, `publish_v2` helpers, commit
+  `fb5661d`).
 - Flaky pre-existing race (reproduced on base `b4013a8`, unchanged by the
   perf-fixes branch): `token_connect_delivers_full_snapshot` intermittently
   receives `state.patch` before `welcome`/`boards.sync`. The session
@@ -102,3 +111,76 @@ are implemented. Remaining context:
   decision, blocked behind plan 001.
 - Findings 9, 11, 12, 13: landed as one commit; multi-range asset
   requests deliberately still serve a full 200 body.
+
+## Round 2: mobile battery and bugs (2026-10-01, commit `f07f447`)
+
+Audit requested by the owner: "the mobile app drains a lot of battery,
+optimize it and look for bugs". Scope: `apps/mobile` (Android client,
+target SM-T561 / LineageOS 7.1), plus the server and desktop touchpoints
+it depends on (`crates/v2` flusher/pings/shutdown, desktop `goodbye_v2`).
+Not audited: on-device battery profiling (no `dumpsys batterystats`
+capture was available), and the rest of the server and desktop. Baseline
+at plan time: `:app:testDebugUnitTest` passes (see any plan's command
+table for the exact invocation; Gradle is not on PATH).
+
+Owner decisions: plan everything worth doing **except screen brightness**
+(no dimming), and use a **3-minute** offline grace before the screen may
+sleep.
+
+### Findings (vetted)
+
+| # | Finding | Where | Impact | Effort | Risk | Planned |
+|---|---------|-------|--------|--------|------|---------|
+| M1 | Screen held on forever when the PC disappears without a goodbye (sleep, crash, Wi-Fi); a retry every 12 s all night | `MainActivity.kt:26,45-52`, `PulpitViewModel.kt` `scheduleReconnect`; desktop sends goodbye only on `ExitRequested` (`apps/desktop/src-tauri/src/lib.rs:207-211`) | very high (backlight is the dominant draw) | M | MED | 008 |
+| M2 | Socket stays open with the screen off or the app hidden: 10 Hz patches + pings keep Wi-Fi and the CPU awake | `PulpitViewModel.kt` `onAppBackground` (closes only in shutdown standby) | high | (in 008) | MED | 008 |
+| M3 | HTTP 401 (revoked token) and fatal error codes loop forever; the overlay locks the user out of "Forget pairing" | `V2Client.kt` `onFailure`/`TYPE_ERROR`, `PulpitViewModel.kt` collector, `MainActivity.kt` routing | high (bug + battery) | S | LOW | 007 |
+| M4 | VM state touched from `Dispatchers.Default` and main: lost `_bitmaps` update leaves an image missing until restart; `Job()` not supervisor; `forgetPairing` keeps `assetFetches` | `PulpitViewModel.kt:47,105,188,245-254` | medium (bug) | S | LOW | 006 |
+| M5 | `pointerInput(tile.id)` keeps stale callbacks after a live tile edit; grid tiles not keyed by id | `Tile.kt:260,331`, `Widgets.kt:350`, `BoardScreen.kt:311` | medium (bug) | S | LOW | 009 |
+| M6 | Whole `BoardGrid` recomposes and re-parses every tile's state on every patch | `BoardScreen.kt:282-342` | low-medium (CPU while lit) | M | MED | 010 |
+| M7 | AGENTS.md says the Android client parses the legacy payload (`proto/Models.kt`) - it is v2-only (`proto/V2.kt`) | `AGENTS.md:17,41` | agents edit the wrong mapper | S | LOW | 011 |
+
+### Considered and rejected (mobile round)
+
+- **Screen dimming / brightness control**: rejected by the owner. Do not
+  re-propose.
+- **Double keepalive (OkHttp 30 s ping + server 60 s ping)**: moot once
+  plan 008 closes the socket whenever the screen is off. While the screen
+  is lit, the backlight dwarfs two tiny frames per minute.
+- **`BootReceiver` blocked from starting activities on API 29+**: true in
+  general, but the deck runs Android 7.1. Revisit only if the target
+  device changes.
+- **Clock tile ticking**: it already wakes once per minute, aligned to
+  the minute. Fine.
+- **Non-atomic `requestCounter` in `V2Client`**: only used for request
+  ids; a duplicate id is harmless.
+
+### Deferred (mobile round)
+
+- **Desktop goodbye on Windows sleep** (`WM_POWERBROADCAST` → send
+  `server.shutdown`): the tablet would then hit the goodbye screen at
+  once instead of after the 3-minute grace. Complements plan 008; desktop
+  work, needs owner buy-in.
+- **Per-board channel subscription** (server sends a session only the
+  channels of the boards it shows): the real traffic fix behind plan
+  010. Protocol change (`docs/protocol-v2.md`, `crates/proto`, both
+  clients), effort L.
+- **Slider/knob initial value**: `SliderTile`/`KnobTile` start at 0.5
+  and never read the server's value (`Tile.kt:323`, `Widgets.kt:343`).
+  Feature gap, not battery.
+- **Client-side toggle positions**: `BoardGrid`'s `positions` map
+  (`BoardScreen.kt:289`) is read but never written, so a toggle without
+  a state channel never shows as active. Decide whether such toggles
+  should flip locally, or drop the map.
+- **ROADMAP M4 conflict**: `ROADMAP.md:76-79` plans a foreground service
+  plus a battery-optimization exemption to keep the WS alive in Doze.
+  That is the opposite of plan 008 (no socket while dark, reconnect on
+  wake). Re-decide before anyone implements M4.
+
+## Round 3: correctness/security audit (2026-10-01, commit `f07f447`)
+
+Whole-repo audit (all crates, desktop, server, Android, CI, docs). Output
+is a findings handoff with fix sketches rather than step-by-step plans:
+`012-audit-findings-2026-10-01.md` (packages A-E, per-item status table at
+the end of that file). Its Android package D was written in parallel with
+plans 006-011; overlaps are marked inside the file - execute 006-011
+first and only the leftover D items from 012.
