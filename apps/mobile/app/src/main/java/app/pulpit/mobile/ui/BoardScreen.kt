@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.sp
 import app.pulpit.mobile.net.ConnState
 import app.pulpit.mobile.net.displayText
 import app.pulpit.mobile.net.isActiveValue
+import app.pulpit.mobile.net.numericValue
 import app.pulpit.mobile.proto.Board
 import app.pulpit.mobile.proto.ChannelInfo
 import app.pulpit.mobile.proto.V2
@@ -380,6 +381,7 @@ private fun TileCell(
         tileSize = tileSize,
         active = active,
         liveText = displayText(live),
+        liveValue = numericValue(live),
         series = SeriesWindow(points),
         channel = meta,
         items = TileItems(listItems(t, live)),
