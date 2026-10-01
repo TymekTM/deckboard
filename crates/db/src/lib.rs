@@ -705,40 +705,86 @@ const LEGACY_FILES: &[&str] = &[
 const LEGACY_DIRS: &[&str] = &["extensions", "assets"];
 
 /// One-time, best-effort copy from the original Deckboard data directory.
-/// No-op unless the legacy dir exists and the target does not; per-item
-/// skips let a partial migration resume on the next run. `logs/` is
+/// The full copy is staged in a sibling `<target>.migrating` directory and
+/// renamed into place in one step, so a crash mid-copy never leaves a
+/// half-populated `~/pulpitApp`: the next run per-item skips what already
+/// landed in the staging dir and finishes the job (ADR-011). `logs/` is
 /// intentionally not carried over.
 fn migrate_legacy_data(legacy: &Path, target: &Path) {
     if target.exists() || !legacy.is_dir() {
         return;
     }
-    if let Err(e) = std::fs::create_dir_all(target) {
-        tracing::warn!(error = %e, "cannot create data directory, skipping legacy migration");
+    let staging = migrating_sibling(target);
+    if let Err(e) = std::fs::create_dir_all(&staging) {
+        tracing::warn!(
+            error = %e,
+            "cannot create migration staging directory, skipping legacy migration"
+        );
         return;
     }
     let mut copied: Vec<&str> = Vec::new();
-    for name in LEGACY_FILES.iter().chain(LEGACY_DIRS) {
+    for name in LEGACY_FILES.iter().copied().chain(LEGACY_DIRS.iter().copied()) {
         let from = legacy.join(name);
-        let to = target.join(name);
+        let to = staging.join(name);
+        if to.exists() {
+            continue; // landed before a previous crash; resume
+        }
         let copied_ok = if from.is_dir() {
-            !to.exists() && copy_tree(&from, &to).is_ok()
+            copy_tree(&from, &to).is_ok()
         } else if from.is_file() {
-            !to.exists() && std::fs::copy(&from, &to).is_ok()
+            std::fs::copy(&from, &to).is_ok()
         } else {
             false
         };
         if copied_ok {
             copied.push(name);
+        } else if from.exists() {
+            // the item stays missing but must not block the rename forever
+            tracing::warn!(item = name, "legacy migration could not copy item");
         }
     }
-    if !copied.is_empty() {
-        tracing::info!(
-            from = %legacy.display(),
-            to = %target.display(),
-            migrated = ?copied,
-            "migrated data from the original Deckboard app"
-        );
+    copy_db_sidecars(legacy, &staging);
+    // either the rename lands the whole directory at once, or the target
+    // stays absent and the next run resumes from the staging dir
+    match std::fs::rename(&staging, target) {
+        Ok(()) => {
+            tracing::info!(
+                from = %legacy.display(),
+                to = %target.display(),
+                migrated = ?copied,
+                "migrated data from the original Deckboard app"
+            );
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            "cannot finalize legacy migration; it will resume on the next start"
+        ),
     }
+}
+
+/// `database.db` may carry un-checkpointed commits in its WAL sidecars;
+/// copying them keeps recent writes from the original app (best-effort,
+/// skipped when already present so a resumed run stays idempotent).
+fn copy_db_sidecars(legacy: &Path, staging: &Path) {
+    for suffix in ["-wal", "-shm"] {
+        let from = legacy.join(format!("database.db{suffix}"));
+        let to = staging.join(format!("database.db{suffix}"));
+        if from.is_file() && !to.exists() {
+            if let Err(e) = std::fs::copy(&from, &to) {
+                tracing::warn!(error = %e, sidecar = suffix, "could not copy database sidecar");
+            }
+        }
+    }
+}
+
+/// Sibling directory the migration stages into before the final rename.
+fn migrating_sibling(target: &Path) -> PathBuf {
+    let mut name = target
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".migrating");
+    target.with_file_name(name)
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -793,6 +839,56 @@ mod tests {
         let target = home.path().join("pulpitApp");
         migrate_legacy_data(&home.path().join("deckboard"), &target);
         assert!(!target.exists(), "nothing to migrate, nothing created");
+    }
+
+    #[test]
+    fn legacy_migration_resumes_from_a_crashed_partial_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = home.path().join("deckboard");
+        let target = home.path().join("pulpitApp");
+        let staging = home.path().join("pulpitApp.migrating");
+        std::fs::create_dir_all(legacy.join("extensions/pkg")).unwrap();
+        std::fs::write(legacy.join("database.db"), b"db").unwrap();
+        std::fs::write(legacy.join("settings.json"), b"{}").unwrap();
+        std::fs::write(legacy.join("editor.json"), b"{}").unwrap();
+        std::fs::write(legacy.join("devices.json"), b"[]").unwrap();
+        std::fs::write(legacy.join("extensions/pkg/index.js"), b"module.exports").unwrap();
+
+        // simulate a crash after only database.db landed: the staging dir
+        // exists, half-populated, and the target was never created
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::copy(legacy.join("database.db"), staging.join("database.db")).unwrap();
+
+        migrate_legacy_data(&legacy, &target);
+
+        // the rerun resumes per-item and completes the migration
+        assert_eq!(std::fs::read(target.join("database.db")).unwrap(), b"db");
+        assert_eq!(
+            std::fs::read(target.join("settings.json")).unwrap(),
+            b"{}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("extensions/pkg/index.js")).unwrap(),
+            b"module.exports"
+        );
+        assert!(!staging.exists(), "the staging dir is renamed away, not kept");
+    }
+
+    #[test]
+    fn legacy_migration_carries_database_wal_sidecars() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = home.path().join("deckboard");
+        let target = home.path().join("pulpitApp");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("database.db"), b"db").unwrap();
+        // an un-checkpointed original app leaves its recent commits here
+        std::fs::write(legacy.join("database.db-wal"), b"wal").unwrap();
+        std::fs::write(legacy.join("database.db-shm"), b"shm").unwrap();
+
+        migrate_legacy_data(&legacy, &target);
+
+        assert_eq!(std::fs::read(target.join("database.db-wal")).unwrap(), b"wal");
+        assert_eq!(std::fs::read(target.join("database.db-shm")).unwrap(), b"shm");
     }
 
     #[test]
