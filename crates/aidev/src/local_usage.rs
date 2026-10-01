@@ -119,14 +119,18 @@ impl Scanner {
             tracing::warn!(path = %path.display(), error = %e, "aidev transcript seek failed");
             return;
         }
-        let mut chunk = String::new();
-        if let Err(e) = file.read_to_string(&mut chunk) {
+        let mut raw = Vec::new();
+        if let Err(e) = file.read_to_end(&mut raw) {
             tracing::warn!(path = %path.display(), error = %e, "aidev transcript read failed");
             return;
         }
-        // a torn final line is re-read next pass once it completes
-        let consumed = chunk.len() as u64 - trailing_partial(&chunk) as u64;
-        for line in chunk[..consumed as usize].lines() {
+        // lossy decode: invalid bytes anywhere in the chunk would fail
+        // read_to_string as a whole and re-stall on the same offset
+        // forever. `consumed` counts raw bytes so the offset stays
+        // aligned with the file even when lossy decoding changes lengths
+        let consumed = raw.len() - trailing_partial(&raw);
+        let chunk = String::from_utf8_lossy(&raw[..consumed]);
+        for line in chunk.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -140,7 +144,7 @@ impl Scanner {
                 state.samples.push(parsed.sample);
             }
         }
-        state.offset += consumed;
+        state.offset += consumed as u64;
     }
 
     /// Sums per window over all ingested samples.
@@ -203,8 +207,8 @@ fn collect_jsonl(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) {
 }
 
 /// Bytes of a trailing partial line (no newline terminator yet).
-fn trailing_partial(chunk: &str) -> usize {
-    match chunk.rfind('\n') {
+fn trailing_partial(chunk: &[u8]) -> usize {
+    match chunk.iter().rposition(|b| *b == b'\n') {
         Some(pos) => chunk.len() - pos - 1,
         None => chunk.len(),
     }
@@ -573,6 +577,28 @@ mod tests {
         set_mtime_old(&f);
         scanner.scan(Format::Zcode, &dir);
         assert!(!scanner.files.contains_key(&f));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_stall_the_scanner() {
+        let dir = tmp_dir("badutf8");
+        let f = dir.join("s.jsonl");
+        // a crashed writer can leave raw invalid bytes in a transcript;
+        // the valid usage line after them must still count and the byte
+        // offset must advance past the damage
+        let mut body: Vec<u8> = b"{\"completedAt\":\"2026-09-22T12:00".to_vec();
+        body.extend_from_slice(&[0xFF, 0xFE]);
+        body.extend_from_slice(b"00Z\",\"response\":{}}\n");
+        body.extend_from_slice(
+            br#"{"completedAt":"2026-09-22T12:00:00Z","response":{"usage":{"inputTokens":1000,"outputTokens":0}}}"#,
+        );
+        body.push(b'\n');
+        std::fs::write(&f, &body).unwrap();
+        let mut scanner = Scanner::new(8);
+        scanner.scan(Format::Zcode, &dir);
+        assert_eq!(scanner.sums(1_790_079_429).today, 1000);
+        assert_eq!(scanner.files[&f].offset, body.len() as u64);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

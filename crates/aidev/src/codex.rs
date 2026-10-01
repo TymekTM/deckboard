@@ -177,21 +177,27 @@ fn tail_rate_limits(path: &Path) -> Option<(i64, Limits)> {
     let len = file.metadata().ok()?.len();
     let start = len.saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = String::new();
-    file.read_to_string(&mut tail).ok()?;
+    // lossy decode: the seek can land mid UTF-8 char and read_to_string
+    // would fail the whole tail, dropping the file's limits
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
     // the first line after a mid-file seek may be torn: drop it
-    if start > 0 {
-        if let Some(pos) = tail.find('\n') {
-            tail.drain(..pos + 1);
-        }
-    }
+    let tail = match (start > 0, tail.find('\n')) {
+        (true, Some(pos)) => &tail[pos + 1..],
+        _ => tail.as_ref(),
+    };
     let mut newest: Option<(i64, Limits)> = None;
     for line in tail.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let payload = v.get("payload")?;
-        if payload.get("type")?.as_str()? != "token_count" {
+        // junk lines (no payload, no timestamp, other record types)
+        // disqualify only themselves, never the whole scan
+        let Some(payload) = v.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(|t| t.as_str()) != Some("token_count") {
             continue;
         }
         let Some(rl) = payload.get("rate_limits") else {
@@ -200,7 +206,10 @@ fn tail_rate_limits(path: &Path) -> Option<(i64, Limits)> {
         let Some(limits) = parse_limits(rl) else {
             continue;
         };
-        let ts = crate::local_usage::parse_iso_rfc3339(v.get("timestamp")?.as_str()?).unwrap_or(0);
+        let Some(ts_text) = v.get("timestamp").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        let ts = crate::local_usage::parse_iso_rfc3339(ts_text).unwrap_or(0);
         if newest.as_ref().map_or(true, |(b, _)| ts > *b) {
             newest = Some((ts, limits));
         }
@@ -329,6 +338,58 @@ mod tests {
         assert_eq!(primary.resets_at, Some(1_790_000_000));
         assert!(limits.secondary.is_none());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn torn_utf8_tail_still_yields_limits() {
+        let dir = tmp_dir("torn");
+        let day = dir.join("2026").join("09").join("24");
+        std::fs::create_dir_all(&day).unwrap();
+        let f = day.join("rollout-torn.jsonl");
+        // build a file whose 64 KiB tail window starts on a UTF-8
+        // continuation byte; the valid token_count line at the end must
+        // still be read (read_to_string would fail the whole tail)
+        let mut l2 = token_count_line("2026-09-24T12:00:00Z", 200, 50, 59.0, 300);
+        if l2.len() % 2 == 1 {
+            l2 = token_count_line("2026-09-24T12:00:00Z", 200, 50, 59.0, 3000);
+        }
+        let n = (65_534 - l2.len()) / 2;
+        let mut body = format!("{{\"note\":\"{}\"}}\n", "ż".repeat(n)).into_bytes();
+        body.extend_from_slice(l2.as_bytes());
+        assert_eq!(body.len() - 65_536, 10); // second byte of the first ż
+        assert_eq!(body[body.len() - 65_536] & 0xC0, 0x80); // continuation
+        std::fs::write(&f, &body).unwrap();
+
+        let limits = limits(&dir, crate::unix_now()).expect("limits from torn-utf8 tail");
+        let primary = limits.primary.expect("primary window");
+        assert_eq!(primary.used_percent, 59.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn payload_free_lines_do_not_abort_the_tail_scan() {
+        let dir = tmp_dir("junk");
+        let day = dir.join("2026").join("09").join("24");
+        std::fs::create_dir_all(&day).unwrap();
+        let f = day.join("rollout-j.jsonl");
+        // a good token_count record, then later lines that are valid
+        // JSON but lack a timestamp or a payload: the reverse scan must
+        // skip them one by one, not abort the whole file
+        let rate_only = r#"{"payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":11.0,"window_minutes":300,"resets_at":1790000000},"secondary":null,"plan_type":"free"}}}"#;
+        std::fs::write(
+            &f,
+            format!(
+                "{}\n{}\n{}\n",
+                token_count_line("2026-09-24T12:00:00Z", 200, 50, 59.0, 300),
+                r#"{"timestamp":"2026-09-24T12:00:01Z","type":"turn_abort"}"#,
+                rate_only,
+            ),
+        )
+        .unwrap();
+        let limits = limits(&dir, crate::unix_now()).expect("limits survive junk tail lines");
+        let primary = limits.primary.expect("primary window");
+        assert_eq!(primary.used_percent, 59.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
