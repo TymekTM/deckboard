@@ -87,13 +87,45 @@ fn colors_icons_and_title_agree_between_the_wires() {
     assert_eq!(style.title.as_deref(), legacy["title"].as_str());
 
     // unset dual-state fields: legacy fills its own defaults (the
-    // client-side fallback), v2 carries None - pinned here so C5's
-    // state-2 fallback rule has a documented starting point
-    let (legacy, tile) = both(&row("url", "button", Some("https://x.co")));
+    // client-side fallback); v2 mirrors color2's resolved default (the
+    // type color, NET-03) and leaves genuinely absent pairs to the §4
+    // client-side per-field fallback - pinned here so the divergence
+    // stays deliberate. clock-display-time is the one basic type
+    // without a default color, so its unset color2 is empty on both.
+    let mut r = row("clock-display-time", "button", None);
+    r.color2 = None;
+    let (legacy, tile) = both(&r);
     let style = style_of(&tile);
     assert_eq!(style.color.as_deref(), legacy["color"].as_str());
-    assert!(style.color2.is_none(), "v2 drops unset color2");
-    assert!(legacy["color2"].as_str().is_some_and(|c| !c.is_empty()));
+    assert_eq!(legacy["color2"].as_str(), Some(""));
+    assert!(style.color2.is_none(), "no type default -> absent on the wire");
+}
+
+#[test]
+fn color2_falls_back_to_the_type_default_like_legacy() {
+    // NET-03: a type with a default color (vol), a custom resting color
+    // and no explicit color2 - the legacy wire carries the type default
+    // while active, and so must v2 (not the tile's own resting color).
+    let mut r = row("vol", "button", Some("vol_up"));
+    r.color = Some("#123456".into());
+    r.color2 = None;
+    let (legacy, tile) = both(&r);
+    let style = style_of(&tile);
+    assert_eq!(
+        legacy["color2"].as_str().unwrap_or_default(),
+        "#F5AB35",
+        "legacy fills the vol type default"
+    );
+    assert_eq!(
+        style.color2.as_deref(),
+        legacy["color2"].as_str(),
+        "v2 mirrors the legacy-resolved color2"
+    );
+    assert_ne!(
+        style.color2.as_deref(),
+        Some("#123456"),
+        "the resting color is not the active-state fallback"
+    );
 }
 
 #[test]

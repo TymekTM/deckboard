@@ -275,7 +275,12 @@ fn style(row: &ButtonRow, legacy: &Value) -> Style {
     let prefix = legacy.get("prefix").and_then(Value::as_str);
     Style {
         color: non_empty(color),
-        color2: non_empty(row.color2.as_deref()),
+        // Unset color2 falls back to the TYPE default (the same chain the
+        // legacy mapper resolves via the style table), not to the tile's
+        // own resting color: both wires must show the same active-state
+        // color, and the §4 client fallback stays a last resort for
+        // types without a default.
+        color2: non_empty(legacy.get("color2").and_then(Value::as_str)),
         icon: non_empty(unicode),
         icon2: non_empty(unicode2),
         icon_family: non_empty(prefix),

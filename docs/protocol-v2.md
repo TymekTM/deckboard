@@ -204,7 +204,10 @@ Boards are data. One board:
   server-side the same way the legacy mapper resolves them (DB value →
   type default → fallback). `color2`/`icon2` are the active-state pair:
   the client swaps to them while the tile's channel reports its active
-  value (e.g. `"ON"`).
+  value (e.g. `"ON"`). An unset `color2` is filled with the type's
+  default color server-side (the legacy chain) before it goes on the
+  wire; types without a default omit it and the §4 client fallback
+  applies.
 - Style parity fields (added 2026-10, 012 C5): `border_color`,
   `icon_color`, `title_color` and their `*_color2` active-state pairs.
   All optional; a client that does not know them keeps its defaults
