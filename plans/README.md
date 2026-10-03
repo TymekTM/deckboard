@@ -23,7 +23,7 @@ when done.
 | 009 | mobile: fresh gesture callbacks after live edits + `key(t.id)` | P2 | S | - | DONE (`fc68f51` + `0b101c0`/`7334f25`, lane L4; rememberUpdatedState everywhere, grid keyed by tile id) |
 | 010 | mobile: recompose only tiles whose channel changed | P3 | M | 009 | DONE (`29bbb78`, lane L4; State holders + per-tile TileCell + derivedStateOf) |
 | 011 | docs: AGENTS.md - Android client speaks v2 | P3 | S | - | DONE (lane L6, see E3; mobile naming itself landed with L4 `796cada`) |
-| 012 | Correctness/security audit findings (packages A-E, findings list with fix sketches) | P1 | L | E1 before C5; package D overlaps 006/007/009 - see the file | DONE (A, C, D, E all landed; B1/B3-CSP NEEDS-MANUAL-TEST, B2 step 6 + token-storage = owner decisions; per-item table inside the file) |
+| 012 | Correctness/security audit findings (packages A-E, findings list with fix sketches) | P1 | L | E1 before C5; package D overlaps 006/007/009 - see the file | DONE (all packages incl. B2 step 6 + Android Keystore tokens; per-item table inside the file) |
 
 Plans 006-011 come from the second audit (see "Round 2: mobile battery
 and bugs" at the end of this file). Order: 006 → 007 → 008 (the battery
