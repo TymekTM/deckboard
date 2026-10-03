@@ -270,6 +270,7 @@ impl VoicemeeterState {
             .and_then(Value::as_str)
             .ok_or_else(|| VmError::BadPayload("param", "missing".into()))?
             .to_string();
+        check_target(number, &param)?;
         let index = format!("{kind}[{number}].{param}");
         // action shape: vm-{op}-{strip|bus}
         let base = action
@@ -309,12 +310,14 @@ impl VoicemeeterState {
 
     /// Read one Strip parameter - used by live diagnostics and tests.
     pub fn read_strip(&mut self, number: i64, param: &str) -> Result<f32> {
+        check_target(number, param)?;
         let index = format!("Strip[{number}].{param}");
         self.with_remote(|r| r.get_parameter_float(index.as_str()))
     }
 
     /// Read one Bus parameter - used by live diagnostics and tests.
     pub fn read_bus(&mut self, number: i64, param: &str) -> Result<f32> {
+        check_target(number, param)?;
         let index = format!("Bus[{number}].{param}");
         self.with_remote(|r| r.get_parameter_float(index.as_str()))
     }
@@ -329,7 +332,13 @@ impl VoicemeeterState {
         let (kind, name) = device
             .split_once(": ")
             .ok_or_else(|| VmError::BadPayload("device", device.into()))?;
-        let index = format!("Bus[0].Device.{}", kind.to_lowercase());
+        let kind = kind.to_lowercase();
+        // both halves land inside one text command; validate before it
+        // is ever built
+        if !is_plain_token(&kind) || !is_quotable_text(name) {
+            return Err(VmError::BadPayload("device", device.into()));
+        }
+        let index = format!("Bus[0].Device.{kind}");
         self.with_remote(|r| r.set_parameters(&string_param_text(&index, name)))
     }
 }
@@ -367,6 +376,44 @@ fn format_value(value: f32) -> String {
 /// `Bus[0].Device.wdm="Speakers";` - quoted string parameter form.
 fn string_param_text(index: &str, value: &str) -> String {
     format!("{index}=\"{value}\";")
+}
+
+/// Strip/Bus count bound for arguments. Voicemeeter's largest layout
+/// (Potato) has 8 of each; 32 leaves margin while keeping indices sane.
+const MAX_INDEX: i64 = 32;
+
+/// Parameter-name token Voicemeeter understands: ASCII letters, digits,
+/// dot, underscore. Anything else - in particular `;`, `=`, quotes and
+/// newlines - could splice extra commands into the `;`-separated command
+/// language of `VBVMR_SetParameters`.
+fn is_plain_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_')
+}
+
+/// Text that is safe to place inside a quoted command: no quote (breaks
+/// out), no semicolon (splices), no control characters.
+fn is_quotable_text(s: &str) -> bool {
+    !s.is_empty()
+        && !s
+            .bytes()
+            .any(|b| b == b'"' || b == b';' || b.is_ascii_control())
+}
+
+/// Validate the `(kind, number, param)` triple used to address a bus or
+/// strip parameter.
+fn check_target(number: i64, param: &str) -> Result<()> {
+    if !(0..=MAX_INDEX).contains(&number) {
+        return Err(VmError::BadPayload(
+            "number",
+            format!("{number} outside 0..={MAX_INDEX}"),
+        ));
+    }
+    if !is_plain_token(param) {
+        return Err(VmError::BadPayload("param", param.into()));
+    }
+    Ok(())
 }
 
 /// Extension input declarations for the style resolver (same colors and
@@ -469,6 +516,84 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, VmError::BadPayload("action", _)));
+    }
+
+    #[test]
+    fn params_that_could_splice_commands_are_rejected() {
+        // VBVMR_SetParameters speaks a `;`-separated command language: a
+        // param carrying `;`, `=` or quotes could splice extra commands.
+        // The toggle path is used so the pre-fix run only ever READS with
+        // the poisoned name (inert on a live Voicemeeter).
+        let mut vm = VoicemeeterState::new();
+        for evil in [
+            "Mute=0;Strip[0].kilo",
+            "Mute;",
+            "Mu\"te",
+            "Mu\nte",
+            "",
+            "Mu te",
+        ] {
+            let err = vm
+                .execute("vm-toggle-strip", &json!({ "param": evil, "number": 1 }))
+                .unwrap_err();
+            assert!(
+                matches!(err, VmError::BadPayload("param", _)),
+                "param {evil:?} must be rejected as a payload error, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_strip_and_bus_numbers_are_rejected() {
+        let mut vm = VoicemeeterState::new();
+        for bad in [-1, 999] {
+            let err = vm
+                .execute(
+                    "vm-toggle-strip",
+                    &json!({ "param": "Mute", "number": bad }),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, VmError::BadPayload("number", _)),
+                "number {bad} must be rejected as a payload error, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_output_rejects_quote_and_semicolon_breakout() {
+        // the device name lands inside a quoted text command: a quote can
+        // break out and splice further commands. The fixture's spliced
+        // text is deliberately inert (`=;` parses as nothing).
+        let mut vm = VoicemeeterState::new();
+        for evil in ["WDM: x\";=;", "WD;M: y", "WDM: a\nb", ""] {
+            let err = vm
+                .execute("vm-set-output", &json!({ "device": evil }))
+                .unwrap_err();
+            assert!(
+                matches!(err, VmError::BadPayload("device", _)),
+                "device {evil:?} must be rejected as a payload error, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_tokens_and_quotable_text_are_strict() {
+        assert!(is_plain_token("Gain"));
+        assert!(is_plain_token("A1"));
+        assert!(is_plain_token("mode.center"));
+        assert!(!is_plain_token(""));
+        assert!(!is_plain_token("Gain;"));
+        assert!(!is_plain_token("Gain=1"));
+        assert!(!is_plain_token("Ga\"in"));
+        assert!(!is_plain_token("Ga\nin"));
+        assert!(!is_plain_token("Ga in"));
+
+        assert!(is_quotable_text("Speakers (Realtek Audio)"));
+        assert!(!is_quotable_text("x\";=;"));
+        assert!(!is_quotable_text("a;b"));
+        assert!(!is_quotable_text("a\nb"));
+        assert!(!is_quotable_text(""));
     }
 
     /// The remote API is single-client: parallel live tests in one process

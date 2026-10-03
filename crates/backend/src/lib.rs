@@ -179,17 +179,46 @@ impl SqlBackend {
     /// re-parented to the freshly inserted boards, mirroring the original
     /// import. The whole file lands atomically; new board ids are returned
     /// in input order.
+    ///
+    /// Inputs are bounded up front (see [`MAX_BOARD_DIM`]): a hostile or
+    /// corrupt file is rejected before anything is inserted, so no import
+    /// can fan out into huge grids downstream (wire-builder filler loops).
     pub fn import_boards(&self, boards: &[serde_json::Value]) -> pulpit_db::Result<Vec<i64>> {
+        const MAX_BOARDS_PER_IMPORT: usize = 100;
+        const MAX_BUTTONS_PER_BOARD: usize = 1024;
+        if boards.len() > MAX_BOARDS_PER_IMPORT {
+            return Err(pulpit_db::DbError::Corrupt(format!(
+                "too many boards in one import: {} (max {MAX_BOARDS_PER_IMPORT})",
+                boards.len()
+            )));
+        }
         let db = self.db.lock().unwrap();
         db.with_transaction(|conn_tx| {
             let mut ids = Vec::with_capacity(boards.len());
             for board_json in boards {
                 let mut board: BoardRow = serde_json::from_value(board_json.clone())
                     .map_err(|e| pulpit_db::DbError::Corrupt(format!("bad board entry: {e}")))?;
+                if board.width < 1
+                    || board.height < 1
+                    || board.width > MAX_BOARD_DIM
+                    || board.height > MAX_BOARD_DIM
+                {
+                    return Err(pulpit_db::DbError::Corrupt(format!(
+                        "board {:?} has dimensions {}x{} outside 1..={MAX_BOARD_DIM}",
+                        board.name, board.width, board.height
+                    )));
+                }
                 board.id = 0;
                 board.converted = 1;
                 let board_id = conn_tx.insert_board_full(&board)?;
                 if let Some(serde_json::Value::Array(macros)) = board_json.get("macros") {
+                    if macros.len() > MAX_BUTTONS_PER_BOARD {
+                        return Err(pulpit_db::DbError::Corrupt(format!(
+                            "too many macros on board {:?}: {} (max {MAX_BUTTONS_PER_BOARD})",
+                            board.name,
+                            macros.len()
+                        )));
+                    }
                     for macro_json in macros {
                         let mut button: ButtonRow = serde_json::from_value(macro_json.clone())
                             .map_err(|e| {
@@ -206,6 +235,11 @@ impl SqlBackend {
         })
     }
 }
+
+/// Largest board grid any surface will build. The import path rejects
+/// wider/taller boards outright; the same bound belongs in the editor UI
+/// and both wire builders (audit item C4).
+pub const MAX_BOARD_DIM: i64 = 32;
 
 /// One exported button row: the DB columns minus `id`.
 fn button_json(button: &ButtonRow) -> serde_json::Value {
