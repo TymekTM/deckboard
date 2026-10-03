@@ -133,6 +133,7 @@ const typeMeta = computed(() => {
   for (const e of CATALOG) {
     if (e.value) {
       map[e.value] = {
+        label: e.label || e.value,
         icon: e.icon || "",
         color: e.color || "",
         mode: e.mode || "",
@@ -141,6 +142,7 @@ const typeMeta = computed(() => {
   }
   for (const i of knownInputs.value) {
     map[i.value] = {
+      label: i.label || i.value,
       icon: i.icon || "",
       color: i.color || "",
       mode: i.mode || "",
@@ -234,7 +236,7 @@ async function pasteTile(snapshot, pos) {
 function tileContextMenu(tile, event) {
   openContextMenu(event, [
     { label: "Edit tile", icon: "pen", run: () => (editingTile.value = tile) },
-    { label: "Run now", icon: "play", run: () => api.execButton(tile.id) },
+    { label: "Run now", icon: "play", run: () => runTileNow(tile.id) },
     { label: "Copy", icon: "copy", run: () => copyTile(tile) },
     {
       label: "Delete",
@@ -285,7 +287,12 @@ function boardContextMenu(board, event) {
           kind: "warning",
         });
         if (ok) {
-          await api.clearBoard(board.id);
+          try {
+            await api.clearBoard(board.id);
+          } catch (e) {
+            flashError("Clearing the board failed", e);
+            return;
+          }
           await loadBoards();
         }
       },
@@ -300,7 +307,12 @@ function boardContextMenu(board, event) {
           kind: "warning",
         });
         if (ok) {
-          await api.deleteBoard(board.id);
+          try {
+            await api.deleteBoard(board.id);
+          } catch (e) {
+            flashError("Deleting the board failed", e);
+            return;
+          }
           await loadBoards();
         }
       },
@@ -404,8 +416,16 @@ async function tileCreated(form) {
   }
 }
 
-async function tileSlider(tile, value) {
-  await api.execSlider(tile.id, value);
+function tileSlider(tile, value) {
+  api
+    .execSlider(tile.id, value)
+    .catch((e) => flashError("Slider change failed", e));
+}
+
+// "Run now" (context menu) and touch-mode taps share one failure surface:
+// the exec is fire-and-forget otherwise (012 lower-priority feedback)
+function runTileNow(id) {
+  api.execButton(id).catch((e) => flashError("Running the tile failed", e));
 }
 
 async function tileMoved(tile, x, y, w, h) {
@@ -490,7 +510,12 @@ async function clearCurrentBoard() {
     kind: "warning",
   });
   if (!ok) return;
-  await api.clearBoard(currentBoard.value.id);
+  try {
+    await api.clearBoard(currentBoard.value.id);
+  } catch (e) {
+    flashError("Clearing the board failed", e);
+    return;
+  }
   await loadBoards();
 }
 
@@ -502,7 +527,12 @@ async function deleteCurrentBoard() {
     kind: "warning",
   });
   if (!ok) return;
-  await api.deleteBoard(currentBoard.value.id);
+  try {
+    await api.deleteBoard(currentBoard.value.id);
+  } catch (e) {
+    flashError("Deleting the board failed", e);
+    return;
+  }
   await loadBoards();
 }
 
@@ -713,7 +743,7 @@ function onKeydown(event) {
             :custom-values="customValues"
             :app-states="appStates"
             :board-names="boardNames"
-            @tile-exec="api.execButton($event.id)"
+            @tile-exec="runTileNow($event.id)"
             @tile-slider="tileSlider"
             @tile-open="editingTile = $event"
           />

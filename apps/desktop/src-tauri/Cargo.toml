@@ -37,3 +37,4 @@ pulpit-v2 = { path = "../../../crates/v2" }
 pulpit-aidev = { path = "../../../crates/aidev" }
 if-addrs = "0.15.0"
 qrcode = "0.14.1"
+ureq = "3"

@@ -119,10 +119,14 @@ impl Usage {
         self.watermark.insert(db_path.to_path_buf(), max_idx);
     }
 
-    pub fn sums(&self, now: i64) -> crate::local_usage::Sums {
+    pub fn sums(
+        &self,
+        now: i64,
+        boundary: crate::local_usage::DayBoundary,
+    ) -> crate::local_usage::Sums {
         let mut sums = crate::local_usage::Sums::default();
-        let today_start = crate::local_usage::utc_day_start(now);
-        let week_start = crate::local_usage::utc_week_start(now);
+        let today_start = boundary.day_start(now);
+        let week_start = boundary.week_start(now);
         for s in &self.samples {
             if s.ts > now {
                 continue;

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive } from "vue";
+import { computed, reactive, ref } from "vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { MAX_BOARD_DIM, boardDim } from "../catalog";
@@ -26,24 +26,33 @@ function overlayClose() {
   if (!dirty.value) emit("close");
 }
 
+// the backend reasons are shown as-is (duplicate name, refused dimensions,
+// locked db); the dialog stays open so the entered values survive
+const error = ref("");
+
 async function save() {
   // clamp dimensions to the backend's integer bounds (012 C4): the
   // number input's min/max only steer the spinner, they do not validate
   // pasted or typed values
   const width = boardDim(form.width, props.board?.width ?? 6);
   const height = boardDim(form.height, props.board?.height ?? 4);
-  if (props.mode === "create") {
-    await api.createBoard(form.name || "New board", form.background, width, height);
-    emit("saved");
+  error.value = "";
+  try {
+    if (props.mode === "create") {
+      await api.createBoard(form.name || "New board", form.background, width, height);
+    } else {
+      await api.updateBoard({
+        ...props.board,
+        name: form.name,
+        width,
+        height,
+        background: form.background,
+      });
+    }
+  } catch (e) {
+    error.value = e ? String(e) : "Saving the board failed.";
     return;
   }
-  await api.updateBoard({
-    ...props.board,
-    name: form.name,
-    width,
-    height,
-    background: form.background,
-  });
   emit("saved");
 }
 
@@ -53,7 +62,13 @@ async function clearBoard() {
     kind: "warning",
   });
   if (!ok) return;
-  await api.clearBoard(props.board.id);
+  error.value = "";
+  try {
+    await api.clearBoard(props.board.id);
+  } catch (e) {
+    error.value = e ? String(e) : "Clearing the board failed.";
+    return;
+  }
   emit("saved");
 }
 
@@ -63,7 +78,13 @@ async function deleteBoard() {
     kind: "warning",
   });
   if (!ok) return;
-  await api.deleteBoard(props.board.id);
+  error.value = "";
+  try {
+    await api.deleteBoard(props.board.id);
+  } catch (e) {
+    error.value = e ? String(e) : "Deleting the board failed.";
+    return;
+  }
   emit("saved");
 }
 </script>
@@ -93,6 +114,7 @@ async function deleteBoard() {
             <input v-model="form.background" type="color" class="color-input" />
           </label>
         </div>
+        <p v-if="error" class="modal-error" role="alert">{{ error }}</p>
       </div>
       <div class="modal-actions">
         <template v-if="mode === 'edit'">
@@ -111,4 +133,10 @@ async function deleteBoard() {
 .row { display: flex; gap: 10px; }
 .row > * { flex: 1; }
 .color-input { height: 38px; padding: 3px; cursor: pointer; }
+.modal-error {
+  font-size: 12px;
+  color: var(--danger);
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+}
 </style>

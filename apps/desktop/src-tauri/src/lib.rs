@@ -193,6 +193,9 @@ pub fn run() {
             list_devices,
             revoke_device,
             resolve_operator_ask,
+            adb_devices,
+            adb_install_apk,
+            check_for_updates,
             export_boards,
             import_boards,
         ])
@@ -1263,6 +1266,167 @@ struct DeviceInfo {
     last_seen: u64,
 }
 
+// ---- M8: APK sideload + update check ----------------------------------
+
+/// One adb device for the sideload UI (`serial (state)`).
+#[tauri::command]
+async fn adb_devices() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let out = std::process::Command::new("adb")
+            .args(["devices"])
+            .output()
+            .map_err(|e| format!("adb nie znaleziony w PATH: {e}"))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let devices = text
+            .lines()
+            .filter(|line| {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                parts.len() == 2 && parts[1] != "devices" && !line.starts_with('*')
+            })
+            .map(|line| {
+                let mut parts = line.split_whitespace();
+                format!(
+                    "{} ({})",
+                    parts.next().unwrap_or("?"),
+                    parts.next().unwrap_or("?")
+                )
+            })
+            .collect();
+        Ok(devices)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Installs an APK on a connected device (`adb install -r`, keep-data
+/// reinstall). Runs on the blocking pool - an install over USB can take
+/// a while - and returns adb's own output so the UI can show exactly
+/// what happened.
+#[tauri::command]
+async fn adb_install_apk(path: String) -> Result<String, String> {
+    if !path.to_lowercase().ends_with(".apk") {
+        return Err("Wybierz plik .apk.".to_string());
+    }
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("Plik nie istnieje: {path}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = std::process::Command::new("adb")
+            .args(["install", "-r", &path])
+            .output()
+            .map_err(|e| format!("adb nie znaleziony w PATH: {e}"))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .trim()
+        .to_string();
+        if out.status.success() && text.contains("Success") {
+            Ok(text)
+        } else {
+            Err(if text.is_empty() {
+                "adb install nie powiodł się (brak wyjścia)".to_string()
+            } else {
+                text
+            })
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Numeric dot-version compare ("0.1.2" vs "v0.2.0"): true when `latest`
+/// is strictly newer than `current`. Non-numeric parts read as 0.
+fn version_newer(latest: &str, current: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|p| p.trim().parse().unwrap_or(0))
+            .collect()
+    };
+    let (l, c) = (parse(latest), parse(current));
+    for i in 0..l.len().max(c.len()) {
+        let a = l.get(i).copied().unwrap_or(0);
+        let b = c.get(i).copied().unwrap_or(0);
+        if a != b {
+            return a > b;
+        }
+    }
+    false
+}
+
+/// Checks the configured feed (`update_url` in editor.json - empty means
+/// the feature is off) for `{"version": "...", "url": "..."}`. No
+/// download, no install: the UI shows the result and the release URL.
+#[tauri::command]
+async fn check_for_updates(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let url = {
+        let path = state
+            .settings_path
+            .as_ref()
+            .ok_or("Brak ścieżki ustawień (uruchomienie awaryjne).")?;
+        let stored: serde_json::Value = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        stored
+            .get("update_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    if url.trim().is_empty() {
+        return Err(
+            "Brak adresu aktualizacji (update_url w editor.json) - funkcja wyłączona.".to_string(),
+        );
+    }
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let latest =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(String, String), String> {
+            let agent = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(10)))
+                .build()
+                .new_agent();
+            let mut resp = agent
+                .get(url.trim())
+                .call()
+                .map_err(|e| format!("Nie udało się pobrać manifestu: {e}"))?;
+            let text = resp
+                .body_mut()
+                .read_to_string()
+                .map_err(|e| format!("Nie udało się odczytać manifestu: {e}"))?;
+            let manifest: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| format!("Manifest nie jest JSON-em: {e}"))?;
+            let version = manifest
+                .get("version")
+                .and_then(|v| v.as_str())
+                .ok_or("Manifest nie ma pola \"version\".")?
+                .to_string();
+            let release_url = manifest
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok((version, release_url))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+    let (latest, release_url) = latest;
+    let update_available = version_newer(&latest, &current);
+    Ok(serde_json::json!({
+        "current": current,
+        "latest": latest,
+        "update_available": update_available,
+        "url": release_url,
+    }))
+}
+
 fn device_infos(devices: &pulpit_v2::DeviceStore) -> Vec<DeviceInfo> {
     devices
         .list()
@@ -1393,6 +1557,16 @@ mod tests {
         assert_eq!(effective_port(None, Some(&junk)), 8500);
         // a hand-edited file may keep the port as a string
         assert_eq!(effective_port(None, Some(&serde_json::json!("8555"))), 8555);
+    }
+
+    #[test]
+    fn version_compare_for_updates() {
+        assert!(version_newer("0.2.0", "0.1.2"));
+        assert!(version_newer("v0.2.0", "0.1.9"));
+        assert!(version_newer("0.10.0", "0.9.9"));
+        assert!(!version_newer("0.1.2", "0.1.2"));
+        assert!(!version_newer("0.1.1", "0.1.2"));
+        assert!(!version_newer("garbage", "0.1.2"));
     }
 
     #[test]

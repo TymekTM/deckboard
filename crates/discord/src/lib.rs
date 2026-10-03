@@ -31,6 +31,11 @@ pub enum DiscordError {
     AuthRejected,
     #[error("authorization popup was declined or timed out")]
     AuthCancelled,
+    #[error("network unreachable for {0}")]
+    /// Transport-level failure: the request never reached Discord (or the
+    /// reply never came back). Callers must distinguish this from a real
+    /// rejection - a popup cannot help while the machine is offline.
+    Network(&'static str),
     #[error("Discord RPC call failed: {0}")]
     Call(&'static str),
     #[error("bad payload for {0}: {1}")]
@@ -175,20 +180,22 @@ fn urlencode(s: &str) -> String {
 }
 
 fn post_form(url: &str, body: &str) -> Result<Value> {
+    // Transport failures are `Network`, not a rejection: the request never
+    // reached Discord, so nothing Discord said can be inferred from it.
     let resp = http_agent(HTTP_CALL_TIMEOUT)
         .post(url)
         .content_type("application/x-www-form-urlencoded")
         .header("Authorization", "Bearer null") // discord-rpc sends this too
         .send(body.as_bytes())
-        .map_err(|_| DiscordError::Call("oauth request"))?;
+        .map_err(|_| DiscordError::Network("oauth request"))?;
     let text = resp
         .into_body()
         .read_to_string()
-        .map_err(|_| DiscordError::Call("oauth body"))?;
+        .map_err(|_| DiscordError::Network("oauth body"))?;
     let parsed: Value =
         serde_json::from_str(&text).map_err(|_| DiscordError::Call("oauth json"))?;
     if parsed.get("access_token").is_none() {
-        // {"error": "invalid_client", ...}
+        // {"error": "invalid_client", ...} - Discord itself answered
         return Err(DiscordError::Call("oauth error response"));
     }
     Ok(parsed)
@@ -1257,6 +1264,25 @@ fn run_connected(conn: &mut Conn, what: &Plan, deadline: Instant) -> Result<Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_failures_are_network_not_rejections() {
+        // port 9 (discard) on loopback refuses instantly: the request
+        // never reaches a Discord endpoint, so the error must be Network -
+        // callers must be able to tell "offline" from "Discord said no"
+        // and skip the consent popup while offline.
+        let err = post_form("http://127.0.0.1:9/oauth2/token", "a=b").unwrap_err();
+        assert!(matches!(err, DiscordError::Network(_)), "got {err:?}");
+        // without a refresh token there is nothing to try silently: that
+        // is a real rejection, the interactive popup is the correct answer
+        let cfg = DiscordConfig {
+            client_id: "id".into(),
+            client_secret: "sec".into(),
+            access_token: "t".into(),
+            refresh_token: None,
+        };
+        assert!(matches!(refresh(&cfg), Err(DiscordError::AuthRejected)));
+    }
 
     #[test]
     fn frame_roundtrip() {

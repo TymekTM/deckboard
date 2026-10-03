@@ -183,6 +183,31 @@ impl Command {
     }
 }
 
+/// Command types the builtin dispatcher fully implements. Hosts that also
+/// run JS extensions must dispatch these BEFORE asking extensions, so a
+/// package declaring `key`, `url` or `type` cannot hijack the builtin
+/// kinds (the kinds below always claim their command; the extension is
+/// never consulted). Integration kinds that the builtin dispatcher only
+/// warns about (`obs-*`, `play`, ...) are deliberately absent: extensions
+/// own those.
+pub fn is_builtin_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "board"
+            | "key"
+            | "multiaction"
+            | "advance-key"
+            | "type"
+            | "screenshot"
+            | "mouse-ctrl"
+            | "vol"
+            | "url"
+            | "dir"
+            | "app"
+            | "file"
+    )
+}
+
 /// Dispatch one button press. Mirrors the original `runCommand`:
 /// with `is_tap_start = true` only `key` runs (keys held down);
 /// `false` executes the action and releases held keys.
@@ -819,6 +844,42 @@ mod tests {
         assert_eq!(keys, vec![Control, Shift, Char('k')]);
         assert_eq!(parse_hotkey("f5"), vec![Function(5)]);
         assert_eq!(parse_hotkey("ENTER"), vec![Return]);
+    }
+
+    #[test]
+    fn builtin_kinds_are_exactly_the_implemented_ones() {
+        // every kind with a real match arm in run_command_dispatched must
+        // be listed - hosts dispatch these BEFORE extensions so a package
+        // declaring the same action cannot hijack them
+        for kind in [
+            "board",
+            "key",
+            "multiaction",
+            "advance-key",
+            "type",
+            "screenshot",
+            "mouse-ctrl",
+            "vol",
+            "url",
+            "dir",
+            "app",
+            "file",
+        ] {
+            assert!(is_builtin_kind(kind), "{kind} must be builtin");
+        }
+        // integration stubs (the dispatcher only warns) and native
+        // backend kinds stay extension/native territory
+        for kind in [
+            "obs-start",
+            "spotify-play",
+            "play",
+            "vmod-mute",
+            "twitch-live",
+            "url-to-call",
+            "si-cpu",
+        ] {
+            assert!(!is_builtin_kind(kind), "{kind} must not be builtin");
+        }
     }
 
     #[test]

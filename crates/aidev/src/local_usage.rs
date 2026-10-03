@@ -147,10 +147,11 @@ impl Scanner {
         state.offset += consumed as u64;
     }
 
-    /// Sums per window over all ingested samples.
-    pub fn sums(&self, now: i64) -> Sums {
-        let today_start = utc_day_start(now);
-        let week_start = utc_week_start(now);
+    /// Sums per window over all ingested samples. `boundary` decides
+    /// where "today" and "week" start (UTC or local midnight).
+    pub fn sums(&self, now: i64, boundary: DayBoundary) -> Sums {
+        let today_start = boundary.day_start(now);
+        let week_start = boundary.week_start(now);
         let mut sums = Sums::default();
         for state in self.files.values() {
             for s in &state.samples {
@@ -369,15 +370,71 @@ pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Midnight of the day `now` falls into, in a zone `offset` seconds east
+/// of UTC. Pure in the offset so both boundary modes share one code path
+/// and tests can pin exact instants without a real timezone.
+pub(crate) fn day_start_in(offset: i64, now: i64) -> i64 {
+    (now + offset).div_euclid(86_400) * 86_400 - offset
+}
+
+/// Monday 00:00 of the ISO week `now` falls into, in a zone `offset`
+/// seconds east of UTC.
+pub(crate) fn week_start_in(offset: i64, now: i64) -> i64 {
+    let day = day_start_in(offset, now);
+    // weekday of the local day, computed in the shifted domain
+    // (1970-01-01 was a Thursday: shift by 3 so Monday maps to 0)
+    let day_no = (day + offset).div_euclid(86_400);
+    day - ((day_no + 3).rem_euclid(7)) * 86_400
+}
+
 pub(crate) fn utc_day_start(now: i64) -> i64 {
-    now.div_euclid(86_400) * 86_400
+    day_start_in(0, now)
 }
 
 /// Monday 00:00 UTC of the current ISO week.
 pub(crate) fn utc_week_start(now: i64) -> i64 {
-    let day = utc_day_start(now);
-    // 1970-01-01 was a Thursday: shift so the week starts Monday
-    day - ((day / 86_400 + 3).rem_euclid(7)) * 86_400
+    week_start_in(0, now)
+}
+
+/// Window boundary mode for the "today" and "week" token sums: UTC
+/// midnight (the historical behavior) or the machine's local midnight.
+/// East of Greenwich the UTC boundaries reset "today" in the middle of
+/// the local night-to-morning (02:00 in Poland under UTC+1... 03:00 in
+/// summer), which is why local midnight is configurable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DayBoundary {
+    Utc,
+    Local,
+}
+
+impl DayBoundary {
+    /// Start of the current day under this boundary mode.
+    pub(crate) fn day_start(self, now: i64) -> i64 {
+        match self {
+            DayBoundary::Utc => utc_day_start(now),
+            DayBoundary::Local => day_start_in(local_offset_secs(now), now),
+        }
+    }
+
+    /// Start of the current week (Monday 00:00) under this boundary mode.
+    pub(crate) fn week_start(self, now: i64) -> i64 {
+        match self {
+            DayBoundary::Utc => utc_week_start(now),
+            DayBoundary::Local => week_start_in(local_offset_secs(now), now),
+        }
+    }
+}
+
+/// The machine's timezone offset at `now`, seconds east of UTC, DST
+/// included. Ambiguous or gapped instants (DST transitions) fall back to
+/// UTC - a one-hour mis-attribution twice a year beats a panic.
+fn local_offset_secs(now: i64) -> i64 {
+    use chrono::{Offset, TimeZone};
+    chrono::Local
+        .timestamp_opt(now, 0)
+        .single()
+        .map(|dt| dt.offset().fix().local_minus_utc() as i64)
+        .unwrap_or(0)
 }
 
 /// Compact token counts: 1.2K, 3.4M.
@@ -426,6 +483,86 @@ mod tests {
         assert_eq!(utc_week_start(tuesday), tuesday - 86_400);
         // 1970-01-01 (Thursday) belongs to the week of Monday 1969-12-29
         assert_eq!(utc_week_start(0), -3 * 86_400);
+    }
+
+    #[test]
+    fn day_boundaries_follow_the_zone_offset() {
+        // 2026-09-22T21:30Z is 23:30 the same day in UTC+2: the LOCAL day
+        // began at 22:00Z the evening before, while the UTC day starts at
+        // 00:00Z - exactly the gap that made Poland's "today" reset at
+        // 02:00 (01:00 UTC+1 / 03:00 DST) local time.
+        let now = 1_790_112_600; // 2026-09-22T21:30:00Z
+        assert_eq!(day_start_in(0, now), 1_790_035_200); // UTC midnight
+        assert_eq!(day_start_in(7_200, now), 1_790_028_000); // local midnight
+        assert_eq!(
+            day_start_in(7_200, now),
+            utc_day_start(now) - 2 * 3_600,
+            "UTC+2 local midnight is two hours earlier in absolute time"
+        );
+        // west of UTC the local midnight comes later instead
+        assert_eq!(
+            day_start_in(-6 * 3_600, now),
+            utc_day_start(now) + 6 * 3_600
+        );
+        // the day boundary math also holds before the epoch: one second
+        // before midnight UTC is 00:59 local (UTC+1), so the local day
+        // began at 23:00Z the evening before
+        assert_eq!(day_start_in(3_600, -1), -3_600);
+    }
+
+    #[test]
+    fn week_boundaries_follow_the_zone_offset() {
+        // Tuesday evening 2026-09-22T21:30Z, UTC+2: still Tuesday locally,
+        // so the local week began Monday 2026-09-21T00:00+02:00, which is
+        // Sunday 22:00Z - the same calendar Monday, two hours earlier.
+        let now = 1_790_112_600;
+        assert_eq!(week_start_in(0, now), 1_789_948_800); // Mon 2026-09-21T00:00Z
+        assert_eq!(week_start_in(7_200, now), 1_789_941_600); // Mon 00:00+02:00
+        assert_eq!(
+            week_start_in(7_200, now),
+            week_start_in(0, now) - 2 * 3_600,
+            "local Monday 00:00+02:00 is Sunday 22:00Z, two hours earlier"
+        );
+        // west of UTC the local Monday 00:00 lands after the UTC one:
+        // UTC-5 Monday 00:00 is Monday 05:00Z
+        assert_eq!(week_start_in(-5 * 3_600, now), 1_789_948_800 + 5 * 3_600);
+    }
+
+    #[test]
+    fn local_mode_routes_through_the_machine_offset() {
+        // the Local branch must delegate to the offset math with the
+        // machine's real offset (guards against swapped match arms); the
+        // offset itself is whatever this machine is set to
+        let now = 1_790_112_600;
+        let off = local_offset_secs(now);
+        assert_eq!(DayBoundary::Local.day_start(now), day_start_in(off, now));
+        assert_eq!(DayBoundary::Local.week_start(now), week_start_in(off, now));
+        assert_eq!(DayBoundary::Utc.day_start(now), day_start_in(0, now));
+    }
+
+    #[test]
+    fn day_boundary_mode_matches_its_setting() {
+        // the config switch maps onto the two modes; the UTC default keeps
+        // the historical boundary exactly
+        let cfg = crate::Config::default();
+        assert!(!cfg.local_midnight);
+        let now = 1_790_112_600;
+        assert_eq!(
+            cfg.day_boundary().day_start(now),
+            utc_day_start(now),
+            "default (UTC) boundaries must not move"
+        );
+    }
+
+    #[test]
+    fn local_midnight_config_parses() {
+        let cfg: crate::Config = serde_json::from_str(r#"{"local_midnight": true}"#).unwrap();
+        assert!(cfg.local_midnight);
+        assert_eq!(cfg.day_boundary(), DayBoundary::Local);
+        // an absent key keeps the default
+        let cfg: crate::Config = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(!cfg.local_midnight);
+        assert_eq!(cfg.day_boundary(), DayBoundary::Utc);
     }
 
     #[test]
@@ -485,7 +622,7 @@ mod tests {
         std::fs::write(&f, &body).unwrap();
         let mut scanner = Scanner::new(8);
         scanner.scan(Format::Claude, &dir);
-        assert_eq!(scanner.sums(t0 + 10).today, 100);
+        assert_eq!(scanner.sums(t0 + 10, DayBoundary::Utc).today, 100);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -507,7 +644,7 @@ mod tests {
         std::fs::write(&f, &body).unwrap();
         let mut scanner = Scanner::new(8);
         scanner.scan(Format::Zcode, &dir);
-        let s = scanner.sums(now);
+        let s = scanner.sums(now, DayBoundary::Utc);
         assert_eq!(s.hour, 1000 + 1001); // 3700s old is outside the hour
         assert_eq!(s.five_hour, 1000 + 1001 + 1002); // but inside 5h
 
@@ -532,7 +669,7 @@ mod tests {
         let mut scanner = Scanner::new(8);
         scanner.scan(Format::Zcode, &dir);
         let now = t0 + 10;
-        let s = scanner.sums(now);
+        let s = scanner.sums(now, DayBoundary::Utc);
         assert_eq!(s.today, 5000); // all samples same UTC day
         assert_eq!(s.five_hour, 5000);
 
@@ -547,7 +684,7 @@ mod tests {
         }
         std::fs::write(&f, &body2).unwrap();
         scanner.scan(Format::Zcode, &dir);
-        assert_eq!(scanner.sums(now).today, 7000);
+        assert_eq!(scanner.sums(now, DayBoundary::Utc).today, 7000);
         assert_eq!(scanner.files[&f].offset, body2.len() as u64);
 
         // a torn trailing line waits for its newline
@@ -597,7 +734,7 @@ mod tests {
         std::fs::write(&f, &body).unwrap();
         let mut scanner = Scanner::new(8);
         scanner.scan(Format::Zcode, &dir);
-        assert_eq!(scanner.sums(1_790_079_429).today, 1000);
+        assert_eq!(scanner.sums(1_790_079_429, DayBoundary::Utc).today, 1000);
         assert_eq!(scanner.files[&f].offset, body.len() as u64);
         let _ = std::fs::remove_dir_all(&dir);
     }

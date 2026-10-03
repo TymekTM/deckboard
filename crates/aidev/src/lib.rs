@@ -99,6 +99,12 @@ pub struct Config {
     pub claude_week_tokens: Option<u64>,
     pub glm_five_hour_tokens: Option<u64>,
     pub glm_week_tokens: Option<u64>,
+    /// Count the "today" / "week" token windows from LOCAL midnight
+    /// instead of UTC. Default false keeps the historical UTC boundaries:
+    /// east of Greenwich those reset "today" at a confusing local wall
+    /// time (02:00 in Poland on UTC+1), which this switch moves to local
+    /// midnight.
+    pub local_midnight: bool,
     pub providers: Providers,
     /// Generic JSON endpoints: name, url, headers, used/limit JSON paths.
     /// This is the "support practically everything" escape hatch.
@@ -169,6 +175,7 @@ impl Default for Config {
             claude_week_tokens: None,
             glm_five_hour_tokens: None,
             glm_week_tokens: None,
+            local_midnight: false,
             providers: Providers::default(),
             custom: Vec::new(),
         }
@@ -176,6 +183,17 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Where the "today" / "week" token windows start: local midnight
+    /// when `local_midnight` is set, UTC midnight (the historical
+    /// behavior) otherwise.
+    pub(crate) fn day_boundary(&self) -> local_usage::DayBoundary {
+        if self.local_midnight {
+            local_usage::DayBoundary::Local
+        } else {
+            local_usage::DayBoundary::Utc
+        }
+    }
+
     /// Missing or broken config file falls back to defaults - the tiles must
     /// not die because of a typo in an optional file.
     pub fn load(path: &std::path::Path) -> Self {
@@ -254,12 +272,13 @@ fn assemble(
     paths: &Paths,
     now: i64,
 ) -> serde_json::Value {
+    let boundary = config.day_boundary();
     let sums = [
-        ("Zcode", zcode.sums(now)),
-        ("Claude", claude.sums(now)),
-        ("Codex", codex.sums(now)),
-        ("OpenCode", opencode.sums(now)),
-        ("Antigravity", antigravity.sums(now)),
+        ("Zcode", zcode.sums(now, boundary)),
+        ("Claude", claude.sums(now, boundary)),
+        ("Codex", codex.sums(now, boundary)),
+        ("OpenCode", opencode.sums(now, boundary)),
+        ("Antigravity", antigravity.sums(now, boundary)),
     ];
     let total = |key: fn(&local_usage::Sums) -> u64| sums.iter().map(|(_, s)| key(s)).sum::<u64>();
 

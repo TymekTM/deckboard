@@ -68,16 +68,40 @@ pub fn screenshot_to_dir(dir: &str) -> Result<PathBuf> {
         .map_err(|e| OsError::Failed(format!("screenshot dir {}: {e}", target.display())))?;
     let path = unique_screenshot_path(&target, chrono::Utc::now());
     let rgba = grab_screen_rgba()?;
-    image::save_buffer_with_format(
-        &path,
-        &rgba,
+    write_png_atomic(&path, &rgba)?;
+    Ok(path)
+}
+
+/// Encode the PNG to a `.partial` sibling, then rename it into place.
+/// A crash mid-encode leaves a `.partial` file behind instead of a
+/// truncated screenshot under the final name - and the unique-path
+/// helper would treat that truncated file as a real one on the next
+/// capture in the same second.
+fn write_png_atomic(path: &std::path::Path, rgba: &image::RgbaImage) -> Result<()> {
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".partial");
+    let tmp = PathBuf::from(tmp_name);
+    let written = image::save_buffer_with_format(
+        &tmp,
+        rgba.as_raw(),
         rgba.width(),
         rgba.height(),
         image::ColorType::Rgba8,
         image::ImageFormat::Png,
-    )
-    .map_err(|e| OsError::Failed(format!("png write {}: {e}", path.display())))?;
-    Ok(path)
+    );
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(OsError::Failed(format!("png write {}: {e}", tmp.display())));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(OsError::Failed(format!(
+            "png rename {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -162,6 +186,27 @@ mod tests {
         std::fs::write(&second, b"png").unwrap();
         let third = unique_screenshot_path(dir.path(), stamp);
         assert!(third != second && third != first);
+    }
+
+    #[test]
+    fn png_writes_land_via_partial_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Pulpit_20260922000000.png");
+        let rgba = image::RgbaImage::from_pixel(4, 3, image::Rgba([1, 2, 3, 255]));
+        write_png_atomic(&path, &rgba).expect("atomic png write");
+        // the final name holds a real PNG...
+        let bytes = std::fs::read(&path).expect("final file exists");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        // ...and no partial sibling survived the rename
+        let mut partial = path.clone().into_os_string();
+        partial.push(".partial");
+        assert!(!std::path::Path::new(&partial).exists());
+
+        // a failing write (parent directory vanishes) leaves nothing
+        // behind either
+        let gone = dir.path().join("removed").join("Pulpit_x.png");
+        assert!(write_png_atomic(&gone, &rgba).is_err());
+        assert!(!gone.exists());
     }
 
     #[test]

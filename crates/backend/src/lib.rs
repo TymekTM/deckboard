@@ -336,7 +336,13 @@ impl Backend for SqlBackend {
         // The tablet client sends exec_shortcut on BOTH phases, so the
         // native dispatcher must honor the same filter as run_command or
         // toggles flip twice per tap and volume steps twice.
-        if !is_tap_start && self.exec_native(&cmd, sink) {
+        //
+        // Builtin kinds never reach the extension chain at all: the macro
+        // dispatcher owns `key`, `url`, `type`, ... and always claims them,
+        // so a JS extension listing the same action name cannot hijack
+        // those tiles.
+        let builtin = pulpit_actions::is_builtin_kind(&cmd.kind);
+        if !builtin && !is_tap_start && self.exec_native(&cmd, sink) {
             return;
         }
         self.with_input(|input| {
@@ -662,15 +668,29 @@ impl SqlBackend {
     }
 
     /// Refresh or re-authorize the Discord token and persist it. The
-    /// interactive path blocks until the user answers Discord's popup.
+    /// interactive path blocks until the user answers Discord's popup -
+    /// so it must only run when the silent refresh was actually REJECTED
+    /// (no refresh token, Discord refused it): a plain network failure
+    /// must fail the action without popping a window the offline machine
+    /// cannot act on.
     fn reauthorize_discord(
         &self,
         config: &DiscordConfig,
     ) -> Result<DiscordConfig, pulpit_discord::DiscordError> {
-        let tokens = pulpit_discord::refresh(config).or_else(|_| {
-            tracing::info!("discord token refresh unavailable - showing consent popup (confirm it on the desktop)");
-            pulpit_discord::authorize(config, std::time::Instant::now() + std::time::Duration::from_secs(180))
-        })?;
+        let tokens = match pulpit_discord::refresh(config) {
+            Ok(tokens) => tokens,
+            Err(e) if refresh_failure_needs_popup(&e) => {
+                tracing::info!("discord token refresh unavailable - showing consent popup (confirm it on the desktop)");
+                pulpit_discord::authorize(
+                    config,
+                    std::time::Instant::now() + std::time::Duration::from_secs(180),
+                )?
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "discord token refresh blocked by the network - no consent popup");
+                return Err(e);
+            }
+        };
         let fresh = DiscordConfig {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
@@ -708,6 +728,15 @@ impl SqlBackend {
     }
 }
 
+/// Should a failed silent token refresh fall back to the interactive
+/// consent popup? Only when Discord (or the missing refresh token)
+/// actually rejected it. A transport-level failure means the machine is
+/// offline or Discord is down: no popup can fix that, and popping one
+/// anyway blocks the action thread for its whole timeout for nothing.
+fn refresh_failure_needs_popup(err: &pulpit_discord::DiscordError) -> bool {
+    !matches!(err, pulpit_discord::DiscordError::Network(_))
+}
+
 /// Multiaction step dispatcher: every step goes through the same
 /// native/extension chain as a top-level tile press ([`SqlBackend::exec_native`]),
 /// then falls back to the builtin dispatcher. Nested multiactions keep
@@ -723,6 +752,12 @@ impl pulpit_actions::StepDispatch for NativeSteps<'_> {
         sink: &mut dyn pulpit_actions::EventSink,
         cmd: &pulpit_actions::Command,
     ) -> pulpit_actions::Result<()> {
+        // Builtin kinds stay on the macro dispatcher even inside
+        // multiactions - an extension declaring `key` must not hijack key
+        // steps any more than top-level key tiles.
+        if pulpit_actions::is_builtin_kind(&cmd.kind) {
+            return pulpit_actions::run_command_dispatched(input, sink, cmd, false, self);
+        }
         if self.backend.exec_native(cmd, sink) {
             return Ok(());
         }
@@ -1084,5 +1119,79 @@ mod tests {
         assert!(matches!(err, pulpit_db::DbError::Corrupt(_)));
         // the good board before the bad one was rolled back
         assert!(backend.get_boards().is_empty());
+    }
+
+    #[test]
+    fn network_refresh_failures_skip_the_consent_popup() {
+        // offline: no popup (it could not succeed anyway and would block
+        // the action thread for the full timeout)
+        assert!(!refresh_failure_needs_popup(
+            &pulpit_discord::DiscordError::Network("oauth request")
+        ));
+        // Discord (or the missing refresh token) said no: the popup is
+        // the only way forward
+        assert!(refresh_failure_needs_popup(
+            &pulpit_discord::DiscordError::AuthRejected
+        ));
+        assert!(refresh_failure_needs_popup(
+            &pulpit_discord::DiscordError::Call("oauth error response")
+        ));
+    }
+
+    /// A JS extension declaring the builtin `key` action must not own key
+    /// presses: the builtin dispatcher runs first, so the combo still
+    /// reaches the input backend. Without the ordering a package could
+    /// swallow (or shadow) every `key`, `url` or `type` tile just by
+    /// listing the action name in its inputs.
+    #[test]
+    fn builtin_key_tiles_are_not_hijacked_by_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("key-grabber");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("index.js"),
+            r#"module.exports = {
+                name: "key grabber",
+                inputs: [{ value: "key" }],
+                execute: function (action, args) {}
+            };"#,
+        )
+        .unwrap();
+        let (manager, _events) =
+            pulpit_ext::ExtManager::load(dir.path(), &serde_json::Value::Null, &[]);
+        assert!(manager.has_action("key"), "the package declares `key`");
+
+        let backend = test_backend().with_extensions(manager);
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+
+        // top-level key tile: a full tap is press AND release
+        backend.exec_tap(button_row("key", Some("CTRL+P")), &mut RecSink::default());
+        let combo = vec![
+            pulpit_actions::KeyName::Control,
+            pulpit_actions::KeyName::Char('p'),
+        ];
+        assert_eq!(
+            input.effects(),
+            vec![
+                pulpit_actions::Effect::KeyDown(combo.clone()),
+                pulpit_actions::Effect::KeyUp(combo),
+            ],
+            "an extension declaring `key` must not swallow the key press"
+        );
+
+        // the same protection must hold for key steps inside multiactions
+        input.0.lock().unwrap().clear();
+        let multi = button_row("multiaction", Some(r#"[{"type":"key","command":"ENTER"}]"#));
+        backend.exec(multi, false, &mut RecSink::default());
+        assert_eq!(
+            input.effects(),
+            vec![
+                pulpit_actions::Effect::KeyDown(vec![pulpit_actions::KeyName::Return]),
+                pulpit_actions::Effect::Sleep(150),
+                pulpit_actions::Effect::KeyUp(vec![pulpit_actions::KeyName::Return]),
+            ],
+            "multiaction key steps must reach the builtin dispatcher too"
+        );
     }
 }

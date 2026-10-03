@@ -246,8 +246,13 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         while let Some(data) = aidev_values.recv().await {
             feed(data.clone());
-            let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
-            let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
+            // built via json!: the Value is serialized by serde, not
+            // spliced into the JSON text by hand
+            let payload = serde_json::json!({
+                "app": "APP_CUSTOM_VALUE",
+                "data": data,
+            })
+            .to_string();
             hub_legacy
                 .broadcast("app_status_update", Some(&payload))
                 .await;

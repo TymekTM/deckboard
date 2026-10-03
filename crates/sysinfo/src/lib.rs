@@ -58,7 +58,12 @@ fn push_loop(tx: &tokio_mpsc::UnboundedSender<serde_json::Value>) {
     // first push has no delta yet; the JS observe loop warmed up the same way
     let mut load_pct = 0.0;
     loop {
-        send(tx, &brand, load_pct, &mem_info());
+        // a failed send means the receiver is gone (server shutting
+        // down): end the thread instead of sampling into the void forever
+        if !send(tx, &brand, load_pct, &mem_info()) {
+            tracing::debug!("sysinfo push channel closed, stopping the sampling loop");
+            return;
+        }
         std::thread::sleep(interval);
         let next = cpu_times();
         load_pct = cpu_load_pct(times, next);
@@ -71,7 +76,7 @@ fn send(
     brand: &str,
     load_pct: f64,
     mem: &(u64, u64),
-) {
+) -> bool {
     let (total, avail) = *mem;
     let used = total.saturating_sub(avail) as f64;
     let payload = serde_json::json!({
@@ -99,11 +104,11 @@ fn send(
         },
     });
     if tx.send(payload).is_err() {
-        // server shut down; end the loop
-        tracing::debug!("sysinfo push channel closed, stopping");
-        return;
+        // receiver dropped: tell the loop to stop
+        return false;
     }
     tracing::debug!(target: "pulpit_sysinfo", load = load_pct, "pushed system-info values");
+    true
 }
 
 // ------------------------------------------------------------ CPU sampling
@@ -252,4 +257,21 @@ fn cpu_brand() -> String {
 #[cfg(not(windows))]
 fn cpu_brand() -> String {
     "CPU".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closed_channel_ends_the_push_loop() {
+        // the receiver is dropped immediately: send must report the
+        // closed channel so push_loop exits instead of sampling forever
+        let (tx, rx) = tokio_mpsc::unbounded_channel::<serde_json::Value>();
+        drop(rx);
+        assert!(!send(&tx, "CPU", 1.0, &(8, 4)));
+        // an open channel keeps the loop alive
+        let (tx, _rx) = tokio_mpsc::unbounded_channel::<serde_json::Value>();
+        assert!(send(&tx, "CPU", 1.0, &(8, 4)));
+    }
 }
