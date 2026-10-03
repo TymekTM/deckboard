@@ -1,6 +1,6 @@
-# Deckboard Android client (protocol v2)
+# Pulpit Android client (protocol v2)
 
-The tablet client for the deckboard server, speaking protocol v2 only
+The tablet client for the Pulpit server, speaking protocol v2 only
 (`docs/protocol-v2.md`): one plain WebSocket to `/v2/ws`, token pairing,
 `boards.sync` + `boards.delta` for the board snapshot, `state.sync` +
 `state.patch` for live values, `interaction` frames for taps/presses.
@@ -31,9 +31,15 @@ The golden wire fixtures in `crates/proto/tests/fixtures` are parsed by
    declare the `press-start`/`press-end` pair (server-side hold-to-repeat),
    everything else taps.
 
-The device is a dedicated deck: the screen is kept on and the app starts
-itself after a reboot (`BootReceiver`). Pairing data survives reinstalls
-as long as the app is updated with `adb install -r`.
+The device is a dedicated deck: a live board keeps the screen on and the
+app starts itself after a reboot (`BootReceiver`). When the screen goes
+off (power button, or the system timeout) the app closes its connection
+and reconnects the moment it is back in front. If the PC stays
+unreachable for 3 minutes - asleep, crashed, off the network - the app
+stops holding the screen on, so the system screen timeout applies;
+waking the tablet reconnects. A deliberate server exit (`server.shutdown`)
+switches to the goodbye screen right away. Pairing data survives
+reinstalls as long as the app is updated with `adb install -r`.
 
 ## Notes
 

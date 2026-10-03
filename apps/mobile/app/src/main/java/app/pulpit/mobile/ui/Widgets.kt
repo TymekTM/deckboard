@@ -28,9 +28,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -337,11 +337,18 @@ fun KnobTile(
     baseColor: Color,
     iconColor: Color,
     titleColor: Color,
+    liveValue: Double?,
     onSlider: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var value by remember(tile.id) { mutableFloatStateOf(0.5f) }
+    // null until somebody drags; the channel's live value positions the
+    // dial then (see SliderTile in Tile.kt for the full rationale)
+    var dragValue by remember(tile.id) { mutableStateOf<Float?>(null) }
+    val liveSlide by rememberUpdatedState(liveValue?.coerceIn(0.0, 1.0)?.toFloat())
+    val value = dragValue ?: liveSlide ?: 0.5f
     val slide = remember(tile.id) { SlideThrottle() }
+    // see ButtonTile (Tile.kt): the drag block outlives a live tile edit
+    val sendSlide by rememberUpdatedState(onSlider)
     val arcColor = tile.style?.color2?.let { hex(it, titleColor) } ?: titleColor
 
     Box(
@@ -360,18 +367,25 @@ fun KnobTile(
                         val radius = max(1.0, kotlin.math.hypot(pos.x.toDouble(), pos.y.toDouble()))
                         val ring = radius.coerceAtMost(size.width / 2.0)
                         val dead = ring * 0.25
+                        val cur = dragValue ?: liveSlide ?: 0.5f
                         val raw = ((angle - 135.0 + 360.0) % 360.0) / 270.0
                         val clamped = raw.coerceIn(0.0, 1.0).toFloat()
-                        val scaled = if (radius < dead) value else clamped
-                        if (scaled != value) {
-                            value = scaled
-                            slide.push(value, send = onSlider)
+                        val scaled = if (radius < dead) cur else clamped
+                        if (scaled != cur) {
+                            dragValue = scaled
+                            slide.push(scaled, send = sendSlide)
                         }
                     },
                     onDragEnd = {
                         // converge: the last sampled value always reaches
                         // the server, throttling only smooths the path
-                        slide.push(value, force = true, send = onSlider)
+                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
+                    },
+                    onDragCancel = {
+                        // a cancelled drag still commits its last sampled
+                        // position (like the desktop), then follows live
+                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
+                        dragValue = null
                     },
                 )
             },

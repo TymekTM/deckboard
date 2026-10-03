@@ -233,6 +233,23 @@ data class BoardsDelta(
     val ops: List<JsonElement> = emptyList(),
 )
 
+/** Decode a boards.delta op list, one op at a time. Unknown or incomplete
+ *  ops are skipped (protocol evolution rules); a known op whose payload
+ *  fails to decode rejects the whole batch (null return) - this client
+ *  can no longer trust its board snapshot and must resync. */
+fun decodeDeltaOps(ops: List<JsonElement>, json: Json): List<BoardOp>? {
+    val decoded = ArrayList<BoardOp>(ops.size)
+    for (el in ops) {
+        val op = try {
+            BoardOp.from(el, json)
+        } catch (e: kotlinx.serialization.SerializationException) {
+            return null
+        }
+        if (op != null) decoded.add(op)
+    }
+    return decoded
+}
+
 @Serializable
 data class BoardOpen(
     val board: Long,

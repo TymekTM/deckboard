@@ -27,9 +27,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -90,6 +90,9 @@ fun Tile(
     tileSize: androidx.compose.ui.unit.Dp,
     active: Boolean,
     liveText: String?,
+    /** The channel's numeric live value, when it carries one: sliders and
+     *  knobs position themselves from it until the user drags. */
+    liveValue: Double?,
     series: SeriesWindow,
     channel: ChannelInfo? = null,
     items: TileItems,
@@ -200,8 +203,8 @@ fun Tile(
                 Box(Modifier.matchParentSize().background(Color.White.copy(alpha = scrim)))
             }
             when (template) {
-                "slider" -> SliderTile(tile, color, icon, iconFamily, iconColor, onSlider)
-                "knob" -> KnobTile(tile, titleColor, iconColor, titleColor, onSlider)
+                "slider" -> SliderTile(tile, color, icon, iconFamily, iconColor, liveValue, onSlider)
+                "knob" -> KnobTile(tile, titleColor, iconColor, titleColor, liveValue, onSlider)
                 "graph" -> GraphTile(tile, series, liveText, channel, titleColor)
                 "clock" -> ClockTile(tile, icon, iconFamily, titleColor)
                 "list" ->
@@ -228,6 +231,10 @@ fun Tile(
                         pressed = false
                         onPressEnd()
                     },
+                    onPressCancel = {
+                        // a cancelled touch resets the face without firing
+                        pressed = false
+                    },
                 )
             }
         }
@@ -247,7 +254,16 @@ private fun ButtonTile(
     liveText: String?,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
+    onPressCancel: () -> Unit,
 ) {
+    // the gesture block below lives as long as tile.id; a live tile edit
+    // (board.delta) swaps the callbacks underneath it, so read the newest
+    val pressStart by rememberUpdatedState(onPressStart)
+    val pressEnd by rememberUpdatedState(onPressEnd)
+    // the tile object swaps too (an edit can change press modes): the
+    // cancel decision must use the current interactions, not the ones
+    // from the composition that started the gesture
+    val currentTile by rememberUpdatedState(tile)
     // icon-only faces (discord voice toggles): the color and the glyph
     // carry the state, a label would only repeat it
     val title = if (iconOnly) "" else listOfNotNull(
@@ -261,11 +277,21 @@ private fun ButtonTile(
             .pointerInput(tile.id) {
                 detectTapGestures(
                     onPress = {
-                        onPressStart()
+                        pressStart()
+                        var released = false
                         try {
-                            awaitRelease()
-                        } finally {
-                            onPressEnd()
+                            // tryAwaitRelease is false when the touch was
+                            // cancelled (finger slid off, parent stole it)
+                            released = tryAwaitRelease()
+                        }                         finally {
+                            // a cancelled touch is not a tap, but a hold
+                            // tile's key is still down: its press-end must
+                            // go out even then
+                            if (released || currentTile.interacts(V2.INT_PRESS_END)) {
+                                pressEnd()
+                            } else {
+                                onPressCancel()
+                            }
                         }
                     },
                 )
@@ -318,10 +344,19 @@ private fun SliderTile(
     icon: String,
     iconFamily: FontFamily,
     iconColor: Color,
+    liveValue: Double?,
     onSlider: (Float) -> Unit,
 ) {
-    var value by remember(tile.id) { mutableFloatStateOf(0.5f) }
+    // null until somebody drags: the channel's live value drives the fill
+    // then (the desktop's touch mode mirrors the same way). A completed
+    // drag keeps its position - the face must not flicker back while the
+    // echo patch travels - a cancelled one hands control back to live.
+    var dragValue by remember(tile.id) { mutableStateOf<Float?>(null) }
+    val liveSlide by rememberUpdatedState(liveValue?.coerceIn(0.0, 1.0)?.toFloat())
+    val value = dragValue ?: liveSlide ?: 0.5f
     val slide = remember(tile.id) { SlideThrottle() }
+    // see ButtonTile: the drag block outlives a live tile edit
+    val sendSlide by rememberUpdatedState(onSlider)
     val fill = tile.style?.color2?.let { hex(it, baseColor.copy(alpha = 0.6f)) }
         ?: baseColor.copy(alpha = 0.55f)
 
@@ -331,18 +366,26 @@ private fun SliderTile(
             .pointerInput(tile.id) {
                 detectDragGestures(
                     onDragStart = { offset ->
-                        value = (1f - offset.y / size.height).coerceIn(0f, 1f)
-                        slide.push(value, force = true, send = onSlider)
+                        val start = (1f - offset.y / size.height).coerceIn(0f, 1f)
+                        dragValue = start
+                        slide.push(start, force = true, send = sendSlide)
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        value = (1f - change.position.y / size.height).coerceIn(0f, 1f)
-                        slide.push(value, send = onSlider)
+                        val next = (1f - change.position.y / size.height).coerceIn(0f, 1f)
+                        dragValue = next
+                        slide.push(next, send = sendSlide)
                     },
                     onDragEnd = {
                         // converge: the last sampled value always reaches
                         // the server, throttling only smooths the path
-                        slide.push(value, force = true, send = onSlider)
+                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
+                    },
+                    onDragCancel = {
+                        // a cancelled drag still commits its last sampled
+                        // position (like the desktop), then follows live
+                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
+                        dragValue = null
                     },
                 )
             },

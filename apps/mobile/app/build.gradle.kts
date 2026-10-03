@@ -5,6 +5,16 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// Single version source: the workspace Cargo.toml. versionName and the
+// hello frame's client version (V2Client.VERSION via BuildConfig) both
+// derive from it, so the surfaces cannot drift apart again.
+val workspaceVersion: String =
+    file("../../../Cargo.toml").readText()
+        .substringAfter("[workspace.package]")
+        .let { Regex("(?m)^version\\s*=\\s*\"([^\"]+)\"").find(it) }
+        ?.groupValues?.get(1)
+        ?: throw GradleException("missing [workspace.package] version in the workspace Cargo.toml")
+
 android {
     namespace = "app.pulpit.mobile"
     compileSdk = 34
@@ -15,7 +25,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = workspaceVersion
     }
 
     buildTypes {
@@ -38,6 +48,8 @@ android {
     }
     buildFeatures {
         compose = true
+        // exposes VERSION_NAME to V2Client.VERSION (single version source)
+        buildConfig = true
     }
     // Golden fixtures shared with the Rust contract tests
     // (crates/proto/tests/fixtures) so both stacks parse the same wire
