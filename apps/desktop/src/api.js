@@ -31,6 +31,7 @@ export const api = {
   adbDevices: () => invoke("adb_devices"),
   adbInstallApk: (path) => invoke("adb_install_apk", { path }),
   checkForUpdates: () => invoke("check_for_updates"),
+  installUpdate: () => invoke("install_update"),
   listAudioDevices: () => invoke("list_audio_devices"),
   exportBoards: (ids, path) => invoke("export_boards", { ids, path }),
   importBoards: (path) => invoke("import_boards", { path }),

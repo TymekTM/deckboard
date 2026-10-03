@@ -203,6 +203,7 @@ pub fn run() {
             import_boards,
             aidev_status_config,
             set_aidev_status_config,
+            install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -280,6 +281,11 @@ fn register_ext_input(
 /// ADR-001), load extensions and start the embedded legacy server. A failure
 /// keeps the UI alive with `backend: None` so the window can explain why.
 fn setup_core(app: tauri::AppHandle) -> DesktopState {
+    // leftover from a self-update: the running exe was renamed aside and
+    // replaced; now nothing holds it and it can finally be deleted
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(exe.with_extension("exe.old"));
+    }
     // Port 8500 is what the stock Android client hardcodes (and the
     // original app's default). `PULPIT_PORT` overrides it for
     // side-by-side runs; otherwise the port persisted in editor.json
@@ -1350,6 +1356,75 @@ async fn adb_install_apk(path: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Default update feed: a `latest.json` in the public repo
+/// (`{"version": "...", "url": "...", "sha256": "..."}`). editor.json's
+/// `update_url` overrides it; the literal "off" disables checking.
+const DEFAULT_UPDATE_URL: &str =
+    "https://raw.githubusercontent.com/TymekTM/deckboard/main/latest.json";
+
+/// The effective update feed: editor.json's `update_url` wins ("off"
+/// disables), the public repo manifest is the default.
+fn resolve_update_url(stored: Option<&str>) -> Option<String> {
+    match stored.map(str::trim) {
+        Some("off") => None,
+        Some(s) if !s.is_empty() => Some(s.to_string()),
+        _ => Some(DEFAULT_UPDATE_URL.to_string()),
+    }
+}
+
+/// A parsed update manifest: where to fetch and how to verify.
+struct UpdateManifest {
+    version: String,
+    url: String,
+    sha256: Option<String>,
+}
+
+fn parse_update_manifest(text: &str) -> Result<UpdateManifest, String> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("Manifest nie jest JSON-em: {e}"))?;
+    let version = manifest
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or("Manifest nie ma pola \"version\".")?
+        .to_string();
+    let url = manifest
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if url.is_empty() {
+        return Err("Manifest nie ma pola \"url\".".to_string());
+    }
+    if !url.starts_with("https://") {
+        return Err("Adres pliku aktualizacji musi być HTTPS.".to_string());
+    }
+    let sha256 = manifest
+        .get("sha256")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Ok(UpdateManifest {
+        version,
+        url,
+        sha256,
+    })
+}
+
+fn fetch_manifest(url: &str) -> Result<UpdateManifest, String> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .build()
+        .new_agent();
+    let mut resp = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("Nie udało się pobrać manifestu: {e}"))?;
+    let text = resp
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("Nie udało się odczytać manifestu: {e}"))?;
+    parse_update_manifest(&text)
+}
+
 /// Numeric dot-version compare ("0.1.2" vs "v0.2.0"): true when `latest`
 /// is strictly newer than `current`. Non-numeric parts read as 0.
 fn version_newer(latest: &str, current: &str) -> bool {
@@ -1371,9 +1446,8 @@ fn version_newer(latest: &str, current: &str) -> bool {
     false
 }
 
-/// Checks the configured feed (`update_url` in editor.json - empty means
-/// the feature is off) for `{"version": "...", "url": "..."}`. No
-/// download, no install: the UI shows the result and the release URL.
+/// Checks the update feed for a newer version. No download, no install:
+/// the UI shows the result and the release URL.
 #[tauri::command]
 async fn check_for_updates(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
     let url = {
@@ -1385,56 +1459,163 @@ async fn check_for_updates(state: State<'_, DesktopState>) -> Result<serde_json:
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(serde_json::Value::Null);
-        stored
-            .get("update_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
+        resolve_update_url(stored.get("update_url").and_then(|v| v.as_str()))
+            .ok_or("Sprawdzanie aktualizacji jest wyłączone (update_url: \"off\").")?
     };
-    if url.trim().is_empty() {
-        return Err(
-            "Brak adresu aktualizacji (update_url w editor.json) - funkcja wyłączona.".to_string(),
-        );
-    }
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let latest =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(String, String), String> {
-            let agent = ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(10)))
-                .build()
-                .new_agent();
-            let mut resp = agent
-                .get(url.trim())
-                .call()
-                .map_err(|e| format!("Nie udało się pobrać manifestu: {e}"))?;
-            let text = resp
-                .body_mut()
-                .read_to_string()
-                .map_err(|e| format!("Nie udało się odczytać manifestu: {e}"))?;
-            let manifest: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| format!("Manifest nie jest JSON-em: {e}"))?;
-            let version = manifest
-                .get("version")
-                .and_then(|v| v.as_str())
-                .ok_or("Manifest nie ma pola \"version\".")?
-                .to_string();
-            let release_url = manifest
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Ok((version, release_url))
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-    let (latest, release_url) = latest;
-    let update_available = version_newer(&latest, &current);
+    let manifest =
+        tauri::async_runtime::spawn_blocking(move || fetch_manifest(&url.trim().to_string()))
+            .await
+            .map_err(|e| e.to_string())??;
+    let update_available = version_newer(&manifest.version, &current);
     Ok(serde_json::json!({
         "current": current,
-        "latest": latest,
+        "latest": manifest.version,
         "update_available": update_available,
-        "url": release_url,
+        "url": manifest.url,
     }))
+}
+
+/// Download size cap: the desktop exe is ~21 MiB today; anything past
+/// this is a wrong or hostile asset and the update aborts.
+const UPDATE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Download the asset into `dest`, enforcing the size cap.
+fn download_update(url: &str, dest: &std::path::Path) -> Result<(), String> {
+    use std::io::Read;
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(600)))
+        .build()
+        .new_agent();
+    let mut resp = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("Nie udało się pobrać aktualizacji: {e}"))?;
+    let mut body = resp
+        .into_body()
+        .into_reader()
+        .take(UPDATE_MAX_BYTES + 1);
+    let mut file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let written =
+        std::io::copy(&mut body, &mut file).map_err(|e| format!("Pobieranie przerwane: {e}"))?;
+    if written > UPDATE_MAX_BYTES {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!(
+            "Plik aktualizacji ma {written} B - powyżej limitu {UPDATE_MAX_BYTES} B."
+        ));
+    }
+    Ok(())
+}
+
+/// Verify a lowercase hex sha256 digest against the file's bytes.
+fn sha256_matches(path: &std::path::Path, expected: &str) -> Result<bool, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let digest = hex::encode(Sha256::digest(&bytes));
+    Ok(digest.eq_ignore_ascii_case(expected.trim()))
+}
+
+/// Swap the freshly downloaded exe into place: the running exe renames
+/// fine on NTFS, the download then takes its name. On any failure the
+/// rename is rolled back so the current install keeps working.
+fn apply_update(exe: &std::path::Path, downloaded: &std::path::Path) -> Result<(), String> {
+    let old = exe.with_extension("exe.old");
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(exe, &old).map_err(|e| format!("Nie udało się odłożyć starego exe: {e}"))?;
+    if let Err(e) = std::fs::rename(downloaded, exe) {
+        // put the running version back; the app must keep working
+        let _ = std::fs::rename(&old, exe);
+        return Err(format!("Nie udało się podmienić pliku: {e}"));
+    }
+    Ok(())
+}
+
+/// Schedule the freshly swapped exe to start after this process exits
+/// (the single-instance plugin would kill a sibling that starts too
+/// early). `cmd` survives the parent: it waits 2 s, then starts the app.
+fn relaunch_after_swap(exe: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const DETACHED: u32 = 0x0000_0008;
+    const NO_WINDOW: u32 = 0x0800_0000;
+    let exe_str = exe.to_string_lossy().into_owned();
+    std::process::Command::new("cmd")
+        .args([
+            "/C",
+            &format!("timeout /t 2 /nobreak >nul & start \"\" \"{exe_str}\""),
+        ])
+        .creation_flags(DETACHED | NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("Nie udało się zaplanować restartu: {e}"))?;
+    Ok(())
+}
+
+/// Download (manifest URL again, so the check cannot go stale), verify
+/// and stage the new exe, then swap and restart. The `.old` copy is
+/// removed by the next launch's cleanup sweep.
+#[tauri::command]
+async fn install_update(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<String, String> {
+    let (url, staging_dir) = {
+        let path = state
+            .settings_path
+            .as_ref()
+            .ok_or("Brak ścieżki ustawień (uruchomienie awaryjne).")?;
+        let stored: serde_json::Value = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let feed = resolve_update_url(stored.get("update_url").and_then(|v| v.as_str()))
+            .ok_or("Sprawdzanie aktualizacji jest wyłączone (update_url: \"off\").")?;
+        let dir = path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("updates");
+        (feed, dir)
+    };
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let manifest = fetch_manifest(&url)?;
+        let current = env!("CARGO_PKG_VERSION");
+        if !version_newer(&manifest.version, current) {
+            return Err(format!(
+                "Zainstalowana wersja {current} jest aktualna (feed: {}).",
+                manifest.version
+            ));
+        }
+        std::fs::create_dir_all(&staging_dir).map_err(|e| e.to_string())?;
+        let staged = staging_dir.join("pulpit-desktop.new");
+        let _ = std::fs::remove_file(&staged);
+        download_update(&manifest.url, &staged)?;
+        if let Some(expected) = &manifest.sha256 {
+            if !sha256_matches(&staged, expected)? {
+                let _ = std::fs::remove_file(&staged);
+                return Err(
+                    "Suma kontrolna pobranego pliku się nie zgadza - instalacja przerwana."
+                        .to_string(),
+                );
+            }
+        }
+        apply_update(&exe, &staged)?;
+        relaunch_after_swap(&exe)?;
+        Ok(format!(
+            "Zainstalowano v{}. Aplikacja uruchomi się ponownie.",
+            manifest.version
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if result.is_ok() {
+        // the intermediary `cmd` starts the new build ~2 s after the
+        // swap; this process must be gone by then for the
+        // single-instance guard to let it through
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            app.exit(0);
+        });
+    }
+    result
 }
 
 fn device_infos(devices: &pulpit_v2::DeviceStore) -> Vec<DeviceInfo> {
@@ -1598,6 +1779,76 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
         assert_eq!(saved["port"], 8600);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn update_manifest_and_feed_resolution() {
+        // default feed when editor.json has nothing; "off" wins when set
+        assert_eq!(
+            resolve_update_url(None).as_deref(),
+            Some(DEFAULT_UPDATE_URL)
+        );
+        assert_eq!(
+            resolve_update_url(Some("  ")).as_deref(),
+            Some(DEFAULT_UPDATE_URL)
+        );
+        assert_eq!(resolve_update_url(Some("off")), None);
+        assert_eq!(
+            resolve_update_url(Some(" https://example.com/feed.json ")).as_deref(),
+            Some("https://example.com/feed.json")
+        );
+        // manifest: version+url required, url must be https, sha optional
+        let m =
+            parse_update_manifest(r#"{"version":"1.3.0","url":"https://x/y.exe","sha256":"abc"}"#)
+                .expect("parses");
+        assert_eq!(m.version, "1.3.0");
+        assert_eq!(m.url, "https://x/y.exe");
+        assert_eq!(m.sha256.as_deref(), Some("abc"));
+        assert!(parse_update_manifest(r#"{"version":"1.3.0"}"#).is_err());
+        assert!(parse_update_manifest(r#"{"version":"1.3.0","url":"http://x/y.exe"}"#).is_err());
+        // version compare unchanged
+        assert!(version_newer("1.3.0", "1.2.9"));
+        assert!(!version_newer("1.3.0", "1.3.0"));
+    }
+
+    #[test]
+    fn update_download_verifies_and_swaps() {
+        let dir = std::env::temp_dir().join(format!("pulpit-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let fake_exe = dir.join("pulpit-desktop.exe");
+        let staged = dir.join("updates").join("pulpit-desktop.new");
+        std::fs::write(&fake_exe, b"old-build-bytes").expect("seed exe");
+        std::fs::create_dir_all(staged.parent().unwrap()).expect("staging");
+        std::fs::write(&staged, b"new-build-bytes").expect("seed download");
+
+        // digest check matches the real sha256 of the payload
+        let digest = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(b"new-build-bytes"))
+        };
+        assert!(sha256_matches(&staged, &digest).expect("hash"));
+        assert!(!sha256_matches(&staged, "deadbeef").expect("hash"));
+
+        // swap: running exe moves to .old, download takes its place
+        apply_update(&fake_exe, &staged).expect("swap");
+        assert_eq!(
+            std::fs::read(dir.join("pulpit-desktop.exe")).expect("new in place"),
+            b"new-build-bytes"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("pulpit-desktop.exe.old")).expect("old aside"),
+            b"old-build-bytes"
+        );
+        // a failed second swap rolls back: no staged file -> rename fails,
+        // and the good exe must survive
+        let _ = std::fs::remove_file(&staged);
+        assert!(apply_update(&fake_exe, &staged).is_err());
+        assert_eq!(
+            std::fs::read(dir.join("pulpit-desktop.exe")).expect("exe intact"),
+            b"new-build-bytes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

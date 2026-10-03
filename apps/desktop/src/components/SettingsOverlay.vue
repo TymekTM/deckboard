@@ -193,24 +193,44 @@ async function installApk() {
   }
 }
 
-// M8 update check: reads the update_url feed (empty = off), no download
+// M8 updates: the feed check shows what's available; the install button
+// downloads, verifies the sha256 and swaps the exe, then the app
+// restarts itself
 const updateBusy = ref(false);
 const updateNote = ref("");
 const updateNoteBad = ref(false);
+const updateReady = ref(""); // version string when a newer build is staged on the feed
 
 async function checkUpdates() {
   updateBusy.value = true;
   updateNote.value = "Sprawdzam...";
   updateNoteBad.value = false;
+  updateReady.value = "";
   try {
     const r = await api.checkForUpdates();
+    updateReady.value = r.update_available ? r.latest : "";
     updateNote.value = r.update_available
-      ? `Dostępna wersja ${r.latest} (masz ${r.current}). ${r.url || "Pobierz ze strony wydania."}`
+      ? `Dostępna wersja ${r.latest} (masz ${r.current}).`
       : `System jest aktualny (v${r.current}).`;
   } catch (e) {
     updateNote.value = String(e);
     updateNoteBad.value = true;
   } finally {
+    updateBusy.value = false;
+  }
+}
+
+async function installUpdate() {
+  updateBusy.value = true;
+  updateNote.value = "Pobieram i instaluję...";
+  updateNoteBad.value = false;
+  try {
+    updateNote.value = await api.installUpdate();
+    // the backend schedules app.exit(0) and a fresh launch; keep the
+    // note on screen for the ride
+  } catch (e) {
+    updateNote.value = String(e);
+    updateNoteBad.value = true;
     updateBusy.value = false;
   }
 }
@@ -536,9 +556,17 @@ onUnmounted(() => {
               <div class="ctl" style="margin-top: 12px">
                 <div class="ctl-text">
                   <span class="ctl-name">Aktualizacje</span>
-                  <span class="ctl-note">Sprawdza feed z update_url w editor.json; nie pobiera nic sama.</span>
+                  <span class="ctl-note">Feed z update_url (domyślnie latest.json w repo); pobiera, weryfikuje sha256 i restartuje.</span>
                 </div>
-                <button class="act" :disabled="updateBusy" @click="checkUpdates">Sprawdź</button>
+                <span style="display: flex; gap: 8px; flex: none">
+                  <button class="act" :disabled="updateBusy" @click="checkUpdates">Sprawdź</button>
+                  <button
+                    v-if="updateReady"
+                    class="act accent"
+                    :disabled="updateBusy"
+                    @click="installUpdate"
+                  >Zainstaluj {{ updateReady }}</button>
+                </span>
               </div>
               <p v-if="updateNote" :class="updateNoteBad ? 'err' : 'note pending'">{{ updateNote }}</p>
             </div>
