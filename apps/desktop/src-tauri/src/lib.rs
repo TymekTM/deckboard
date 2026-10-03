@@ -1602,17 +1602,19 @@ mod tests {
 
     #[test]
     fn aidev_status_selection_defaults_and_parses() {
-        // absent section: everything detected, summary line on
-        let (show, summary) = aidev_status_selection(&serde_json::Value::Null);
-        assert!(show.is_empty());
-        assert!(summary);
+        // absent section: everything detected, summary line on, name rows
+        let sel = aidev_status_selection(&serde_json::Value::Null);
+        assert!(sel.show.is_empty());
+        assert!(sel.summary);
+        assert_eq!(sel.row_style, "name");
         let raw: serde_json::Value = serde_json::from_str(
-            r#"{"poll_secs":30,"status":{"show":["glm:5h","codex:week"],"summary":false}}"#,
+            r#"{"poll_secs":30,"status":{"show":["glm:5h","codex:week"],"summary":false,"row_style":"logo"}}"#,
         )
         .expect("seed json");
-        let (show, summary) = aidev_status_selection(&raw);
-        assert_eq!(show, ["glm:5h", "codex:week"]);
-        assert!(!summary);
+        let sel = aidev_status_selection(&raw);
+        assert_eq!(sel.show, ["glm:5h", "codex:week"]);
+        assert!(!sel.summary);
+        assert_eq!(sel.row_style, "logo");
     }
 
     #[test]
@@ -2014,20 +2016,16 @@ async fn set_server_port(state: State<'_, DesktopState>, port: u16) -> Result<()
     persist_editor_setting(path, "port", serde_json::json!(port))
 }
 
-/// Detected plan-limits rows plus the current AI-usage selection
-/// (Ustawienia -> AI usage). `detected` fills up as the producer cycles,
-/// so the checkbox list auto-follows whatever the machine reports.
-#[derive(serde::Serialize)]
-struct AidevStatusConfig {
-    detected: Vec<pulpit_aidev::DetectedRow>,
+/// The `status` section of aidev.json, with the defaults an absent
+/// section implies: no selection (everything detected is shown), the
+/// summary line on, rows identified by name.
+struct AidevSelection {
     show: Vec<String>,
     summary: bool,
+    row_style: String,
 }
 
-/// The `status` section of aidev.json, with the defaults an absent
-/// section implies: no selection (everything detected is shown) and the
-/// summary line on.
-fn aidev_status_selection(raw: &serde_json::Value) -> (Vec<String>, bool) {
+fn aidev_status_selection(raw: &serde_json::Value) -> AidevSelection {
     let show = raw
         .pointer("/status/show")
         .and_then(|v| v.as_array())
@@ -2041,7 +2039,26 @@ fn aidev_status_selection(raw: &serde_json::Value) -> (Vec<String>, bool) {
         .pointer("/status/summary")
         .and_then(|b| b.as_bool())
         .unwrap_or(true);
-    (show, summary)
+    let row_style = match raw.pointer("/status/row_style").and_then(|s| s.as_str()) {
+        Some("logo") => "logo".to_string(),
+        _ => "name".to_string(),
+    };
+    AidevSelection {
+        show,
+        summary,
+        row_style,
+    }
+}
+
+/// Detected plan-limits rows plus the current AI-usage selection
+/// (Ustawienia -> AI usage). `detected` fills up as the producer cycles,
+/// so the checkbox list auto-follows whatever the machine reports.
+#[derive(serde::Serialize)]
+struct AidevStatusConfig {
+    detected: Vec<pulpit_aidev::DetectedRow>,
+    show: Vec<String>,
+    summary: bool,
+    row_style: String,
 }
 
 #[tauri::command]
@@ -2054,11 +2071,12 @@ fn aidev_status_config(state: State<'_, DesktopState>) -> Result<AidevStatusConf
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
-    let (show, summary) = aidev_status_selection(&raw);
+    let selection = aidev_status_selection(&raw);
     Ok(AidevStatusConfig {
         detected: pulpit_aidev::detected_rows(),
-        show,
-        summary,
+        show: selection.show,
+        summary: selection.summary,
+        row_style: selection.row_style,
     })
 }
 
@@ -2070,6 +2088,7 @@ async fn set_aidev_status_config(
     state: State<'_, DesktopState>,
     show: Vec<String>,
     summary: bool,
+    row_style: String,
 ) -> Result<(), String> {
     let path = state
         .aidev_config
@@ -2078,7 +2097,7 @@ async fn set_aidev_status_config(
     persist_editor_setting(
         &path,
         "status",
-        serde_json::json!({ "show": show, "summary": summary }),
+        serde_json::json!({ "show": show, "summary": summary, "row_style": row_style }),
     )
 }
 

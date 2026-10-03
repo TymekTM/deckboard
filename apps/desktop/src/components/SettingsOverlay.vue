@@ -63,6 +63,7 @@ const adbNoteBad = ref(false);
 const aidevDetected = ref([]); // [{id, label}] from the producer registry
 const aidevShow = ref([]); // working set of checked row ids
 const aidevSummary = ref(true);
+const aidevRowStyle = ref("name"); // "name" | "logo" row identifier
 const aidevBusy = ref(false);
 const aidevError = ref("");
 const aidevNote = ref("");
@@ -99,6 +100,7 @@ async function refreshAidev() {
       ? aidevDetected.value.filter((r) => saved.has(r.id)).map((r) => r.id)
       : aidevDetected.value.map((r) => r.id);
     aidevSummary.value = cfg.summary !== false;
+    aidevRowStyle.value = cfg.row_style === "logo" ? "logo" : "name";
   } catch (e) {
     aidevError.value = e ? String(e) : "Nie udało się pobrać ustawień AI usage.";
   }
@@ -112,7 +114,11 @@ async function saveAidev() {
     // appearing automatically
     const all = aidevDetected.value.map((r) => r.id);
     const everything = all.length > 0 && aidevShow.value.length === all.length;
-    await api.setAidevStatusConfig(everything ? [] : aidevShow.value, aidevSummary.value);
+    await api.setAidevStatusConfig(
+      everything ? [] : aidevShow.value,
+      aidevSummary.value,
+      aidevRowStyle.value,
+    );
     aidevNote.value = "Zapisano — zadziała przy następnym odświeżeniu kafelka.";
     setTimeout(() => {
       aidevNote.value = "";
@@ -145,6 +151,12 @@ function toggleAidevRow(id) {
 
 function toggleAidevSummary() {
   aidevSummary.value = !aidevSummary.value;
+  saveAidev();
+}
+
+function setAidevRowStyle(style) {
+  if (aidevRowStyle.value === style) return;
+  aidevRowStyle.value = style;
   saveAidev();
 }
 
@@ -737,6 +749,26 @@ onUnmounted(() => {
             <div v-show="focused === 'aidev'" class="detail">
               <div class="ctl">
                 <div class="ctl-text">
+                  <span class="ctl-name">Identyfikacja wierszy</span>
+                  <span class="ctl-note">Nazwa tekstowa albo logo marki — nigdy oba naraz.</span>
+                </div>
+                <span class="seg">
+                  <button
+                    class="seg-btn"
+                    :class="{ on: aidevRowStyle === 'name' }"
+                    :disabled="aidevBusy"
+                    @click="setAidevRowStyle('name')"
+                  >Nazwa</button>
+                  <button
+                    class="seg-btn"
+                    :class="{ on: aidevRowStyle === 'logo' }"
+                    :disabled="aidevBusy"
+                    @click="setAidevRowStyle('logo')"
+                  >Logo</button>
+                </span>
+              </div>
+              <div class="ctl">
+                <div class="ctl-text">
                   <span class="ctl-name">Linia podsumowania</span>
                   <span class="ctl-note">Wiersz pod listą nazywający okienko najbliżej limitu.</span>
                 </div>
@@ -996,6 +1028,27 @@ onUnmounted(() => {
 }
 .aid-check input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
 .aid-check:hover { color: var(--ink-2); }
+
+/* name | logo segmented pick */
+.seg {
+  flex: none;
+  display: inline-flex;
+  border: 1px solid var(--tile-2);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--tile-2); }
+.seg-btn.on { background: var(--tile-2); color: var(--ink); }
+.seg-btn:disabled { cursor: default; opacity: 0.7; }
 .locked {
   flex: none;
   display: flex;

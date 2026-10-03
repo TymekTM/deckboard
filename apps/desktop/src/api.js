@@ -35,6 +35,6 @@ export const api = {
   exportBoards: (ids, path) => invoke("export_boards", { ids, path }),
   importBoards: (path) => invoke("import_boards", { path }),
   aidevStatusConfig: () => invoke("aidev_status_config"),
-  setAidevStatusConfig: (show, summary) =>
-    invoke("set_aidev_status_config", { show, summary }),
+  setAidevStatusConfig: (show, summary, rowStyle) =>
+    invoke("set_aidev_status_config", { show, summary, rowStyle }),
 };

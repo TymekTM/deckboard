@@ -38,4 +38,6 @@ data class StatusData(
     val rows: List<StatusRow>,
     val compact: List<StatusCompact> = emptyList(),
     val summary: String = "",
+    /** Row identifier style: "name" (default) or "logo" - never both. */
+    val rowStyle: String = "name",
 )

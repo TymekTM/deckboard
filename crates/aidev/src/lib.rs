@@ -152,13 +152,34 @@ pub struct ZaiProvider {
 /// Plan-limits tile presentation, edited from Ustawienia -> AI usage.
 /// `show` lists the row ids that survive; empty means "everything the
 /// producers detect" (the historical behavior). `summary` keeps the
-/// one-line headline under the row list.
+/// one-line headline under the row list. `row_style` picks the row
+/// identifier: "name" renders the text label, "logo" the provider mark
+/// (falling back to the name when no mark exists) - never both.
 #[derive(serde::Deserialize, Clone, PartialEq)]
 pub struct StatusConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub show: Vec<String>,
     #[serde(default = "default_true")]
     pub summary: bool,
+    #[serde(default)]
+    pub row_style: RowStyle,
+}
+
+#[derive(serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RowStyle {
+    #[default]
+    Name,
+    Logo,
+}
+
+impl RowStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RowStyle::Name => "name",
+            RowStyle::Logo => "logo",
+        }
+    }
 }
 
 impl Default for StatusConfig {
@@ -168,6 +189,7 @@ impl Default for StatusConfig {
         Self {
             show: Vec::new(),
             summary: true,
+            row_style: RowStyle::default(),
         }
     }
 }
@@ -390,9 +412,11 @@ fn assemble(
             // percent summary only when at least one lane knows its ceiling;
             // an empty string keeps the renderer from drawing the line.
             // `hide_summary` tells renderers that recompute their own
-            // headline from the visible rows to keep quiet too.
+            // headline from the visible rows to keep quiet too, and
+            // `row_style` picks name vs brand mark as the row identifier.
             "summary": plan_summary,
             "hide_summary": !config.status.summary,
+            "row_style": config.status.row_style.as_str(),
         },
         "ai-agent-status": agents,
         // graph tile: the client keeps the last 10 samples as a sparkline;
@@ -493,19 +517,22 @@ mod tests {
         assert_eq!(cfg.poll_secs, 15);
         assert_eq!(cfg.history_days, 8);
         assert_eq!(cfg.glm_five_hour_tokens, None);
-        // no status section: everything detected is shown, summary on
+        // no status section: everything detected is shown, summary on,
+        // rows identified by name
         assert_eq!(cfg.status.show, Vec::<String>::new());
         assert!(cfg.status.summary);
+        assert_eq!(cfg.status.row_style, RowStyle::Name);
     }
 
     #[test]
     fn config_parses_status_selection() {
         let cfg: Config = serde_json::from_str(
-            r#"{"status": {"show": ["glm:5h", "claude:week"], "summary": false}}"#,
+            r#"{"status": {"show": ["glm:5h", "claude:week"], "summary": false, "row_style": "logo"}}"#,
         )
         .expect("status config parses");
         assert_eq!(cfg.status.show, ["glm:5h", "claude:week"]);
         assert!(!cfg.status.summary);
+        assert_eq!(cfg.status.row_style, RowStyle::Logo);
     }
 
     #[test]

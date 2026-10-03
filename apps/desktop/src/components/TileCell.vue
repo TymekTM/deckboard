@@ -171,6 +171,23 @@ const statusRows = computed(() => {
   return data.rows.filter((row) => !planWindowHidden(row.label));
 });
 
+// Row identifier style from the producer config: "name" (default) keeps
+// the text label, "logo" swaps it for the provider mark (falling back to
+// the name when no mark exists) - never both at once.
+const statusLogoRows = computed(
+  () => (statusData.value?.row_style ?? "name") === "logo",
+);
+
+// The brand mark to draw instead of the label in logo style: agent rows
+// carry `provider`, plan rows derive it from the label ("GLM 5h" ->
+// zcode). Null when the row is in name style, is a header, or no mark
+// exists - the label renders instead, so text stays the only identifier
+// in name mode.
+function statusGlyph(row) {
+  if (!statusLogoRows.value || row.state === "header") return null;
+  return providerSvg(row.provider || laneProvider(row.label));
+}
+
 // Plan rows are named "<provider> <window>" ("GLM 5h") - the lane label
 // maps back to the provider for the mini view's glyph.
 function laneProvider(label) {
@@ -505,12 +522,8 @@ function onTileKeydown(event) {
             :class="['s-' + (row.state || 'off'), { 'is-header': row.state === 'header' }]"
           >
             <span v-if="row.state !== 'header'" class="status-dot"></span>
-            <span
-              v-if="row.provider && providerSvg(row.provider)"
-              class="provider-glyph"
-              v-html="providerSvg(row.provider)"
-            ></span>
-            <span v-if="row.label" class="status-label">{{ row.label }}</span>
+            <span v-if="statusGlyph(row)" class="provider-glyph" v-html="statusGlyph(row)"></span>
+            <span v-else-if="row.label" class="status-label">{{ row.label }}</span>
             <span v-if="row.value" class="status-val">{{ row.value }}</span>
             <span v-if="row.percent != null" class="status-bar">
               <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
