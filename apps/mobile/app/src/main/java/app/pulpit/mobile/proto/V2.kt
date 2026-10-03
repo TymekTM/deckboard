@@ -63,8 +63,6 @@ object V2 {
     // state shapes
     const val SHAPE_SCALAR = "scalar"
     const val SHAPE_SERIES = "series"
-    const val SHAPE_TOGGLE = "toggle"
-    const val SHAPE_LIST = "list"
 }
 
 @Serializable

@@ -207,7 +207,7 @@ fun ClockTile(
             else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 if (icon.isNotEmpty()) {
                     Text(
-                        text = faChar(icon),
+                        text = icon,
                         fontFamily = iconFamily,
                         fontSize = 20.sp,
                         color = titleColor,
@@ -340,7 +340,6 @@ internal fun downsample(history: List<Double>, max: Int): List<Double> {
 @Composable
 fun KnobTile(
     tile: Tile,
-    baseColor: Color,
     iconColor: Color,
     titleColor: Color,
     liveValue: Double?,
