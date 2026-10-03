@@ -354,14 +354,16 @@ fn callback_page_body(title: &str, body: &str) -> String {
 pub fn login(client_id: &str, open_browser: impl FnOnce(&str)) -> Result<SpotifyConfig> {
     let verifier = new_verifier();
     let state = new_state();
-    let url = authorize_url(client_id, &s256_challenge(&verifier), &state);
-    open_browser(&url);
-
+    // bind BEFORE the browser opens: a busy 8502 must fail the login
+    // with a clear error, not after the user has already signed in
     let listener = TcpListener::bind(("127.0.0.1", 8502)).map_err(|e| {
         SpotifyError::Login(format!(
             "cannot listen on 127.0.0.1:8502 for the Spotify callback ({e}) - is another login in progress?"
         ))
     })?;
+    let url = authorize_url(client_id, &s256_challenge(&verifier), &state);
+    open_browser(&url);
+
     let code = wait_callback(listener, &state, CALLBACK_TIMEOUT)?;
 
     let transport = crate::http::UreqTransport::new();
