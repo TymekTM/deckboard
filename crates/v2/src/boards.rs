@@ -166,22 +166,55 @@ pub fn hold_repeat_config(params: &Value) -> Option<(u64, u64)> {
 
 /// Legacy semantics that live outside the widget manifest get an
 /// explicit params hint here, so clients never need to know legacy type
-/// strings: the clock display tile announces itself as a clock widget.
+/// strings: the clock display tile announces itself as a clock widget,
+/// and the plan tile's `windows:` option token is normalized into a
+/// params array.
 fn apply_implicit_params(row: &ButtonRow, params: &mut Value) {
-    if row.kind != "clock-display-time" {
-        return;
+    if row.kind == "clock-display-time" {
+        if !params.is_object() {
+            *params = Value::Object(serde_json::Map::new());
+        }
+        let obj = params.as_object_mut().expect("just made an object");
+        obj.insert("widget".into(), Value::String("clock".into()));
+        let format = if row.command.as_deref() == Some("clock-12h") {
+            "12h"
+        } else {
+            "24h"
+        };
+        obj.insert("clock_format".into(), Value::String(format.into()));
     }
-    if !params.is_object() {
-        *params = Value::Object(serde_json::Map::new());
+    // The plan window filter rides the options column in a legacy
+    // dialect ("windows:5h,week") that JSON parsing drops on the floor
+    // (MOB-06): lift it into params.windows so v2 clients can filter
+    // rows without knowing the dialect. A params key that is already
+    // there wins.
+    if let Some(windows) = windows_filter(row.options.as_deref()) {
+        if !params.is_object() {
+            *params = Value::Object(serde_json::Map::new());
+        }
+        let obj = params.as_object_mut().expect("just made an object");
+        obj.entry("windows").or_insert(Value::Array(
+            windows.into_iter().map(Value::String).collect(),
+        ));
     }
-    let obj = params.as_object_mut().expect("just made an object");
-    obj.insert("widget".into(), Value::String("clock".into()));
-    let format = if row.command.as_deref() == Some("clock-12h") {
-        "12h"
-    } else {
-        "24h"
-    };
-    obj.insert("clock_format".into(), Value::String(format.into()));
+}
+
+/// The `windows:5h,week` token out of the legacy semicolon-separated
+/// options dialect (the editor's plan-tile checkboxes; no token = both
+/// windows shown). `Some(windows)` lists the windows the user kept;
+/// `Some([])` means both were unticked, so every plan row hides.
+pub fn windows_filter(options: Option<&str>) -> Option<Vec<String>> {
+    let token = options?
+        .split(';')
+        .find(|part| part.starts_with("windows:"))?;
+    Some(
+        token["windows:".len()..]
+            .split(',')
+            .map(str::trim)
+            .filter(|window| !window.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// Widget kind from the legacy `mode`/`app` columns: rendering modes map
@@ -563,6 +596,38 @@ mod tests {
         let params = tile.manifest.params;
         assert_eq!(params["widget"], "clock");
         assert_eq!(params["clock_format"], "12h");
+    }
+
+    #[test]
+    fn plan_windows_token_reaches_params_as_an_array() {
+        // the legacy "windows:5h,week" options dialect is not JSON, so a
+        // plain parse drops it; it must be lifted into params (MOB-06)
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let mut r = row("ai-plan-limits", "status", None);
+        r.options = Some("windows: 5h, week".into());
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
+        assert_eq!(
+            tile.manifest.params["windows"],
+            serde_json::json!(["5h", "week"])
+        );
+
+        // no token = no params.windows key (both windows shown)
+        let mut r = row("ai-plan-limits", "status", None);
+        r.options = Some("{}".into());
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
+        assert!(tile.manifest.params.get("windows").is_none());
+
+        // token present with everything unticked = empty filter, still
+        // on the wire (hides every plan row)
+        assert_eq!(
+            windows_filter(Some("other:x;windows:")),
+            Some(Vec::<String>::new())
+        );
+        assert_eq!(windows_filter(None), None);
+        assert_eq!(windows_filter(Some("windows:5h")), Some(vec!["5h".into()]));
+        // the token must start a part (a "xwindows:" mid-part is not one)
+        assert_eq!(windows_filter(Some("xwindows:5h")), None);
     }
 
     #[test]

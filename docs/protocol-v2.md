@@ -191,7 +191,12 @@ Boards are data. One board:
   be any rectangle (3x1, 3x3, ...). Non-rectangular shapes are out of scope.
 - `background`: `{"kind":"color","color":...}` or
   `{"kind":"asset","hash":...}` (sha-256 hex, see section 7).
-- `params`: free JSON (widget options, e.g. `hold.repeat`).
+- `params`: free JSON (widget options, e.g. `hold.repeat`). The server
+  also lifts legacy semantics that are not JSON into it: `widget`
+  (`"clock"`) + `clock_format` for clock display tiles, and `windows`
+  (array of `"5h"`/`"week"`) for plan tiles whose options column
+  carries the legacy `windows:` token (added 2026-10, round 4) - the
+  per-tile plan window filter clients apply to the status rows.
 - `asset_hash`: content hash of the tile's image asset (button image,
   photo, video). Legacy `img`/`img2` data URLs are converted to store
   entries on the fly when the server builds a sync; tiles whose image
@@ -412,6 +417,10 @@ disconnect and retries as usual.
 - Change log: 2026-10 (round 4) untitled board-switch tiles now carry
   the target board's name in `style.title` (filled server-side; the
   field itself is unchanged). No wire-shape change - `v` stays 2.
+- Change log: 2026-10 (round 4) plan tiles with the legacy
+  `windows:` options token now get `params.windows` (array of
+  `"5h"`/`"week"`; empty = all unticked). Additive optional field per
+  §10 - `v` stays 2.
 - Wire compatibility is pinned by golden fixtures
   (`crates/proto/tests/fixtures/*.json`): Rust round-trips them and the
   Kotlin unit test parses the same files. Both must stay green.

@@ -57,6 +57,8 @@ import app.pulpit.mobile.proto.Tile
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
@@ -521,10 +523,18 @@ fun listItems(tile: Tile, live: kotlinx.serialization.json.JsonElement?): List<S
 // when the tile cannot fit the detail, and a bar+percent mini view on 1x1.
 
 /** Parses the status payload; null when the value is not one (plain
- *  arrays keep rendering through [listItems] as a plain option list). */
+ *  arrays keep rendering through [listItems] as a plain option list).
+ *
+ *  Plan window filter (MOB-06): `params.windows` (normalized
+ *  server-side from the legacy "windows:5h,week" options token; absent
+ *  = both windows shown) drops the percent rows of unticked windows,
+ *  and the summary line is recomputed from the worst visible percent
+ *  row - the same rules the desktop touch mode applies to the raw
+ *  options string. `hide_summary` (producer config) silences the line
+ *  either way. */
 fun statusData(tile: Tile, live: kotlinx.serialization.json.JsonElement?): StatusData? {
     val obj = live as? JsonObject ?: return null
-    val rows = (obj["rows"] as? JsonArray)?.mapNotNull { el ->
+    val parsed = (obj["rows"] as? JsonArray)?.mapNotNull { el ->
         val r = el as? JsonObject ?: return@mapNotNull null
         fun str(key: String) = r[key]?.jsonPrimitive?.contentOrNull.orEmpty()
         val state = str("state")
@@ -537,7 +547,9 @@ fun statusData(tile: Tile, live: kotlinx.serialization.json.JsonElement?): Statu
             isHeader = state == "header",
         )
     }.orEmpty()
-    if (rows.isEmpty()) return null
+    if (parsed.isEmpty()) return null
+    val windows = planWindows(tile)
+    val rows = parsed.filter { !planWindowHidden(it.label, windows) }
     val compact = (obj["compact"] as? JsonArray)?.mapNotNull { el ->
         val c = el as? JsonObject ?: return@mapNotNull null
         val provider = c["provider"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
@@ -547,9 +559,37 @@ fun statusData(tile: Tile, live: kotlinx.serialization.json.JsonElement?): Statu
             state = c["state"]?.jsonPrimitive?.contentOrNull ?: "working",
         )
     }.orEmpty()
-    val summary = obj["summary"]?.jsonPrimitive?.contentOrNull.orEmpty()
+    val summary = if (obj["hide_summary"]?.jsonPrimitive?.booleanOrNull == true) {
+        ""
+    } else {
+        val percentRows = rows.filter { it.percent != null }
+        if (percentRows.isEmpty()) {
+            obj["summary"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        } else {
+            // the producer summary names the worst window, which a
+            // filtered-out row may no longer be: recompute from the
+            // visible percent rows (desktop statusSummary)
+            val worst = percentRows.maxBy { it.percent ?: Double.NEGATIVE_INFINITY }
+            "${worst.label} ${Math.round(worst.percent ?: 0.0).toInt()}%"
+        }
+    }
     val rowStyle = obj["row_style"]?.jsonPrimitive?.contentOrNull ?: "name"
     return StatusData(rows, compact, summary, rowStyle)
+}
+
+/** The kept plan windows of this tile ([Tile.params] "windows", an
+ *  array of "5h"/"week"); null = no filter on the wire = both shown. */
+private fun planWindows(tile: Tile): List<String>? =
+    ((tile.params as? JsonObject)?.get("windows") as? JsonArray)
+        ?.mapNotNull { (it as? JsonPrimitive)?.content }
+
+/** True when the row belongs to a plan window the user unticked
+ *  (labels end in " 5h"/" week"; every other row always shows). */
+private fun planWindowHidden(label: String, windows: List<String>?): Boolean {
+    if (windows == null) return false
+    if (label.endsWith(" 5h")) return !windows.contains("5h")
+    if (label.endsWith(" week")) return !windows.contains("week")
+    return false
 }
 
 /** "GLM 5h" -> "zcode": plan lane labels name the provider family. */
