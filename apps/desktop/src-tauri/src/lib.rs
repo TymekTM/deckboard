@@ -911,7 +911,17 @@ const IMAGE_READ_CAP_BYTES: u64 = 10 * 1024 * 1024;
 /// Read an image file and return it as a data URL for tile backgrounds and
 /// icons. Done in Rust so no filesystem plugin/scope is needed.
 #[tauri::command]
-fn read_image_data(path: String) -> Result<String, String> {
+async fn read_image_data(path: String) -> Result<String, String> {
+    // up to a 10 MiB read plus a base64 pass: run it on the blocking
+    // pool, not the main thread (sync commands) or an async worker
+    tauri::async_runtime::spawn_blocking(move || read_image_data_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The blocking half of [`read_image_data`], split out so the size-cap
+/// behavior stays testable without a runtime.
+fn read_image_data_blocking(path: &str) -> Result<String, String> {
     use base64::Engine;
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     let mime = match ext.as_str() {
@@ -924,7 +934,7 @@ fn read_image_data(path: String) -> Result<String, String> {
     };
     // take() bounds the read itself: a file that grows between the length
     // check and the read still cannot pull more than cap+1 bytes in
-    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     use std::io::Read as _;
     let mut bytes = Vec::new();
     file.take(IMAGE_READ_CAP_BYTES + 1)
@@ -1547,14 +1557,20 @@ fn v2_or_err(state: &DesktopState) -> Result<&Arc<pulpit_v2::V2State>, String> {
 }
 
 #[tauri::command]
-fn list_devices(state: State<'_, DesktopState>) -> Result<Vec<DeviceInfo>, String> {
-    Ok(device_infos(&v2_or_err(&state)?.devices))
+async fn list_devices(state: State<'_, DesktopState>) -> Result<Vec<DeviceInfo>, String> {
+    let v2 = v2_or_err(&state)?.clone();
+    tauri::async_runtime::spawn_blocking(move || device_infos(&v2.devices))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn revoke_device(id: String, state: State<'_, DesktopState>) -> Result<bool, String> {
-    let v2 = v2_or_err(&state)?;
-    Ok(revoke_and_teardown(&v2.devices, &v2.hub, &id))
+async fn revoke_device(id: String, state: State<'_, DesktopState>) -> Result<bool, String> {
+    let v2 = v2_or_err(&state)?.clone();
+    // revoke persists devices.json (atomic write): off the worker
+    tauri::async_runtime::spawn_blocking(move || revoke_and_teardown(&v2.devices, &v2.hub, &id))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1859,7 +1875,7 @@ mod tests {
         // set_len extends without writing, so the test stays cheap
         file.set_len(IMAGE_READ_CAP_BYTES + 1).expect("extend");
         drop(file);
-        let err = read_image_data(path.to_string_lossy().into_owned()).expect_err("must refuse");
+        let err = read_image_data_blocking(&path.to_string_lossy()).expect_err("must refuse");
         assert!(err.contains("10 MiB"), "unexpected error: {err}");
         let _ = std::fs::remove_file(&path);
     }
@@ -1869,7 +1885,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("pulpit-image-small-{}.png", std::process::id()));
         std::fs::write(&path, b"not-really-png-bytes").expect("write temp file");
-        let url = read_image_data(path.to_string_lossy().into_owned()).expect("must read");
+        let url = read_image_data_blocking(&path.to_string_lossy()).expect("must read");
         assert!(url.starts_with("data:image/png;base64,"), "got: {url}");
         let _ = std::fs::remove_file(&path);
     }
@@ -1979,9 +1995,14 @@ async fn create_board(
     height: i64,
 ) -> Result<i64, String> {
     let backend = state.backend()?;
-    let id = backend
-        .create_board(&name, &background, width, height)
-        .map_err(|e| e.to_string())?;
+    // SQLite writes (and the multi-MB image payloads update_button can
+    // carry) run on the blocking pool, not the tauri async workers
+    let id = tauri::async_runtime::spawn_blocking(move || {
+        backend.create_board(&name, &background, width, height)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
     state.publish_board_set(id);
     Ok(id)
@@ -1990,16 +2011,23 @@ async fn create_board(
 #[tauri::command]
 async fn update_board(state: State<'_, DesktopState>, board: BoardRow) -> Result<(), String> {
     let backend = state.backend()?;
-    backend.update_board(&board).map_err(|e| e.to_string())?;
+    let board_id = board.id;
+    tauri::async_runtime::spawn_blocking(move || backend.update_board(&board))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
-    state.publish_board_set(board.id);
+    state.publish_board_set(board_id);
     Ok(())
 }
 
 #[tauri::command]
 async fn delete_board(state: State<'_, DesktopState>, board_id: i64) -> Result<(), String> {
     let backend = state.backend()?;
-    backend.delete_board(board_id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || backend.delete_board(board_id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
     state.publish_v2(vec![pulpit_proto::BoardOp::BoardRemove { board: board_id }]);
     Ok(())
@@ -2015,9 +2043,12 @@ async fn create_button(
     y: i64,
 ) -> Result<i64, String> {
     let backend = state.backend()?;
-    let id = backend
-        .create_button(board_id, &kind, &mode, x, y)
-        .map_err(|e| e.to_string())?;
+    let id = tauri::async_runtime::spawn_blocking(move || {
+        backend.create_button(board_id, &kind, &mode, x, y)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_tile_set(board_id, id);
     Ok(id)
@@ -2028,7 +2059,10 @@ async fn update_button(state: State<'_, DesktopState>, button: ButtonRow) -> Res
     let backend = state.backend()?;
     let board_id = button.board_id;
     let tile_id = button.id;
-    backend.update_button(&button).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || backend.update_button(&button))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_tile_set(board_id, tile_id);
     Ok(())
@@ -2045,8 +2079,9 @@ async fn move_button(
     h: i64,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    backend
-        .move_button(id, x, y, w, h)
+    tauri::async_runtime::spawn_blocking(move || backend.move_button(id, x, y, w, h))
+        .await
+        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_tile_set(board_id, id);
@@ -2060,7 +2095,10 @@ async fn delete_button(
     board_id: i64,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    backend.delete_button(id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || backend.delete_button(id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_v2(vec![pulpit_proto::BoardOp::TileRemove {
         board: board_id,
@@ -2072,7 +2110,10 @@ async fn delete_button(
 #[tauri::command]
 async fn clear_board(state: State<'_, DesktopState>, board_id: i64) -> Result<(), String> {
     let backend = state.backend()?;
-    backend.clear_board(board_id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || backend.clear_board(board_id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_v2(vec![pulpit_proto::BoardOp::TileClear { board: board_id }]);
     Ok(())
@@ -2332,22 +2373,28 @@ struct AidevStatusConfig {
 }
 
 #[tauri::command]
-fn aidev_status_config(state: State<'_, DesktopState>) -> Result<AidevStatusConfig, String> {
+async fn aidev_status_config(state: State<'_, DesktopState>) -> Result<AidevStatusConfig, String> {
     let path = state
         .aidev_config
-        .as_ref()
+        .clone()
         .ok_or_else(|| "Brak ścieżki konfiguracji aidev.".to_string())?;
-    let raw: serde_json::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::Value::Null);
-    let selection = aidev_status_selection(&raw);
-    Ok(AidevStatusConfig {
-        detected: pulpit_aidev::detected_rows(),
-        show: selection.show,
-        summary: selection.summary,
-        row_style: selection.row_style,
+    // the config read (and any provider detection) is file IO: run it
+    // off the main thread
+    tauri::async_runtime::spawn_blocking(move || {
+        let raw: serde_json::Value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let selection = aidev_status_selection(&raw);
+        Ok::<AidevStatusConfig, String>(AidevStatusConfig {
+            detected: pulpit_aidev::detected_rows(),
+            show: selection.show,
+            summary: selection.summary,
+            row_style: selection.row_style,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Persist the AI-usage tile settings to aidev.json (read-modify-write,
@@ -2378,12 +2425,15 @@ async fn export_boards(
     path: String,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    let data = tauri::async_runtime::spawn_blocking(move || backend.export_boards(&ids))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-    let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    // serialize + write can each walk multi-MB image payloads: keep
+    // both off the async workers
+    tauri::async_runtime::spawn_blocking(move || {
+        let data = backend.export_boards(&ids).map_err(|e| e.to_string())?;
+        let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+        std::fs::write(&path, json).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Hard cap on a `.boardjson` import (CORE-09): the path comes from the
