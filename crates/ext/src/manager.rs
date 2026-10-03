@@ -891,7 +891,9 @@ fn source_signature(path: &Path) -> Option<u64> {
 
 /// On-disk store of `CachedMeta`, so after the first run the manager can
 /// classify packages without evaluating any JS. Best-effort: an unreadable
-/// or missing cache only costs a probe.
+/// or missing cache only costs a probe. Lives under `<cache>/pulpit/`
+/// (the app's own name; earlier builds wrote `pulpit-server`, which is
+/// simply ignored - one re-probe after upgrading).
 struct MetadataCache {
     path: Option<PathBuf>,
     entries: HashMap<String, CachedMeta>,
@@ -900,7 +902,7 @@ struct MetadataCache {
 
 impl MetadataCache {
     fn load() -> Self {
-        let path = dirs::cache_dir().map(|d| d.join("pulpit-server").join("extmeta.json"));
+        let path = dirs::cache_dir().map(|d| d.join("pulpit").join("extmeta.json"));
         let entries = path
             .as_deref()
             .and_then(|p| std::fs::read(p).ok())
@@ -938,7 +940,9 @@ impl MetadataCache {
         }
         match serde_json::to_vec_pretty(&self.entries.values().collect::<Vec<_>>()) {
             Ok(bytes) => {
-                if let Err(e) = std::fs::write(path, bytes) {
+                // atomic (tmp + rename via the shared A5 helper): a crash
+                // mid-flush keeps the previous cache instead of a torn one
+                if let Err(e) = pulpit_db::write_atomic(path, &bytes) {
                     tracing::debug!(error = %e, "could not write extension metadata cache");
                 }
             }
