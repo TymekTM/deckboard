@@ -17,7 +17,7 @@ use pulpit_actions::EventSink;
 use pulpit_db::ButtonRow;
 use pulpit_proto::*;
 
-use crate::devices::{PairError, PAIR_CODE_TTL};
+use crate::devices::{PairError, Pairing};
 use crate::hub::V2Session;
 use crate::service::{Auth, V2State};
 use crate::state::{ext_channel, StateEngine};
@@ -346,13 +346,15 @@ async fn next_text(
 
 /// Asks the pairing trust gate about a fresh device, off the async
 /// workers (the gate may block on the operator). The wait is bounded by
-/// the pairing-code TTL; a timeout, a denied answer or a failed
-/// blocking dispatch all count as a denial.
-async fn approve_pairing(pairing: &Arc<crate::devices::Pairing>, name: &str) -> bool {
-    let pairing = pairing.clone();
+/// the pairing's code TTL (the same shrinkable timer the codes use); a
+/// timeout, a denied answer or a failed blocking dispatch all count as
+/// a denial.
+async fn approve_pairing(pairing: &Arc<Pairing>, name: &str) -> bool {
+    let wait = pairing.ttl();
     let name = name.to_string();
+    let pairing = pairing.clone();
     let ask = tokio::task::spawn_blocking(move || pairing.ask_trust(&name));
-    match tokio::time::timeout(PAIR_CODE_TTL, ask).await {
+    match tokio::time::timeout(wait, ask).await {
         Ok(Ok(approved)) => approved,
         Ok(Err(_)) | Err(_) => false,
     }
@@ -654,6 +656,22 @@ fn version_lt(client: &str, min: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pairing_wait_denies_after_the_ttl() {
+        // The gate answers "yes" - but only after the pairing's code TTL
+        // is spent: the desktop was unreachable, so the wait must deny
+        // (the TTL-expiry fallback, audit B2 step 6).
+        let pairing = crate::devices::Pairing::with_ttl(Duration::from_millis(50));
+        pairing.set_trust_gate(|_name| {
+            std::thread::sleep(Duration::from_millis(300));
+            true
+        });
+        assert!(
+            !approve_pairing(&std::sync::Arc::new(pairing), "Tablet salon").await,
+            "a gate that answers past the TTL is a denial"
+        );
+    }
 
     #[test]
     fn version_compare() {

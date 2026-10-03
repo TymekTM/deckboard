@@ -319,6 +319,13 @@ impl Pairing {
         }
     }
 
+    /// The pool's code TTL - also the bound for the trust-gate wait
+    /// (see [`Pairing::ask_trust`]); tests shrink it so the timeout is
+    /// observable without waiting.
+    pub(crate) fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
     /// Records one wrong-code attempt; `true` when the budget is spent.
     fn record_failed_attempt(&self) -> bool {
         let mut failures = self.failures.lock().expect("pairing poisoned");
