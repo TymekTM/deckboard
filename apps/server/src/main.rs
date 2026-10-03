@@ -30,6 +30,11 @@ impl pulpit_host::ClientFeed for HeadlessFeed {
     }
 }
 
+/// How long the shutdown goodbye waits for the session pumps to put the
+/// `server.shutdown` frame and the WS close on the wire before `main`
+/// returns and the process exits (mirrors the desktop's flush grace).
+const SHUTDOWN_FLUSH_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 // current_thread: the workload is a couple of tablets doing tiny async IO;
 // everything blocking (exec, sliders, extension JS, Discord, Voicemeeter)
 // already runs on spawn_blocking or dedicated extension threads, so the
@@ -190,10 +195,43 @@ async fn main() -> anyhow::Result<()> {
 
     // ConnectInfo is needed by the loopback guard on POST /v2/pair.
     let app = pulpit_legacy::router(state).merge(pulpit_v2::router(v2.clone()));
+
+    // A deliberate exit (Ctrl+C, service stop) must tell the v2 tablets:
+    // per protocol-v2.md §9 one server.shutdown frame beats a bare WS
+    // drop (NET-04) - a conforming client treats a drop as transient
+    // loss and would keep retrying into the void for minutes.
+    let v2_hub = v2.hub.clone();
+    let goodbye = async move {
+        wait_for_terminate().await;
+        tracing::info!("shutdown requested - saying goodbye to v2 tablets");
+        v2_hub.shutdown();
+        // the session pumps write the frame + close asynchronously; give
+        // them a beat before `main` returns and the process exits
+        tokio::time::sleep(SHUTDOWN_FLUSH_GRACE).await;
+    };
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(goodbye)
     .await?;
     Ok(())
+}
+
+/// Resolve on the process's termination signals: Ctrl+C everywhere,
+/// plus SIGTERM where it exists (service managers).
+async fn wait_for_terminate() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
