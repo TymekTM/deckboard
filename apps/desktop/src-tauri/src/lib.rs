@@ -19,11 +19,9 @@ struct DesktopState {
     port: u16,
     /// Loaded extensions, for the editor's action catalog and tile styling.
     ext: Option<Arc<ExtManager>>,
-    /// Protocol v2 pairing codes; `None` when the v2 stack failed to start
-    /// (bad devices.json or asset store) - the UI then hides pairing.
-    pairing: Option<Arc<pulpit_v2::Pairing>>,
     /// Protocol v2 state; `None` when the stack failed to start. Carries
-    /// the session fan-out for the shutdown goodbye and the delta
+    /// the session fan-out for the shutdown goodbye, the pairing pool
+    /// (codes + trust gate), the device registry and the delta
     /// publisher the editor's write path notifies after each commit.
     v2: Option<Arc<pulpit_v2::V2State>>,
     /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
@@ -287,7 +285,6 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             hub: None,
             ext: None,
             port,
-            pairing: None,
             v2: None,
             hotkey: std::sync::Mutex::new(DEFAULT_HOTKEY.to_string()),
             settings_path: None,
@@ -675,7 +672,6 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         hub: Some(hub),
         ext: Some(ext_manager),
         port,
-        pairing: v2.as_ref().map(|v| v.pairing.clone()),
         v2: v2.clone(),
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
