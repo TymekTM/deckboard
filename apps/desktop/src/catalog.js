@@ -475,8 +475,12 @@ export const STATE_BINDINGS = {
 // null = the live state is unknown (nothing pushed yet), so the tile keeps
 // its current visual state; otherwise boolean. Mirrors the original
 // ToggleButton isActive(): boolean state wins, arrays/strings compare
-// against the command payload. `cmd` is the pre-parsed tile.command - the
-// caller owns the parse (once per command change, not per call).
+// against the command payload when the binding names a field. Bindings
+// without a comparison field mean the pushed value itself carries the
+// state and follow the mobile isActiveValue (MOB-10): "ON"/"1" light the
+// second state, "OFF"/"0"/"" and every other push read inactive.
+// `cmd` is the pre-parsed tile.command - the caller owns the parse (once
+// per command change, not per call).
 export function stateActive(tile, cmd, customValues, typeMeta) {
   const binding = STATE_BINDINGS[tile.type];
   let value;
@@ -493,13 +497,26 @@ export function stateActive(tile, cmd, customValues, typeMeta) {
     return null;
   }
   // the command field to compare lives under `cmd` when the state key
-  // differs from it (obs-scene: activeScene vs command {scene: ...})
+  // differs from it (speaker-device: watched device id vs command
+  // {speaker: ...})
   const cmdValue = cmd[binding?.cmd || binding?.key];
   if (typeof value === "boolean") return value;
-  if (value == null || value === false || value === "") return null;
-  if (Array.isArray(value)) return value.includes(cmdValue);
-  if (typeof value === "string") return value === cmdValue;
-  return Boolean(value);
+  if (value == null) return null;
+  if (cmdValue !== undefined) {
+    // bound comparison: arrays/strings compare against the command
+    // payload, an emptied value reads unknown
+    if (value === false || value === "") return null;
+    if (Array.isArray(value)) return value.includes(cmdValue);
+    if (typeof value === "string") return value === cmdValue;
+    return Boolean(value);
+  }
+  // unbound (vol_mute, custom-value toggles): same push must light the
+  // tile on both surfaces, so mirror the mobile isActiveValue - only
+  // the strings "ON"/"1" count as active. Today's producers push
+  // booleans (speaker-muted) and ON/OFF strings (discord's
+  // _labelMuteDeaf); numbers/objects never represent toggle state.
+  if (typeof value === "string") return value === "ON" || value === "1";
+  return false;
 }
 
 // Grid geometry of the original editor: 96 px cell, 100 px row.
