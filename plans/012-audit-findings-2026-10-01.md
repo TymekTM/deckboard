@@ -548,12 +548,13 @@ still open here; E3's AGENTS.md part -> plan 011 (SUPERSEDED).
 | A1 | TODO (lane L2a in flight; A2 already landed, see below) |
 | A2 | DONE (`8627a7a`, lane L2a; table test 1..=24) |
 | A3 | DONE (`0f01c39`, lane L5; `claude_oauth_credentials` + fixture tests, fake tokens only) |
-| A4, A9 | TODO (lane L1, not dispatched yet) |
-| A5 | PARTIAL (helper `db::write_atomic` `83ad3d7` + discord site `14b1e63` landed; editor.json site, corrupt-file test, A6/A8 sites pending - lane L2b resumed) |
-| A6, A8 | TODO (lane L2b in flight) |
+| A4, A9 | TODO (lane L1 in flight) |
+| A5 | PARTIAL (helper `db::write_atomic` `83ad3d7` + discord site `14b1e63` landed; corrupt-file behavior landed with the discord site; editor.json site and hotkey-persistence site still open - editor.json to L2b leftovers, hotkey site handed to L1) |
+| A6 | DONE (`a31eb12`, lane L2b; `__fetch` stringifies, headers/timeout_ms honored, one-shot-server test through the Boa runtime) |
+| A8 | DONE (`48402e1`, lane L2b; `with_transaction` + veto-trigger rollback test; discord hardening separately in `d2dfc8f`: timeouts, 1 MiB frame cap, redacted secret Debug) |
 | A7 | TODO (lane L3, not dispatched yet) |
 | B1-B3 | TODO (B1 can never be DONE without a manual tablet test - NEEDS-MANUAL-TEST at best) |
-| C1-C5 | TODO |
+| C1-C5 | C1 DONE (`5b06bd0` v2 + `eb9f27d` legacy, lane L3); C2/E1 in flight (lane L3); C3 in flight (lane L2a); C4 PARTIAL (Rust import bounds `7ddfd76` + `pub const MAX_BOARD_DIM = 32` in `pulpit-backend`, lane L2b; desktop half lane L1, wire-builder clamp lane L3); C5 PARTIAL (db items DONE: staged resumable migration + WAL sidecars `54cea00`, lenient `map_board_row` `ad73047`, clean-install schema `1f79252`, lane L2b; style/field parity deferred to Wave 2) |
 | D1 (phantom tap only), D4 | TODO (lane L4 in flight) |
 | D2, D3 | SUPERSEDED by 006, 007 |
 | E1 | TODO (lane L3; required before Wave-2 C5) |
@@ -563,5 +564,9 @@ still open here; E3's AGENTS.md part -> plan 011 (SUPERSEDED).
 Lower-priority items: aidev antigravity varint (`eb0fd38`), codex tail
 reads + per-line continues (`4953a1e`), zai plaintext-http refusal
 (`eeb705e`), os PolicyConfig ABI (`ef35bed`), os set_active_device role
-loop (`5d1bfc3`) - DONE (lane L5). Remaining lower-priority: os
-clipboard/capture/MCI, sysinfo push_loop, actions/discord/ext/vm items.
+loop (`5d1bfc3`) - DONE (lane L5). Voicemeeter parameter validation
+(`6ea6c4f`) and discord timeouts/frame-cap/redacted Debug (`d2dfc8f`) -
+DONE (lane L2b). Remaining lower-priority: os clipboard/capture/MCI,
+sysinfo push_loop, ext manager (uncommitted draft in the L2b worktree:
+residence-lock fix, spawn timeout, nanos mtime signature), actions items
+(committed on lane L2a, pending merge).
