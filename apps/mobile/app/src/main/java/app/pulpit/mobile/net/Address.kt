@@ -14,10 +14,17 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
  *  The check parses the `http` form of the URL because that is exactly
  *  what OkHttp does internally: Request.Builder.url() rewrites
  *  ws/wss to http/https before HttpUrl parses the authority. */
-fun addressError(host: String, port: Int): String? = when {
-    host.isBlank() -> "enter the PC address"
-    port !in 1..65535 -> "port must be between 1 and 65535"
-    "http://$host:$port/v2/ws".toHttpUrlOrNull() == null ->
+fun addressError(host: String, port: Int): String? {
+    if (host.isBlank()) return "enter the PC address"
+    if (port !in 1..65535) return "port must be between 1 and 65535"
+    // parsing alone is not enough: "192.168.1.2/x" parses as host
+    // 192.168.1.2 with the port swallowed into the path, so the parsed
+    // authority must be exactly what was typed
+    val url = "http://$host:$port/v2/ws".toHttpUrlOrNull()
+    val typed = host.trim().removePrefix("[").removeSuffix("]")
+    return if (url == null || !url.host.equals(typed, ignoreCase = true) || url.port != port) {
         "\"$host\" is not a valid address"
-    else -> null
+    } else {
+        null
+    }
 }
