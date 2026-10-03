@@ -328,6 +328,9 @@ function stepTypeMeta(type) {
 // ---- image -----------------------------------------------------------------
 
 const imageError = ref("");
+// img/img2 never enter the dirty snapshot below (they are multi-MB base64
+// strings); pickImage is their only writer, so it flips this flag instead
+const imagesDirty = ref(false);
 async function pickImage(field) {
   const path = await open({
     multiple: false,
@@ -335,7 +338,9 @@ async function pickImage(field) {
   });
   if (!path) return;
   try {
-    form[field] = await api.readImageData(path);
+    const data = await api.readImageData(path);
+    if (data !== form[field]) imagesDirty.value = true;
+    form[field] = data;
   } catch (e) {
     imageError.value = String(e);
   }
@@ -355,16 +360,22 @@ function removeTile() {
 // an accidental click outside must not discard a configured tile. The
 // snapshot covers every writer: the form copy plus the command-mapping
 // reactives (fields, steps, boardId) that merge into form.command on save.
+// img/img2 are excluded - stringifying up to ~20 MB of base64 on every
+// keystroke stutters the dialog (DESK-04); those fields only change
+// through pickImage, which flips imagesDirty above.
 function formSnapshot() {
+  const plain = { ...form };
+  delete plain.img;
+  delete plain.img2;
   return JSON.stringify({
-    form: { ...form },
+    form: plain,
     fields: { ...fields },
     steps: steps.value,
     boardId: boardId.value,
   });
 }
 const initialSnapshot = formSnapshot();
-const dirty = computed(() => formSnapshot() !== initialSnapshot);
+const dirty = computed(() => formSnapshot() !== initialSnapshot || imagesDirty.value);
 
 function overlayClose() {
   if (!dirty.value) emit("close");
