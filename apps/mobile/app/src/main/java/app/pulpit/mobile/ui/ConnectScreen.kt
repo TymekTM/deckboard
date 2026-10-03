@@ -14,13 +14,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,9 +36,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import app.pulpit.mobile.net.ConnState
+import app.pulpit.mobile.net.DiscoveredDesktop
+import app.pulpit.mobile.net.NsdDiscovery
 import app.pulpit.mobile.state.PulpitViewModel
 
 @Composable
@@ -48,6 +55,26 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
     var name by remember(cfg.name) { mutableStateOf(cfg.name) }
     var pairCode by remember { mutableStateOf("") }
     val paired = !cfg.token.isNullOrBlank()
+
+    // M8 pairing modes: Auto (pick a desktop discovered over mDNS, both
+    // screens compare the verification code) and Manual (type the code
+    // the desktop minted) - the original flow stays for when discovery
+    // cannot see the desktop (firewall, other subnet).
+    var autoMode by remember { mutableStateOf(true) }
+    val discovered = remember { mutableStateListOf<DiscoveredDesktop>() }
+    val pairReq by vm.pairRequest.collectAsState()
+    DisposableEffect(autoMode, paired) {
+        val nsd = if (autoMode && !paired) {
+            NsdDiscovery(context) { found ->
+                if (discovered.none { it.host == found.host && it.port == found.port }) {
+                    discovered.add(found)
+                }
+            }.also { it.start() }
+        } else {
+            null
+        }
+        onDispose { nsd?.stop() }
+    }
 
     Column(
         Modifier
@@ -125,26 +152,85 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
                 onClick = { vm.forgetPairing() },
             )
         } else {
-            OutlinedTextField(
-                value = pairCode,
-                onValueChange = { pairCode = it.uppercase().filter { c -> c.isLetterOrDigit() }.take(8) },
-                label = { Text("Pairing code (desktop: \"Dodaj urządzenie\")") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-            )
-            // USB path (ROADMAP M4): with the desktop reachable over adb
-            // reverse, the server answers on the phone's own loopback.
-            TextButton(
-                text = "Przez USB (adb reverse) - wstaw 127.0.0.1",
-                onClick = { host = "127.0.0.1" },
-            )
-            Text(
-                text = "na PC: adb reverse tcp:8500 tcp:8500",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.5f),
-                modifier = Modifier.padding(top = 4.dp),
-            )
+            // M8 pairing modes: Auto discovers desktops on the network and
+            // finishes with the shared verification code; Manual keeps the
+            // desktop-minted code entry.
+            Row(Modifier.fillMaxWidth().padding(top = 12.dp)) {
+                Button(
+                    onClick = { autoMode = true },
+                    colors = if (autoMode) ButtonDefaults.buttonColors() else ButtonDefaults.outlinedButtonColors(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("Auto (w sieci)") }
+                OutlinedButton(
+                    onClick = { autoMode = false },
+                    modifier = Modifier.weight(1f).padding(start = 8.dp),
+                ) { Text("Ręcznie (kod)") }
+            }
+
+            val waiting = pairReq
+            if (autoMode) {
+                if (waiting != null) {
+                    // both screens show this number; pairing completes only
+                    // when the desktop operator confirms the match
+                    Text(
+                        text = waiting.code,
+                        style = MaterialTheme.typography.displayMedium,
+                        color = Color.White,
+                        modifier = Modifier.padding(top = 16.dp),
+                    )
+                    Text(
+                        text = "Potwierdź na komputerze, że kody są zgodne...",
+                        color = Color.White.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                    OutlinedButton(
+                        onClick = { vm.cancelPairRequest() },
+                        modifier = Modifier.padding(top = 8.dp),
+                    ) { Text("Przerwij") }
+                } else if (discovered.isEmpty()) {
+                    Text(
+                        text = "Szukam komputerów w sieci... (upewnij się, że Pulpit działa)",
+                        color = Color.White.copy(alpha = 0.6f),
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                } else {
+                    discovered.forEach { desktop ->
+                        Button(
+                            onClick = {
+                                vm.startPairRequest(
+                                    desktop.host,
+                                    desktop.port,
+                                    name.ifBlank { Build.MODEL },
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        ) {
+                            Text("${desktop.name}  (${desktop.host}:${desktop.port})")
+                        }
+                    }
+                }
+            } else {
+                OutlinedTextField(
+                    value = pairCode,
+                    onValueChange = { pairCode = it.uppercase().filter { c -> c.isLetterOrDigit() }.take(8) },
+                    label = { Text("Pairing code (desktop: \"Dodaj urządzenie\")") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+                // USB path (ROADMAP M4): with the desktop reachable over adb
+                // reverse, the server answers on the phone's own loopback.
+                TextButton(
+                    text = "Przez USB (adb reverse) - wstaw 127.0.0.1",
+                    onClick = { host = "127.0.0.1" },
+                )
+                Text(
+                    text = "na PC: adb reverse tcp:8500 tcp:8500",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
         }
 
         when (conn) {
@@ -172,21 +258,26 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
             else -> {}
         }
 
-        Button(
-            onClick = {
-                vm.saveConfig(
-                    cfg.copy(host = host.trim(), port = port.toIntOrNull() ?: 8500, name = name.trim()),
-                )
-                if (paired) {
-                    vm.connect()
-                } else {
-                    vm.connectWithPairCode(pairCode)
-                }
-                onConnected()
-            },
-            modifier = Modifier.padding(top = 16.dp).fillMaxWidth(),
-        ) {
-            Text(if (paired) "Connect" else "Pair")
+        if (!paired && autoMode) {
+            // the auto flow is self-contained: picking a desktop starts
+            // the request and approval connects on its own
+        } else {
+            Button(
+                onClick = {
+                    vm.saveConfig(
+                        cfg.copy(host = host.trim(), port = port.toIntOrNull() ?: 8500, name = name.trim()),
+                    )
+                    if (paired) {
+                        vm.connect()
+                    } else {
+                        vm.connectWithPairCode(pairCode)
+                    }
+                    onConnected()
+                },
+                modifier = Modifier.padding(top = 16.dp).fillMaxWidth(),
+            ) {
+                Text(if (paired) "Connect" else "Pair")
+            }
         }
     }
 }

@@ -156,3 +156,24 @@ bounds robustness, not trust: per-call HTTP timeouts, load/dispatch
 timeouts for wedged packages, private per-open extraction dirs. If a
 third-party extension marketplace or sideloaded-package sharing ever
 lands, revisit with a permission model before that - not after.
+
+## ADR-013: Discovery pairs like Bluetooth, manual stays (M8)
+
+Status: accepted (2026-10-03, plan 014)
+
+Tablets should not need a keyboard to type an IP, but automatic
+pairing must never mean silent pairing. The desktop advertises
+`_pulpit._tcp` over mDNS (pure-Rust mdns-sd, no system mDNS
+dependency; TXT carries proto=v2 + version) and a tablet browses
+with Android NsdManager. Pairing from discovery is numeric
+comparison: the tablet POSTs /v2/pair-request, the server mints the
+ordinary one-time code, and the SAME verification code shows on both
+screens; a human on each side confirms (desktop gate dialog, tablet
+poll). The pre-approval is single-use and burns with the code, so the
+ordinary pairing path stays the only way a device token is minted.
+Manual pairing (desktop mints a code, tablet types it, trust dialog)
+remains for networks where mDNS does not traverse, and several
+desktops/tablets may coexist - discovery is multi-instance by
+nature, pairing is always pairwise and operator-gated. Loopback
+callers cannot use the request endpoint (the desktop has its own
+UI), and browser origins are refused as everywhere else (B1).

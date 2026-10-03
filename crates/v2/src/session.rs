@@ -216,7 +216,7 @@ async fn run_session(
                 // prompt denies once the code would have expired anyway.
                 // A denial rejects the hello; the one-time code is
                 // already burned, so a retry needs a fresh code.
-                if !approve_pairing(&state.pairing, &name).await {
+                if !approve_pairing(&state.pairing, &name, &code).await {
                     tracing::warn!(session = session.id, name = %name, "pairing denied on the desktop");
                     session.send_frame(&error_ack(
                         &frame,
@@ -356,7 +356,13 @@ async fn next_text(
 /// the pairing's code TTL (the same shrinkable timer the codes use); a
 /// timeout, a denied answer or a failed blocking dispatch all count as
 /// a denial.
-async fn approve_pairing(pairing: &Arc<Pairing>, name: &str) -> bool {
+async fn approve_pairing(pairing: &Arc<Pairing>, name: &str, code: &str) -> bool {
+    // M8 Bluetooth-style requests arrive pre-approved: the operator just
+    // confirmed the dialog carrying this very code. Single-use, so a
+    // replayed code cannot mint a second device.
+    if pairing.take_pre_approved(code) {
+        return true;
+    }
     let wait = pairing.ttl();
     let name = name.to_string();
     let pairing = pairing.clone();
@@ -635,7 +641,7 @@ fn exec_blocking(
 /// Device names from `hello.name`: untrusted client input that ends up
 /// in logs, the registry and the desktop device list - trimmed,
 /// control-character-free, capped, `None` when nothing usable remains.
-fn sanitize_device_name(raw: Option<&str>) -> Option<String> {
+pub(crate) fn sanitize_device_name(raw: Option<&str>) -> Option<String> {
     let name: String = raw
         .unwrap_or("")
         .chars()
@@ -685,7 +691,7 @@ mod tests {
             true
         });
         assert!(
-            !approve_pairing(&std::sync::Arc::new(pairing), "Tablet salon").await,
+            !approve_pairing(&std::sync::Arc::new(pairing), "Tablet salon", "CODE1234").await,
             "a gate that answers past the TTL is a denial"
         );
     }

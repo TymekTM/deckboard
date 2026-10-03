@@ -223,6 +223,11 @@ pub enum PairError {
 /// name in, trust out. Blocking by contract - see [`Pairing::ask_trust`].
 type TrustGate = dyn Fn(&str) -> bool + Send + Sync;
 
+/// M8 pair-request gate: the desktop decides on a Bluetooth-style
+/// request, receiving the device name AND the verification code both
+/// screens display.
+type PairRequestGate = dyn Fn(&str, &str) -> bool + Send + Sync;
+
 /// In-memory pool of live one-time codes. Codes burn on use, valid or not:
 /// a second connection attempt with the same code always fails. A burst
 /// of wrong codes (a guessing client) burns every outstanding code.
@@ -241,6 +246,13 @@ pub struct Pairing {
     /// The fresh-pairing approval gate; `None` (headless builds, tests)
     /// keeps the pre-UI auto-accept behavior, with its warning log.
     trust: std::sync::Mutex<Option<std::sync::Arc<TrustGate>>>,
+    /// Codes pre-approved by the M8 pair-request flow (the operator just
+    /// confirmed a dialog carrying this very code, so the hello path
+    /// must not ask again). Single-use; burned on any consume attempt.
+    pre_approved: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The M8 pair-request operator gate: `(name, code) -> bool`. The
+    /// code is the verification number shown on BOTH screens.
+    request_gate: std::sync::Mutex<Option<std::sync::Arc<PairRequestGate>>>,
 }
 
 impl Pairing {
@@ -299,6 +311,13 @@ impl Pairing {
         match outcome {
             Ok(()) => {
                 codes.remove(code);
+                // any consume attempt burns the M8 pre-approval too: a
+                // failed exchange cannot leave it attached to a guessable
+                // value
+                self.pre_approved
+                    .lock()
+                    .expect("pairing poisoned")
+                    .remove(code);
                 Ok(())
             }
             Err(PairError::Invalid) => {
@@ -359,6 +378,121 @@ impl Pairing {
             }
         }
     }
+
+    /// Installs the M8 pair-request gate (desktop startup; headless
+    /// builds auto-accept, like [`Pairing::ask_trust`]). Receives the
+    /// device name and the verification code both screens show.
+    pub fn set_pair_request_gate<F>(&self, gate: F)
+    where
+        F: Fn(&str, &str) -> bool + Send + Sync + 'static,
+    {
+        *self.request_gate.lock().expect("pairing poisoned") = Some(std::sync::Arc::new(gate));
+    }
+
+    pub fn request_gate(&self) -> Option<std::sync::Arc<PairRequestGate>> {
+        self.request_gate.lock().expect("pairing poisoned").clone()
+    }
+
+    /// Marks a code as already operator-approved (M8 pair-request flow):
+    /// the hello that consumes it skips the trust dialog. Single-use.
+    pub fn pre_approve(&self, code: &str) {
+        self.pre_approved
+            .lock()
+            .expect("pairing poisoned")
+            .insert(code.to_string());
+    }
+
+    /// Consumes a pre-approval; `false` when the code was not one.
+    pub fn take_pre_approved(&self, code: &str) -> bool {
+        self.pre_approved
+            .lock()
+            .expect("pairing poisoned")
+            .remove(code)
+    }
+}
+
+/// M8 Bluetooth-style pairing requests (plan 014): the tablet posts a
+/// request, the desktop shows a dialog carrying the verification code
+/// (the tablet shows the same code from the POST response), the tablet
+/// polls until the operator decides. One live request at a time - a
+/// second attempt while one is open reads as a conflict, which also
+/// caps dialog-spam from a rogue LAN client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairDecision {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+pub struct PairRequest {
+    pub id: String,
+    pub code: String,
+    pub name: String,
+    created: Instant,
+    decision: std::sync::Mutex<PairDecision>,
+}
+
+impl PairRequest {
+    pub fn decision(&self) -> PairDecision {
+        *self.decision.lock().expect("pair request poisoned")
+    }
+
+    pub fn set_decision(&self, decision: PairDecision) {
+        *self.decision.lock().expect("pair request poisoned") = decision;
+    }
+
+    pub fn age(&self) -> Duration {
+        self.created.elapsed()
+    }
+}
+
+#[derive(Default)]
+pub struct PairRequests {
+    current: std::sync::Mutex<Option<std::sync::Arc<PairRequest>>>,
+}
+
+impl PairRequests {
+    /// Registers a new request; `None` when one is already live (the
+    /// caller answers HTTP 409).
+    pub fn begin(
+        &self,
+        id: String,
+        code: String,
+        name: String,
+    ) -> Option<std::sync::Arc<PairRequest>> {
+        let mut current = self.current.lock().expect("pair requests poisoned");
+        if let Some(existing) = current.as_ref() {
+            if existing.age() < PAIR_CODE_TTL {
+                return None;
+            }
+        }
+        let request = std::sync::Arc::new(PairRequest {
+            id,
+            code,
+            name,
+            created: Instant::now(),
+            decision: std::sync::Mutex::new(PairDecision::Pending),
+        });
+        *current = Some(request.clone());
+        Some(request)
+    }
+
+    pub fn get(&self, id: &str) -> Option<std::sync::Arc<PairRequest>> {
+        self.current
+            .lock()
+            .expect("pair requests poisoned")
+            .clone()
+            .filter(|request| request.id == id)
+    }
+
+    /// Drops the entry (after a terminal decision was polled, or on
+    /// expiry) so the next request can start immediately.
+    pub fn reset(&self, id: &str) {
+        let mut current = self.current.lock().expect("pair requests poisoned");
+        if current.as_ref().is_some_and(|r| r.id == id) {
+            *current = None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -374,6 +508,71 @@ mod tests {
         assert_eq!(pairing.consume(&code), Ok(()));
         assert_eq!(pairing.consume(&code), Err(PairError::Invalid));
         assert_eq!(pairing.consume("NOPE2345"), Err(PairError::Invalid));
+    }
+
+    #[test]
+    fn pre_approval_is_single_use_and_burns_with_the_code() {
+        let pairing = Pairing::new();
+        let code = pairing.new_code();
+        assert!(!pairing.take_pre_approved(&code));
+        pairing.pre_approve(&code);
+        assert!(pairing.take_pre_approved(&code));
+        // second take: already consumed - a replayed code is not pre-approved
+        assert!(!pairing.take_pre_approved(&code));
+        // any consume attempt burns the pre-approval too
+        pairing.pre_approve(&code);
+        assert_eq!(pairing.consume(&code), Ok(()));
+        assert!(!pairing.take_pre_approved(&code));
+    }
+
+    #[test]
+    fn pair_requests_are_one_at_a_time_until_resolved() {
+        let requests = PairRequests::default();
+        let first = requests
+            .begin("r1".into(), "CODE1".into(), "Tab".into())
+            .expect("begin");
+        assert!(
+            requests
+                .begin("r2".into(), "CODE2".into(), "Tab".into())
+                .is_none(),
+            "a second live request is a conflict"
+        );
+        assert_eq!(first.decision(), PairDecision::Pending);
+        first.set_decision(PairDecision::Approved);
+        assert_eq!(
+            requests.get("r1").unwrap().decision(),
+            PairDecision::Approved
+        );
+        assert!(requests.get("nope").is_none());
+        // a polled terminal decision frees the slot
+        requests.reset("r1");
+        assert!(requests.get("r1").is_none());
+        assert!(requests
+            .begin("r3".into(), "CODE3".into(), "Tab".into())
+            .is_some());
+    }
+
+    #[test]
+    fn pair_request_gate_receives_name_and_code() {
+        let pairing = Pairing::new();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        pairing.set_pair_request_gate(move |name, code| {
+            seen2
+                .lock()
+                .unwrap()
+                .push((name.to_string(), code.to_string()));
+            true
+        });
+        let code = pairing.new_code();
+        let gate = pairing.request_gate().expect("gate installed");
+        assert!(gate("Tablet", &code));
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [("Tablet".to_string(), code.clone())]
+        );
+        // headless builds install nothing: the auto-accept path
+        assert!(Pairing::new().request_gate().is_none());
     }
 
     #[test]

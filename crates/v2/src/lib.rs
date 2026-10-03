@@ -6,6 +6,7 @@
 mod assets;
 pub mod boards;
 mod devices;
+pub mod discovery;
 mod hub;
 mod service;
 mod session;

@@ -185,6 +185,7 @@ fn test_state_with_pairing(
         engine: Arc::new(StateEngine::new(120)),
         generation: Generation::starting_at(1),
         boards_cache: Default::default(),
+        pair_requests: Default::default(),
         config,
     });
     (state, dir)

@@ -145,6 +145,30 @@ After `welcome` the server immediately pushes `boards.sync` and then
 `state.sync` (sections 4-5). There is no client-pull variant; a confused
 client reconnects.
 
+### Pair-request (M8, Bluetooth-style)
+
+For a tablet that discovered the desktop over mDNS (`_pulpit._tcp.`,
+advertised while the server runs; TXT `proto=v2`, `version`, `host`):
+
+1. `POST /v2/pair-request` `{"name": "SM-T561"}` - LAN only, loopback is
+   refused (the desktop has its own dialog), browser `Origin` refused
+   like everywhere (B1). One request may be live at a time (else `409`).
+   The response carries the **verification code**
+   `{"request_id", "code", "expires_in_secs"}` - the tablet displays it.
+2. The desktop shows its gate dialog with the SAME code
+   (`pairing.set_pair_request_gate`); approving marks the code
+   pre-approved (single-use), denying sets a rejection.
+3. The tablet polls `GET /v2/pair-request/:id` -
+   `{"status": "pending" | "approved" | "rejected" | "expired"}`.
+   On `approved` it opens `/v2/ws?pair=<code>` + `hello` as usual; the
+   pre-approval replaces the operator dialog on that path, the code
+   burns, the token is issued in `welcome.token`.
+
+The verification code is a numeric-comparison: pairing completes only
+when the same number is visible on both screens and a human on each side
+proceeds. Headless builds (no gate) auto-accept with a warning log.
+Manual pairing (desktop mints, tablet types) keeps working unchanged.
+
 ## 4. Boards
 
 Boards are data. One board:

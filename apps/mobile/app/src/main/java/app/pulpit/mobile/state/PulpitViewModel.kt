@@ -18,6 +18,8 @@ import app.pulpit.mobile.LinkService
 import app.pulpit.mobile.net.ConnState
 import app.pulpit.mobile.net.V2Client
 import app.pulpit.mobile.net.V2Event
+import app.pulpit.mobile.net.createPairRequest
+import app.pulpit.mobile.net.pairRequestStatus
 import app.pulpit.mobile.proto.Board
 import app.pulpit.mobile.proto.ChannelInfo
 import app.pulpit.mobile.proto.BoardOp
@@ -148,6 +150,90 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     private val _channelMeta =
         MutableStateFlow<Map<String, ChannelInfo>>(emptyMap())
     val channelMeta: StateFlow<Map<String, ChannelInfo>> = _channelMeta
+
+    // -- M8 discovery pairing (Bluetooth-style, plan 014) -------------------
+
+    /** Live pair-request: the verification code both screens show, plus
+     *  where the request went. */
+    data class PairRequestUi(
+        val host: String,
+        val port: Int,
+        val code: String,
+    )
+
+    private val _pairRequest = MutableStateFlow<PairRequestUi?>(null)
+    val pairRequest: StateFlow<PairRequestUi?> = _pairRequest
+
+    /** Asks a discovered desktop to pair. The desktop shows its dialog
+     *  with the same code; this polls until the operator decides and
+     *  then finishes through the ordinary pairing path (pre-approved
+     *  server-side, so no second dialog). */
+    fun startPairRequest(host: String, port: Int, deviceName: String) {
+        if (_pairRequest.value != null) return
+        scope.launch {
+            try {
+                val created = createPairRequest(sharedHttp, host, port, deviceName)
+                _pairRequest.value = PairRequestUi(host, port, created.code)
+                pollPairDecision(host, port, created.request_id, created.expires_in_secs)
+            } catch (e: Exception) {
+                _pairRequest.value = null
+                _connState.value = ConnState.Failed(
+                    e.message ?: "żądanie parowania nie powiodło się",
+                    retryable = false,
+                )
+            }
+        }
+    }
+
+    /** Leaves the waiting state without touching the desktop (its dialog
+     *  still resolves on its own; the unanswered request expires). */
+    fun cancelPairRequest() {
+        _pairRequest.value = null
+    }
+
+    private suspend fun pollPairDecision(host: String, port: Int, id: String, ttlSecs: Long) {
+        val deadline = System.currentTimeMillis() + (ttlSecs + 5) * 1000
+        while (System.currentTimeMillis() < deadline) {
+            delay(2000)
+            val status = try {
+                pairRequestStatus(sharedHttp, host, port, id)
+            } catch (_: Exception) {
+                continue
+            }
+            when (status) {
+                "approved" -> {
+                    val ui = _pairRequest.value
+                    _pairRequest.value = null
+                    if (ui != null) {
+                        withContext(Dispatchers.Main.immediate) {
+                            saveConfig(_config.value.copy(host = ui.host, port = ui.port))
+                            connectWithPairCode(ui.code)
+                        }
+                    }
+                    return
+                }
+                "rejected" -> {
+                    _pairRequest.value = null
+                    _connState.value =
+                        ConnState.Failed("komputer odrzucił parowanie", retryable = false)
+                    return
+                }
+                "expired" -> {
+                    _pairRequest.value = null
+                    _connState.value = ConnState.Failed(
+                        "żądanie wygasło - uruchom parowanie ponownie",
+                        retryable = false,
+                    )
+                    return
+                }
+            }
+        }
+        if (_pairRequest.value != null) {
+            _pairRequest.value = null
+            _connState.value =
+                ConnState.Failed("komputer nie odpowiedział w czasie", retryable = false)
+        }
+    }
 
     init {
         // A paired device reconnects on its own; pairing needs the user

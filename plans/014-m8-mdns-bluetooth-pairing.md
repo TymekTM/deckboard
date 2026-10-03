@@ -1,6 +1,8 @@
 # 014 - M8 discovery: Bluetooth-style pairing (owner spec, 2026-10-03)
 
-Status: DESIGNED, not started. Owner's words, structured.
+Status: SHIPPED (desktop advertisement + pair-request endpoints + gate
+dialog with the verification code; tablet NsdManager browse + Auto/Manual
+mode switch + poll-until-paired; ADR-013). Manual mode unchanged.
 
 Both devices declare that they are open/looking. When they find each
 other, a verification code shows on BOTH sides and each side confirms

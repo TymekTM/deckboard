@@ -15,6 +15,8 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 futures-util = { workspace = true }
+mdns-sd = "0.21"
+hostname = "0.4"
 pulpit-proto = { path = "../proto" }
 pulpit-db = { path = "../db" }
 pulpit-actions = { path = "../actions" }

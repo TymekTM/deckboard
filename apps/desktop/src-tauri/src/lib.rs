@@ -370,6 +370,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                     engine: feed_v2.clone(),
                     generation: pulpit_v2::Generation::starting_at(1),
                     boards_cache: Default::default(),
+                    pair_requests: Default::default(),
                     config: pulpit_v2::V2Config {
                         public_port: port,
                         ..Default::default()
@@ -392,6 +393,22 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         let app = app.clone();
         v2.pairing
             .set_trust_gate(move |name| trust_dialog(&app, name));
+    }
+    // M8 Bluetooth-style pair-requests (plan 014): a tablet that found us
+    // over mDNS asks to pair; the dialog shows the verification code the
+    // tablet is displaying too - pairing completes only when the numbers
+    // match and the operator confirms.
+    if let Some(v2) = &v2 {
+        let app = app.clone();
+        v2.pairing
+            .set_pair_request_gate(move |name, code| pair_request_dialog(&app, name, code));
+    }
+    // M8 discovery: announce the server on mDNS so tablets can find it
+    // without typing an address. Failure is non-fatal (manual pairing
+    // keeps working); the handle stays alive for the process lifetime.
+    match pulpit_v2::discovery::advertise(port, env!("CARGO_PKG_VERSION")) {
+        Ok(discovery) => std::mem::forget(discovery),
+        Err(e) => tracing::warn!("mDNS advertisement failed: {e}"),
     }
     // v2 background task: coalesced state patches.
     if let Some(v2) = &v2 {
@@ -1183,6 +1200,26 @@ fn trust_dialog(app: &AppHandle, name: &str) -> bool {
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Trust".into(),
             "Deny".into(),
+        ))
+        .blocking_show()
+}
+
+/// M8 Bluetooth-style pairing (plan 014): both screens show the same
+/// verification code; pairing completes only on an explicit confirm.
+/// Denying - or leaving the dialog unanswered past the code TTL -
+/// rejects the request and the tablet's poll turns into a rejection.
+fn pair_request_dialog(app: &AppHandle, name: &str, code: &str) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    tracing::info!(name = %name, "pair-request: asking the operator to compare codes");
+    app.dialog()
+        .message(format!(
+            "\"{name}\" chce połączyć się z Pulpitem.\n\nKod weryfikacyjny: {code}\n\nZgadza się z kodem na tablecie? Odrzucenie - lub brak odpowiedzi do wygaśnięcia żądania - odrzuca parowanie."
+        ))
+        .title("Żądanie parowania")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Zaufaj".into(),
+            "Odrzuć".into(),
         ))
         .blocking_show()
 }

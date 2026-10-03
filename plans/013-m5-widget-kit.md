@@ -1,6 +1,9 @@
 # 013 - M5 widget kit (capabilities + custom gestures)
 
-Status: IN PROGRESS (2026-10-03)
+Status: SHIPPED (2026-10-03, commit `1bc074d`). Live: tablet sends caps
+in hello; server-side caps log + welcome echo verified after the M5
+desktop deploy. Gesture authoring is hand-edited options JSON / a
+`.boardjson` import until the editor grows UI for it.
 
 ROADMAP M5: "knob/list/graph/interactive templates, custom gestures,
 widget manifest + client capabilities negotiation". Knob/list/graph
