@@ -395,8 +395,11 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
      *  When encryption fails (broken keystore) nothing is persisted -
      *  plaintext at rest is what ADR-008 forbids - and the caller's
      *  in-memory token keeps the current session alive; the device
-     *  re-pairs after a restart. Never logs token material. */
-    private fun storeToken(token: String?) {
+     *  re-pairs after a restart. Never logs token material. Writes
+     *  synchronously (commit, not apply): losing a freshly minted
+     *  pairing to a process kill right after install would force a
+     *  pointless re-pair. */
+    private fun storeToken(token: String?): Boolean {
         val editor = prefs.edit()
         val envelope = token?.let { t ->
             tokenCipher.encrypt(t)?.let { (iv, data) -> encodeEnvelope(iv, data) }
@@ -411,16 +414,22 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             editor.putString("token", envelope)
         }
-        editor.apply()
+        return editor.commit()
     }
 
     fun saveConfig(cfg: ServerConfig) {
-        storeToken(cfg.token)
-        prefs.edit()
+        val tokenStored = storeToken(cfg.token)
+        if (!tokenStored) {
+            Plog.w(TAG, "config write failed - pairing not persisted")
+        }
+        val ok = prefs.edit()
             .putString("host", cfg.host)
             .putInt("port", cfg.port)
             .putString("name", cfg.name)
-            .apply()
+            .commit()
+        if (!ok) {
+            Plog.w(TAG, "config write failed - host/port/name not persisted")
+        }
         _config.value = cfg
     }
 

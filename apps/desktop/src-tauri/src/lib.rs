@@ -392,7 +392,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     if let Some(v2) = &v2 {
         let app = app.clone();
         v2.pairing
-            .set_trust_gate(move |name| trust_dialog(&app, name));
+            .set_trust_gate(move |name| trust_dialog(&app, name.to_string()));
     }
     // M8 Bluetooth-style pair-requests (plan 014): a tablet that found us
     // over mDNS asks to pair; the dialog shows the verification code the
@@ -400,8 +400,9 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // match and the operator confirms.
     if let Some(v2) = &v2 {
         let app = app.clone();
-        v2.pairing
-            .set_pair_request_gate(move |name, code| pair_request_dialog(&app, name, code));
+        v2.pairing.set_pair_request_gate(move |name, code| {
+            pair_request_dialog(&app, name.to_string(), code.to_string())
+        });
     }
     // M8 discovery: announce the server on mDNS so tablets can find it
     // without typing an address. Failure is non-fatal (manual pairing
@@ -1186,42 +1187,74 @@ fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, S
 /// session's blocking thread, so the wait costs no socket-loop time; the
 /// caller bounds the wait by the pairing-code TTL and drops a late
 /// answer (the one-time code is burned - a retry needs a fresh one).
-fn trust_dialog(app: &AppHandle, name: &str) -> bool {
+fn trust_dialog(app: &AppHandle, name: String) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     tracing::info!(name = %name, "asking the operator to trust a new pairing");
-    app.dialog()
-        .message(format!(
-            "\"{name}\" wants to connect to Pulpit.\n\nTrust this device? Denying - or leaving \
-             this dialog unanswered until the code expires - rejects the pairing; the tablet can \
-             retry with a fresh code."
-        ))
-        .title("New tablet")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Trust".into(),
-            "Deny".into(),
-        ))
-        .blocking_show()
+    dialog_on_main_thread(app, move |app| {
+        app.dialog()
+            .message(format!(
+                "\"{name}\" wants to connect to Pulpit.\n\nTrust this device? Denying - or leaving \
+                 this dialog unanswered until the code expires - rejects the pairing; the tablet can \
+                 retry with a fresh code."
+            ))
+            .title("New tablet")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Trust".into(),
+                "Deny".into(),
+            ))
+    })
 }
 
 /// M8 Bluetooth-style pairing (plan 014): both screens show the same
 /// verification code; pairing completes only on an explicit confirm.
 /// Denying - or leaving the dialog unanswered past the code TTL -
 /// rejects the request and the tablet's poll turns into a rejection.
-fn pair_request_dialog(app: &AppHandle, name: &str, code: &str) -> bool {
+fn pair_request_dialog(app: &AppHandle, name: String, code: String) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     tracing::info!(name = %name, "pair-request: asking the operator to compare codes");
-    app.dialog()
-        .message(format!(
-            "\"{name}\" chce połączyć się z Pulpitem.\n\nKod weryfikacyjny: {code}\n\nZgadza się z kodem na tablecie? Odrzucenie - lub brak odpowiedzi do wygaśnięcia żądania - odrzuca parowanie."
-        ))
-        .title("Żądanie parowania")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Zaufaj".into(),
-            "Odrzuć".into(),
-        ))
-        .blocking_show()
+    dialog_on_main_thread(app, move |app| {
+        app.dialog()
+            .message(format!(
+                "\"{name}\" chce połączyć się z Pulpitem.\n\nKod weryfikacyjny: {code}\n\nZgadza się z kodem na tablecie? Odrzucenie - lub brak odpowiedzi do wygaśnięcia żądania - odrzuca parowanie."
+            ))
+            .title("Żądanie parowania")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Zaufaj".into(),
+                "Odrzuć".into(),
+            ))
+    })
+}
+
+/// The gate dialogs are answered from worker threads (spawn_blocking),
+/// and `blocking_show` is unreliable there - on Windows it can return
+/// without ever showing a window, which reads as an accidental APPROVE.
+/// The safe pattern: dispatch the dialog to the main thread with the
+/// non-blocking `show`, and park the worker on a channel until the
+/// operator answers. The callers bound the wait by the pairing TTL.
+fn dialog_on_main_thread(
+    app: &AppHandle,
+    build: impl FnOnce(&AppHandle) -> tauri_plugin_dialog::MessageDialogBuilder<tauri::Wry>
+        + Send
+        + 'static,
+) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = app.clone();
+    let dispatch = app.run_on_main_thread(move || {
+        let builder = build(&handle);
+        builder.show(move |approved| {
+            let _ = tx.send(approved);
+        });
+    });
+    match dispatch {
+        Ok(()) => rx.recv().unwrap_or(false),
+        // no main loop to answer on (headless/test): deny, never approve
+        Err(e) => {
+            tracing::warn!(error = %e, "dialog dispatch failed - denying");
+            false
+        }
+    }
 }
 
 /// A paired device for the settings UI: registry metadata only - no
