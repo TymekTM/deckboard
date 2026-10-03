@@ -19,11 +19,9 @@ struct DesktopState {
     port: u16,
     /// Loaded extensions, for the editor's action catalog and tile styling.
     ext: Option<Arc<ExtManager>>,
-    /// Protocol v2 pairing codes; `None` when the v2 stack failed to start
-    /// (bad devices.json or asset store) - the UI then hides pairing.
-    pairing: Option<Arc<pulpit_v2::Pairing>>,
     /// Protocol v2 state; `None` when the stack failed to start. Carries
-    /// the session fan-out for the shutdown goodbye and the delta
+    /// the session fan-out for the shutdown goodbye, the pairing pool
+    /// (codes + trust gate), the device registry and the delta
     /// publisher the editor's write path notifies after each commit.
     v2: Option<Arc<pulpit_v2::V2State>>,
     /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
@@ -188,6 +186,8 @@ pub fn run() {
             list_known_inputs,
             list_lan_addresses,
             create_pairing_code,
+            list_devices,
+            revoke_device,
             export_boards,
             import_boards,
         ])
@@ -285,7 +285,6 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             hub: None,
             ext: None,
             port,
-            pairing: None,
             v2: None,
             hotkey: std::sync::Mutex::new(DEFAULT_HOTKEY.to_string()),
             settings_path: None,
@@ -376,6 +375,17 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             }
         }
     };
+    // Fresh pairings need the operator's approval (audit B2 step 6): the
+    // gate asks in a native dialog. The session bounds the wait by the
+    // pairing-code TTL, so an unanswered dialog (nobody at the desk)
+    // denies the pairing once the code would have expired anyway; a late
+    // answer is dropped - the one-time code is burned, a retry needs a
+    // fresh one.
+    if let Some(v2) = &v2 {
+        let app = app.clone();
+        v2.pairing
+            .set_trust_gate(move |name| trust_dialog(&app, name));
+    }
     // v2 background task: coalesced state patches.
     if let Some(v2) = &v2 {
         tauri::async_runtime::spawn(pulpit_v2::run_flusher(
@@ -662,7 +672,6 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         hub: Some(hub),
         ext: Some(ext_manager),
         port,
-        pairing: v2.as_ref().map(|v| v.pairing.clone()),
         v2: v2.clone(),
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
@@ -1127,10 +1136,8 @@ struct PairingOffer {
 
 #[tauri::command]
 fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, String> {
-    let pairing = state.pairing.as_ref().ok_or_else(|| {
-        "protocol v2 unavailable (devices.json or asset store failed to load)".to_string()
-    })?;
-    let code = pairing.new_code();
+    let v2 = v2_or_err(&state)?;
+    let code = v2.pairing.new_code();
     let addresses = lan_ipv4s()
         .into_iter()
         .map(|(name, ipv4)| {
@@ -1148,6 +1155,84 @@ fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, S
         expires_in_secs: 300,
         addresses,
     })
+}
+
+/// The pairing trust prompt (audit B2 step 6): a native modal dialog
+/// asking the operator to trust a first-time device. Runs on the pairing
+/// session's blocking thread, so the wait costs no socket-loop time; the
+/// caller bounds the wait by the pairing-code TTL and drops a late
+/// answer (the one-time code is burned - a retry needs a fresh one).
+fn trust_dialog(app: &AppHandle, name: &str) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    tracing::info!(name = %name, "asking the operator to trust a new pairing");
+    app.dialog()
+        .message(format!(
+            "\"{name}\" wants to connect to Pulpit.\n\nTrust this device? Denying - or leaving \
+             this dialog unanswered until the code expires - rejects the pairing; the tablet can \
+             retry with a fresh code."
+        ))
+        .title("New tablet")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Trust".into(),
+            "Deny".into(),
+        ))
+        .blocking_show()
+}
+
+/// A paired device for the settings UI: registry metadata only - no
+/// token material (plaintext or digest) ever leaves the backend.
+#[derive(Serialize)]
+struct DeviceInfo {
+    id: String,
+    name: String,
+    created: u64,
+    last_seen: u64,
+}
+
+fn device_infos(devices: &pulpit_v2::DeviceStore) -> Vec<DeviceInfo> {
+    devices
+        .list()
+        .into_iter()
+        .map(|d| DeviceInfo {
+            id: d.id,
+            name: d.name,
+            created: d.created,
+            last_seen: d.last_seen,
+        })
+        .collect()
+}
+
+/// Revokes the device and closes its live sessions (audit B2 step 6):
+/// a revoked tablet is cut off mid-flight, not at its next reconnect.
+/// `false` when there is no such entry (unknown id, already revoked).
+fn revoke_and_teardown(devices: &pulpit_v2::DeviceStore, hub: &pulpit_v2::V2Hub, id: &str) -> bool {
+    let removed = devices.revoke(id);
+    if removed {
+        let closed = hub.close_device_sessions(id);
+        tracing::info!(device = id, closed, "device revoked: live sessions closed");
+    }
+    removed
+}
+
+/// The v2 stack for the pairing/device commands; `None` means it failed
+/// to start (bad devices.json or asset store) and the UI hides the
+/// feature - the same message every such command reports.
+fn v2_or_err(state: &DesktopState) -> Result<&Arc<pulpit_v2::V2State>, String> {
+    state.v2.as_ref().ok_or_else(|| {
+        "protocol v2 unavailable (devices.json or asset store failed to load)".to_string()
+    })
+}
+
+#[tauri::command]
+fn list_devices(state: State<'_, DesktopState>) -> Result<Vec<DeviceInfo>, String> {
+    Ok(device_infos(&v2_or_err(&state)?.devices))
+}
+
+#[tauri::command]
+fn revoke_device(id: String, state: State<'_, DesktopState>) -> Result<bool, String> {
+    let v2 = v2_or_err(&state)?;
+    Ok(revoke_and_teardown(&v2.devices, &v2.hub, &id))
 }
 
 #[cfg(test)]
@@ -1236,6 +1321,58 @@ mod tests {
         let url = read_image_data(path.to_string_lossy().into_owned()).expect("must read");
         assert!(url.starts_with("data:image/png;base64,"), "got: {url}");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// An isolated scratch directory for a test's devices.json.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pulpit-desktop-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn device_listing_omits_token_material() {
+        let dir = scratch_dir("list-devices");
+        let devices = pulpit_v2::DeviceStore::load(dir.join("devices.json")).expect("store");
+        let (device, plaintext) = devices.create("Tablet salon");
+
+        let infos = device_infos(&devices);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].id, device.id);
+        assert_eq!(infos[0].name, "Tablet salon");
+        assert!(infos[0].created > 0 && infos[0].last_seen > 0);
+
+        // no token material - neither plaintext nor digest - leaves the
+        // backend for the UI
+        let json = serde_json::to_string(&infos).expect("json");
+        assert!(!json.contains("token"));
+        assert!(!json.contains(&plaintext));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revoke_teardown_removes_entry_and_closes_its_session() {
+        let dir = scratch_dir("revoke-teardown");
+        let devices = pulpit_v2::DeviceStore::load(dir.join("devices.json")).expect("store");
+        let (device, _token) = devices.create("Tablet salon");
+        let hub = pulpit_v2::V2Hub::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let session = hub.create(tx);
+        hub.attach(&session);
+        session.set_device(device.clone());
+
+        assert!(revoke_and_teardown(&devices, &hub, &device.id));
+        assert!(devices.list().is_empty(), "the entry is gone");
+        assert!(
+            *session.cancelled().borrow(),
+            "the live session is torn down"
+        );
+        // revoking an unknown id (or the same one twice) is an honest no-op
+        assert!(!revoke_and_teardown(&devices, &hub, &device.id));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

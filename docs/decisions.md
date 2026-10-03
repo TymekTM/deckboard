@@ -72,24 +72,40 @@ connection loop in a foreground service and prompts the user to exempt the
 app from battery optimization on first run. Without this the "live
 controller" silently dies with the screen off.
 
-## ADR-008: LAN trust with one-time pairing codes and per-device tokens
+## ADR-008: LAN trust with one-time pairing codes, a trust prompt and per-device tokens
 
 The legacy layer stays unauthenticated (LAN trust, like the original) - do
 not tunnel it through the internet. Protocol v2 authenticates at the
-WebSocket upgrade: pairing mints a one-time code (8 chars, 5 min, loopback
-`POST /v2/pair`, QR `pulpit://host:port?pair=<code>`); the tablet
-connects with it, sends `hello`, and the desktop shows a "trust this
-device?" prompt (M1 headless: auto-accept with a warning log; the prompt
-ships with the desktop UI). Trusting creates a per-device entry in
-`~/pulpitApp/devices.json` (`{id, name, token, created, last_seen}`),
-where `token` persists only as a `sha256:` digest - the raw token never
-hits the server's disk. Every later connect uses `?token=...`. Revoking
-a device = deleting its entry, so a leaked token never widens beyond one
-tablet. Pairing codes are one-time. The tablet stores its token
-keystore-encrypted at rest: AES-256-GCM under a non-exportable
-AndroidKeyStore key, framed as an `enc1:` envelope (fresh random IV
-alongside the ciphertext) in the usual prefs file - a small hand-rolled
-cipher wrapper instead of EncryptedSharedPreferences, which would add a
+WebSocket upgrade. Pairing mints a one-time code (8 chars, 5 min TTL,
+loopback-only minting via `POST /v2/pair`, QR
+`pulpit://host:port?pair=<code>`); a code burns on first use, five wrong
+codes invalidate every outstanding one, and codes are never written to
+the logs.
+
+Trust is a desktop decision (012 B2): converting a code into a device
+first asks the operator in a native "trust this device?" dialog. The
+wait is bounded by the code TTL - an unanswered prompt denies the
+pairing once the code would have expired anyway - and a denial rejects
+the `hello` and burns the code, so retrying needs a fresh one. Headless
+builds (no operator to ask) keep the auto-accept default with a warning
+log. Trusting creates a per-device entry in `~/pulpitApp/devices.json`
+(`{id, name, created, last_seen}` plus a SHA-256 token digest only; the
+plaintext token travels exactly once, in the pairing `welcome`, and the
+digest is all that ever reaches the server's disk). Every later connect
+uses `?token=...`. `hello.name` is sanitized (trimmed, control
+characters stripped, 64-char cap) before it reaches the registry, the
+logs or the desktop device list.
+
+The desktop settings (the "Tablety" section) list paired devices with
+their last-seen time; revoking a device deletes its entry and closes its
+live sessions immediately, so a leaked token never widens beyond one
+tablet.
+
+The tablet stores its token Keystore-encrypted at rest: AES-256-GCM
+under a non-exportable AndroidKeyStore key, framed as an `enc1:` envelope
+(fresh random IV alongside the ciphertext) in the usual app-private
+prefs file, with `allowBackup="false"` - a small hand-rolled cipher
+wrapper instead of EncryptedSharedPreferences, which would add a
 dependency (and is deprecated) for what ~40 lines of `javax.crypto` do.
 A plaintext token from an older install is re-encrypted on first load,
 and a token that cannot be decrypted (key lost, ciphertext tampered)

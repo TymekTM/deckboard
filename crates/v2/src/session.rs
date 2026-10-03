@@ -17,7 +17,7 @@ use pulpit_actions::EventSink;
 use pulpit_db::ButtonRow;
 use pulpit_proto::*;
 
-use crate::devices::PairError;
+use crate::devices::{PairError, Pairing};
 use crate::hub::V2Session;
 use crate::service::{Auth, V2State};
 use crate::state::{ext_channel, StateEngine};
@@ -208,7 +208,24 @@ async fn run_session(
             Ok(()) => {
                 let name = sanitize_device_name(hello.name.as_deref())
                     .unwrap_or_else(|| "Device".to_string());
-                tracing::warn!(session = session.id, name = %name, "pairing auto-accepted (no UI yet)");
+                // Trust gate (audit B2 step 6): a fresh pairing needs the
+                // desktop operator's approval before a device is minted.
+                // The consult runs on the blocking pool (the prompt may
+                // wait for the operator; the socket loop must not stall)
+                // and is bounded by the pairing-code TTL: an unanswered
+                // prompt denies once the code would have expired anyway.
+                // A denial rejects the hello; the one-time code is
+                // already burned, so a retry needs a fresh code.
+                if !approve_pairing(&state.pairing, &name).await {
+                    tracing::warn!(session = session.id, name = %name, "pairing denied on the desktop");
+                    session.send_frame(&error_ack(
+                        &frame,
+                        error_code::PAIR_EXPIRED,
+                        "pairing was not approved on the desktop in time",
+                    ));
+                    return End::Fatal;
+                }
+                tracing::info!(session = session.id, name = %name, "pairing approved on the desktop");
                 let (device, token) = state.devices.create(&name);
                 issued_token = Some(token);
                 device
@@ -325,6 +342,22 @@ async fn next_text(
         }
     }
     None
+}
+
+/// Asks the pairing trust gate about a fresh device, off the async
+/// workers (the gate may block on the operator). The wait is bounded by
+/// the pairing's code TTL (the same shrinkable timer the codes use); a
+/// timeout, a denied answer or a failed blocking dispatch all count as
+/// a denial.
+async fn approve_pairing(pairing: &Arc<Pairing>, name: &str) -> bool {
+    let wait = pairing.ttl();
+    let name = name.to_string();
+    let pairing = pairing.clone();
+    let ask = tokio::task::spawn_blocking(move || pairing.ask_trust(&name));
+    match tokio::time::timeout(wait, ask).await {
+        Ok(Ok(approved)) => approved,
+        Ok(Err(_)) | Err(_) => false,
+    }
 }
 
 fn error_ack(request: &Frame, code: &str, message: &str) -> Frame {
@@ -623,6 +656,22 @@ fn version_lt(client: &str, min: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pairing_wait_denies_after_the_ttl() {
+        // The gate answers "yes" - but only after the pairing's code TTL
+        // is spent: the desktop was unreachable, so the wait must deny
+        // (the TTL-expiry fallback, audit B2 step 6).
+        let pairing = crate::devices::Pairing::with_ttl(Duration::from_millis(50));
+        pairing.set_trust_gate(|_name| {
+            std::thread::sleep(Duration::from_millis(300));
+            true
+        });
+        assert!(
+            !approve_pairing(&std::sync::Arc::new(pairing), "Tablet salon").await,
+            "a gate that answers past the TTL is a denial"
+        );
+    }
 
     #[test]
     fn version_compare() {

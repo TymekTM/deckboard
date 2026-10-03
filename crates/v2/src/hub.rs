@@ -144,6 +144,31 @@ impl V2Hub {
         }
     }
 
+    /// Tears down every live session of `device_id` - the revoke path
+    /// (audit B2 step 6): removing the registry entry must also cut an
+    /// already-connected tablet off, not wait for its next reconnect.
+    /// Removal happens outside the map lock, like every teardown path.
+    pub fn close_device_sessions(&self, device_id: &str) -> usize {
+        let mut dead = Vec::new();
+        {
+            let sessions = self.sessions.lock().expect("v2 hub poisoned");
+            for session in sessions.values() {
+                if session.device_id().as_deref() == Some(device_id) {
+                    dead.push(session.id);
+                }
+            }
+        }
+        for id in &dead {
+            tracing::info!(
+                session = id,
+                device = device_id,
+                "v2 session closed: device revoked"
+            );
+            self.remove(*id);
+        }
+        dead.len()
+    }
+
     /// The exit path: one `server.shutdown` goodbye to every attached
     /// session, then a WS close. Each pump drains its queue in order, so
     /// the frame is on the wire before the close - clients that understand
@@ -305,6 +330,16 @@ impl V2Session {
             .expect("session poisoned")
             .as_ref()
             .map(|d| d.name.clone())
+    }
+
+    /// The paired device behind this session, if the handshake got that
+    /// far - the revoke path matches sessions on it.
+    pub fn device_id(&self) -> Option<String> {
+        self.device
+            .lock()
+            .expect("session poisoned")
+            .as_ref()
+            .map(|d| d.id.clone())
     }
 
     pub fn touch(&self) {
@@ -488,6 +523,55 @@ mod tests {
         );
         hub.broadcast_frame(&frame());
         assert_eq!(hub.count(), 1);
+    }
+
+    #[test]
+    fn revoking_a_device_tears_down_its_live_sessions() {
+        // Audit B2 step 6: revoke must cut a connected tablet off right
+        // away, not at its next reconnect. The store removes the entry
+        // (devices.rs), the hub closes that device's live sessions.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::devices::DeviceStore::load(dir.path().join("devices.json")).expect("store");
+        let (device, _token) = store.create("Tablet salon");
+
+        let hub = V2Hub::new();
+        let (tx_a, _rx_a) = mpsc::channel(4);
+        let (tx_b, _rx_b) = mpsc::channel(4);
+        let a = hub.create(tx_a);
+        let b = hub.create(tx_b);
+        hub.attach(&a);
+        hub.attach(&b);
+        a.set_device(device.clone());
+        b.set_device(DeviceEntry {
+            id: "other-device".into(),
+            name: "Other tablet".into(),
+            token: String::new(),
+            created: 0,
+            last_seen: 0,
+        });
+
+        // revoking an unknown device touches nobody
+        assert!(!store.revoke("missing"));
+        hub.close_device_sessions("missing");
+        assert_eq!(hub.count(), 2);
+
+        // the real revoke closes exactly that device's live session
+        assert!(store.revoke(&device.id));
+        hub.close_device_sessions(&device.id);
+        assert_eq!(
+            hub.count(),
+            1,
+            "only the revoked device's session is closed"
+        );
+        assert!(
+            *a.cancelled().borrow(),
+            "the revoked session's task must be cancelled"
+        );
+        assert!(
+            !*b.cancelled().borrow(),
+            "an unrelated session must keep running"
+        );
     }
 
     #[test]
