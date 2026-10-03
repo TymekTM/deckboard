@@ -18,6 +18,7 @@ export const api = {
   execSlider: (id, value) => invoke("exec_slider", { id, value }),
   getSettings: () => invoke("get_settings"),
   setHotkey: (combo) => invoke("set_touch_mode_hotkey", { combo }),
+  setServerPort: (port) => invoke("set_server_port", { port }),
   getAutostart: () => invoke("get_autostart"),
   setAutostart: (enable) => invoke("set_autostart", { enable }),
   readImageData: (path) => invoke("read_image_data", { path }),

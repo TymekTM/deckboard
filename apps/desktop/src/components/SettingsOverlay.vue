@@ -1,6 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { api } from "../api";
 
 const props = defineProps({
@@ -34,6 +33,18 @@ let pairingTimer = null;
 // trusted v2 devices (the backend's devices.json, minus token material)
 const devices = ref([]);
 const devicesBusy = ref(false);
+
+// server port editing; the value applies on the next launch because the
+// sockets bind once at startup and tablets aim at host:port explicitly
+const portDraft = ref("");
+const portError = ref("");
+const portPending = ref(null); // stored value that differs from the running one
+const portLocked = ref(false); // the PULPIT_PORT env var overrides the store
+const portBusy = ref(false);
+
+// in-app revoke confirmation (replaces the native dialog popup)
+const confirmRevoke = ref(null); // device awaiting confirmation
+const cancelBtn = ref(null);
 
 const version = computed(() => props.status.version || "0.1.1");
 
@@ -101,13 +112,13 @@ watch(focused, (tile) => {
   if (tile === "devices") refreshDevices();
 });
 
-async function revokeDevice(device) {
-  const ok = await ask(
-    `Cofnąć zaufanie urządzeniu "${device.name}"? ` +
-      "Jego token przestaje działać, a połączenie zostanie natychmiast zamknięte.",
-    { title: "Cofnij zaufanie", kind: "warning" },
-  );
-  if (!ok) return;
+function revokeDevice(device) {
+  confirmRevoke.value = device;
+}
+
+async function doRevoke() {
+  const device = confirmRevoke.value;
+  if (!device) return;
   devicesBusy.value = true;
   try {
     await api.revokeDevice(device.id);
@@ -115,7 +126,33 @@ async function revokeDevice(device) {
     console.error("revoke device", e);
   } finally {
     devicesBusy.value = false;
+    confirmRevoke.value = null;
     refreshDevices();
+  }
+}
+
+// focus lands on Cancel so a reflexive Enter cannot fire the destructive
+// action; Escape closes just the popup while it is up
+watch(confirmRevoke, (device) => {
+  if (device) nextTick(() => cancelBtn.value?.focus());
+});
+
+async function savePort() {
+  const value = Number(portDraft.value.trim());
+  if (!Number.isInteger(value) || value < 1024 || value > 65535) {
+    portError.value = "Port musi być liczbą z zakresu 1024–65535.";
+    return;
+  }
+  portBusy.value = true;
+  try {
+    await api.setServerPort(value);
+    portError.value = "";
+    portPending.value = value === (props.status.port || 8500) ? null : value;
+  } catch (e) {
+    // the backend message says why the port was refused
+    portError.value = e ? String(e) : "Nie udało się zapisać portu.";
+  } finally {
+    portBusy.value = false;
   }
 }
 
@@ -159,6 +196,10 @@ async function toggleAutostart() {
 
 function onKeydown(e) {
   if (e.key === "Escape") {
+    if (confirmRevoke.value) {
+      confirmRevoke.value = null;
+      return;
+    }
     emit("close");
     return;
   }
@@ -173,9 +214,16 @@ onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
   closeBtn.value?.focus();
   try {
-    hotkey.value = (await api.getSettings()).hotkey;
+    const settings = await api.getSettings();
+    hotkey.value = settings.hotkey;
+    portLocked.value = Boolean(settings.port_locked);
+    portPending.value =
+      settings.port && settings.port !== (props.status.port || 8500)
+        ? settings.port
+        : null;
+    portDraft.value = String(settings.port ?? props.status.port ?? 8500);
   } catch {
-    /* keep the default combo when the backend is unreachable */
+    /* keep the defaults when the backend is unreachable */
   }
   autostart.value = await api.getAutostart().catch(() => false);
   refreshLan();
@@ -317,11 +365,33 @@ onUnmounted(() => {
             </header>
             <p class="sum">Wspólny port obu protokołów; tablety wpinają się w ten adres.</p>
             <div v-show="focused === 'port'" class="detail">
-              <div class="big mono tnum">{{ status.port || 8500 }}</div>
-              <p class="note">
-                W tym wydzeniu port jest tylko do odczytu — ustawia go zmienna
-                środowiskowa <code class="mono">PULPIT_PORT</code> (domyślnie 8500).
+              <div class="port-line">
+                <span class="big mono tnum">{{ status.port || 8500 }}</span>
+                <template v-if="!portLocked">
+                  <input
+                    v-model="portDraft"
+                    class="port-input"
+                    inputmode="numeric"
+                    autocomplete="off"
+                    aria-label="Nowy port"
+                    @keyup.enter="savePort"
+                  />
+                  <button class="act accent" :disabled="portBusy" @click="savePort">Zapisz</button>
+                </template>
+              </div>
+              <p v-if="portPending" class="note pending">
+                Zapisano port {{ portPending }} — zostanie użyty po ponownym uruchomieniu Pulpitu.
               </p>
+              <p v-if="portLocked" class="note">
+                Port narzuca zmienna środowiskowa <code class="mono">PULPIT_PORT</code> — jego
+                wartość ma pierwszeństwo przed zapisem.
+              </p>
+              <p v-else class="note">
+                Dozwolony zakres 1024–65535. Zmiana obowiązuje po ponownym uruchomieniu; tablety
+                wpinają się w konkretny adres <span class="mono">host:port</span>, więc trzeba je
+                wtedy skierować na nowy port.
+              </p>
+              <p v-if="portError" class="err">{{ portError }}</p>
             </div>
           </article>
         </div>
@@ -445,6 +515,33 @@ onUnmounted(() => {
           </article>
         </div>
       </section>
+    </div>
+
+    <!-- in-app revoke confirmation; replaces the native dialog popup -->
+    <div
+      v-if="confirmRevoke"
+      class="veil"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="revoke-title"
+    >
+      <div class="confirm">
+        <div class="confirm-icon">
+          <i class="fas fa-user-slash" aria-hidden="true"></i>
+        </div>
+        <h2 id="revoke-title">Cofnąć zaufanie?</h2>
+        <p class="confirm-name">{{ confirmRevoke.name }}</p>
+        <p class="confirm-warn">
+          Token urządzenia zostanie usunięty, a jego połączenie zamknięte natychmiast.
+          Tablet wróci tylko przez nowe parowanie.
+        </p>
+        <div class="confirm-actions">
+          <button ref="cancelBtn" class="act" @click="confirmRevoke = null">Anuluj</button>
+          <button class="act danger-solid" :disabled="devicesBusy" @click="doRevoke">
+            <i class="fas fa-user-slash" aria-hidden="true"></i> Odwołaj urządzenie
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -772,4 +869,89 @@ onUnmounted(() => {
 }
 
 .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+
+.port-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.port-input {
+  width: 110px;
+  padding: 7px 10px;
+  font-size: 14px;
+  background: #171c21;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+}
+.port-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.note.pending { color: var(--ok); }
+
+.veil {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 14, 17, 0.62);
+  backdrop-filter: blur(2px);
+  animation: fade 140ms ease-out;
+}
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.confirm {
+  width: min(380px, calc(100vw - 80px));
+  background: var(--tile);
+  border: 1px solid rgba(231, 76, 60, 0.35);
+  border-radius: 14px;
+  padding: 26px 26px 22px;
+  text-align: center;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  animation: rise 200ms ease-out;
+}
+.confirm-icon {
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 12px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: var(--bad-ink);
+  background: rgba(231, 76, 60, 0.16);
+}
+.confirm h2 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+.confirm-name {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.confirm-warn {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  margin: 8px 0 0;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+.act.danger-solid {
+  background: var(--bad);
+  color: #fff;
+  font-weight: 600;
+}
+.act.danger-solid:hover { background: #c0392b; }
+.act.danger-solid:disabled { opacity: 0.55; }
 </style>

@@ -180,6 +180,7 @@ pub fn run() {
             exec_slider,
             get_settings,
             set_touch_mode_hotkey,
+            set_server_port,
             get_autostart,
             set_autostart,
             read_image_data,
@@ -267,12 +268,20 @@ fn register_ext_input(
 /// ADR-001), load extensions and start the embedded legacy server. A failure
 /// keeps the UI alive with `backend: None` so the window can explain why.
 fn setup_core(app: tauri::AppHandle) -> DesktopState {
-    // Port 8500 is what the stock Android client hardcodes (and the original
-    // app's default); `PULPIT_PORT` overrides it for side-by-side runs.
-    let port: u16 = std::env::var("PULPIT_PORT")
+    // Port 8500 is what the stock Android client hardcodes (and the
+    // original app's default). `PULPIT_PORT` overrides it for
+    // side-by-side runs; otherwise the port persisted in editor.json
+    // (Ustawienia -> Serwer) applies.
+    let data_dir = pulpit_db::data_dir();
+    let settings_path = data_dir.join("editor.json");
+    let stored_editor: serde_json::Value = std::fs::read_to_string(&settings_path)
         .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8500);
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let port = effective_port(
+        std::env::var("PULPIT_PORT").ok().as_deref(),
+        stored_editor.get("port"),
+    );
 
     // PULPIT_DB overrides the database location (profiling / hermetic runs)
     let db_path = std::env::var_os("PULPIT_DB").map(std::path::PathBuf::from);
@@ -292,8 +301,6 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     }
     let db = db.unwrap();
 
-    let data_dir = pulpit_db::data_dir();
-    let settings_path = data_dir.join("editor.json");
     let settings: serde_json::Value = std::fs::read_to_string(data_dir.join("settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -1301,6 +1308,49 @@ mod tests {
     }
 
     #[test]
+    fn effective_port_prefers_env_then_stored_then_default() {
+        let stored = serde_json::json!(8555);
+        assert_eq!(effective_port(Some("9000"), Some(&stored)), 9000);
+        assert_eq!(effective_port(None, Some(&stored)), 8555);
+        assert_eq!(effective_port(None, None), 8500);
+    }
+
+    #[test]
+    fn effective_port_falls_back_on_unusable_values() {
+        let big = serde_json::json!(70000);
+        let low = serde_json::json!(80);
+        let junk = serde_json::json!("not-a-port");
+        // an unparseable env var must not poison the stored value's chance
+        assert_eq!(effective_port(Some("nope"), Some(&big)), 8500);
+        assert_eq!(effective_port(None, Some(&big)), 8500);
+        assert_eq!(effective_port(None, Some(&low)), 8500);
+        assert_eq!(effective_port(None, Some(&junk)), 8500);
+        // a hand-edited file may keep the port as a string
+        assert_eq!(effective_port(None, Some(&serde_json::json!("8555"))), 8555);
+    }
+
+    #[test]
+    fn persist_editor_setting_preserves_other_keys() {
+        let path =
+            std::env::temp_dir().join(format!("pulpit-editor-rmw-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        persist_editor_setting(&path, "port", serde_json::json!(8555)).expect("write port");
+        persist_editor_setting(&path, "hotkey", serde_json::json!("Ctrl+Alt+X"))
+            .expect("write hotkey");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(saved["port"], 8555);
+        assert_eq!(saved["hotkey"], "Ctrl+Alt+X");
+        // over a non-object file (first run / torn write) it starts fresh
+        std::fs::write(&path, b"null").expect("seed null");
+        persist_editor_setting(&path, "port", serde_json::json!(8600)).expect("rewrite");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(saved["port"], 8600);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn read_image_data_rejects_files_over_the_cap() {
         let path =
             std::env::temp_dir().join(format!("pulpit-image-cap-{}.png", std::process::id()));
@@ -1569,11 +1619,17 @@ async fn list_audio_devices(
         .collect())
 }
 
-/// Editor-local settings (currently just the touch-mode hotkey).
+/// Editor-local settings: the touch-mode hotkey plus the server port
+/// (`port_locked` when the `PULPIT_PORT` environment variable wins over
+/// the stored value).
 #[tauri::command]
 async fn get_settings(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
     let hotkey = state.hotkey.lock().unwrap().clone();
-    Ok(serde_json::json!({ "hotkey": hotkey }))
+    Ok(serde_json::json!({
+        "hotkey": hotkey,
+        "port": state.port,
+        "port_locked": std::env::var_os("PULPIT_PORT").is_some(),
+    }))
 }
 
 /// Validate, register and persist a new touch-mode hotkey combo. The new
@@ -1601,14 +1657,74 @@ async fn set_touch_mode_hotkey(
     *state.hotkey.lock().unwrap() = combo.clone();
 
     if let Some(path) = &state.settings_path {
-        let json = serde_json::json!({ "hotkey": combo }).to_string();
-        // atomic like every other JSON config rewrite (012 A5): a crash
-        // mid-write must not tear editor.json
-        if let Err(e) = pulpit_db::write_atomic(path, json.as_bytes()) {
+        if let Err(e) = persist_editor_setting(path, "hotkey", serde_json::json!(combo)) {
             tracing::warn!(error = %e, "could not persist hotkey");
         }
     }
     Ok(())
+}
+
+/// Read-modify-write a single key of editor.json, preserving every other
+/// key (the file carries both the touch-mode hotkey and the server
+/// port). Atomic like every other JSON config rewrite (012 A5): a crash
+/// mid-write must not tear the file.
+fn persist_editor_setting(
+    path: &std::path::Path,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let mut editor: serde_json::Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    if !editor.is_object() {
+        // missing file or a torn/hand-mangled write: start a fresh object
+        editor = serde_json::json!({});
+    }
+    editor[key] = value;
+    pulpit_db::write_atomic(path, editor.to_string().as_bytes()).map_err(|e| e.to_string())
+}
+
+/// The effective server port: the `PULPIT_PORT` environment variable
+/// wins (side-by-side profiling runs), then the value persisted in
+/// editor.json (Ustawienia -> Serwer), then the stock-client default
+/// 8500. An unparseable or out-of-range value falls through to the next
+/// source instead of failing the launch.
+fn effective_port(env: Option<&str>, stored: Option<&serde_json::Value>) -> u16 {
+    if let Some(p) = env.and_then(|p| p.trim().parse::<u16>().ok()) {
+        if (1024..=65535).contains(&p) {
+            return p;
+        }
+    }
+    let stored = stored
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
+        .filter(|p| (1024..=65535).contains(p));
+    stored.map_or(8500, |p| p as u16)
+}
+
+/// Persist a new server port (Ustawienia -> Serwer). The sockets bind
+/// once at startup and tablets aim at `host:port` explicitly, so a live
+/// rebind would strand them: the value applies on the next launch.
+#[tauri::command]
+async fn set_server_port(state: State<'_, DesktopState>, port: u16) -> Result<(), String> {
+    if !(1024..=65535).contains(&port) {
+        return Err(format!(
+            "Port {port} jest poza dozwolonym zakresem 1024-65535."
+        ));
+    }
+    if std::env::var_os("PULPIT_PORT").is_some() {
+        return Err(
+            "Port nadpisuje zmienna środowiskowa PULPIT_PORT — ma ona pierwszeństwo.".to_string(),
+        );
+    }
+    let path = state
+        .settings_path
+        .as_ref()
+        .ok_or_else(|| "Brak ścieżki ustawień (uruchomienie awaryjne).".to_string())?;
+    persist_editor_setting(path, "port", serde_json::json!(port))
 }
 
 #[tauri::command]
