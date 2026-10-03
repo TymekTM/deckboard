@@ -292,11 +292,27 @@ fn style(row: &ButtonRow, legacy: &Value) -> Style {
         icon_color2: non_empty(row.icon_color2.as_deref()),
         title_color: non_empty(row.title_color.as_deref()),
         title_color2: non_empty(row.title_color2.as_deref()),
+        // Title pinning + box color and the active-state shape: edited
+        // against the same DB columns the legacy mapper reads (parity
+        // oracle: crates/v2/tests/parity.rs). Zero is the legacy default
+        // for positions/shapes and stays off the wire; the §4 per-field
+        // state-2 fallback covers the rest client-side.
+        title_position: non_zero_u8(row.title_position),
+        title_position2: non_zero_u8(row.title_position2),
+        title_box_color: non_empty(row.title_box_color.as_deref()),
+        title_box_color2: non_empty(row.title_box_color2.as_deref()),
+        shape2: (row.shape2 != 0).then(|| row.shape2.to_string()),
     }
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
     value.filter(|v| !v.is_empty()).map(str::to_string)
+}
+
+/// Legacy int column -> optional wire number, dropping the 0 default
+/// (and junk that does not fit a u8).
+fn non_zero_u8(value: i64) -> Option<u8> {
+    u8::try_from(value).ok().filter(|v| *v != 0)
 }
 
 #[cfg(test)]

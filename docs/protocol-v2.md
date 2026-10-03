@@ -209,10 +209,18 @@ Boards are data. One board:
   `icon_color`, `title_color` and their `*_color2` active-state pairs.
   All optional; a client that does not know them keeps its defaults
   (no border, white glyph/title).
+- Style parity fields (added 2026-10, round 4): `title_position`,
+  `title_position2` (numbers: 0 = bottom - the default, omitted from
+  the wire -, 1 = center, 2 = top), `title_box_color`,
+  `title_box_color2` (background strip behind the title) and `shape2`
+  (active-state shape, stringified like `shape`: `"1"` renders round
+  while active). All optional with the same §4 fallback; the legacy
+  wire has carried all five since the original app.
 - **State-2 fallback rule (one rule for every field)**: while the tile
   is in its active state, each state-2 field (`color2`, `icon2`,
-  `border_color2`, `icon_color2`, `title_color2`, `asset_hash2`, ...)
-  falls back to its state-1 counterpart **per field** when absent -
+  `border_color2`, `icon_color2`, `title_color2`, `title_position2`,
+  `title_box_color2`, `shape2`, `asset_hash2`, ...) falls back to its
+  state-1 counterpart **per field** when absent -
   `active ? (field2 || field1) : field1`. A fully absent state-2 set
   leaves the tile visually unchanged between states; a partially set
   one changes only the fields that are set.
@@ -390,6 +398,10 @@ disconnect and retries as usual.
   `style` and `asset_hash2` to the tile manifest. Purely additive: old
   servers never send them and old clients drop unknown keys, so `v`
   stays 2.
+- Change log: 2026-10 (round 4) added the optional style fields
+  `title_position`/`title_position2` (numbers),
+  `title_box_color`/`title_box_color2` and `shape2` to `style`.
+  Additive optional fields per §10 - `v` stays 2.
 - Wire compatibility is pinned by golden fixtures
   (`crates/proto/tests/fixtures/*.json`): Rust round-trips them and the
   Kotlin unit test parses the same files. Both must stay green.

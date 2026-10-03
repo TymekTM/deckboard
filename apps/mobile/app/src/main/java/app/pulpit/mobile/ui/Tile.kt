@@ -17,7 +17,6 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -70,6 +69,14 @@ private fun shapeOf(shape: Int, radius: Float): Shape = when (shape) {
     1 -> RoundedCornerShape(radius)
     2 -> CircleShape
     else -> RoundedCornerShape(radius / 2f)
+}
+
+/** Title pinning inside the tile, mirroring the desktop's pos-* classes:
+ * 0 = bottom (default), 1 = center, 2 = top. */
+private fun titleAlignment(pos: Int): Alignment = when (pos) {
+    2 -> Alignment.TopCenter
+    1 -> Alignment.Center
+    else -> Alignment.BottomCenter
 }
 
 /** Template for a tile: the kind decides, with `params.widget` hints
@@ -142,7 +149,14 @@ fun Tile(
     val titleColor = hex(pick(style?.titleColor, style?.titleColor2), Color.White)
     val borderColor = pick(style?.borderColor, style?.borderColor2)
     val title = style?.title.orEmpty()
-    val shape = shapeOf(style?.shape?.toIntOrNull() ?: 0, tileSize.value * 0.18f)
+    // active state swaps the shape pair too (state 2 falls back to
+    // state 1 per field, §4); shapes travel as stringified ints
+    val shapeValue = pick(style?.shape, style?.shape2)?.toIntOrNull() ?: 0
+    val shape = shapeOf(shapeValue, tileSize.value * 0.18f)
+    // title pinning + box color with the same per-field state-2 fallback
+    fun pickInt(first: Int?, second: Int?): Int? = if (active) second ?: first else first
+    val titlePos = pickInt(style?.titlePosition, style?.titlePosition2) ?: 0
+    val titleBox = pick(style?.titleBoxColor, style?.titleBoxColor2)?.let { hex(it, Color.Transparent) }
     // the active-state image (img2) replaces the resting face while the
     // tile reads its active value; absent falls back to the resting one
     val face = if (active) image2 ?: image else image
@@ -237,6 +251,8 @@ fun Tile(
                     iconFamily = iconFamily,
                     iconColor = iconColor,
                     titleColor = titleColor,
+                    titlePos = titlePos,
+                    titleBox = titleBox,
                     image = face,
                     iconOnly = discordKind != null,
                     liveText = if (template == "toggle" && discordKind == null) liveText else null,
@@ -267,6 +283,8 @@ private fun ButtonTile(
     iconFamily: FontFamily,
     iconColor: Color,
     titleColor: Color,
+    titlePos: Int,
+    titleBox: Color?,
     image: ImageBitmap?,
     iconOnly: Boolean,
     liveText: String?,
@@ -384,7 +402,10 @@ private fun ButtonTile(
                     modifier = Modifier.matchParentSize(),
                 )
             }
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // the glyph stays centered like the desktop's tile-icon; the
+            // title is pinned per title_position (bottom/center/top) with
+            // the optional title_box_color as a full-width strip behind
+            // it - the same pos-* layout TileCell.vue draws
             if (image == null && unicode.isNotEmpty()) {
                 Text(
                     text = faChar(unicode),
@@ -406,10 +427,15 @@ private fun ButtonTile(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 4.dp),
+                    modifier = Modifier
+                        .align(titleAlignment(titlePos))
+                        .then(
+                            titleBox?.let { Modifier.fillMaxWidth().background(it) }
+                                ?: Modifier
+                        )
+                        .padding(horizontal = 4.dp, vertical = if (titleBox != null) 1.dp else 0.dp),
                 )
             }
-        }
     }
 }
 

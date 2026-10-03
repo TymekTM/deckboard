@@ -249,9 +249,9 @@ fn styled_row() -> ButtonRow {
         kind: "toggle-headphone".into(),
         command: None,
         title: Some("Deafen".into()),
-        title_position: 0,
+        title_position: 2,
         title_color: Some("#ffcc00".into()),
-        title_box_color: None,
+        title_box_color: Some("#1c1c1c".into()),
         color: Some("#5865f2".into()),
         icon_color: Some("#ffe0e0".into()),
         icon_color2: Some("#1db954".into()),
@@ -262,10 +262,10 @@ fn styled_row() -> ButtonRow {
         img2: Some(png2),
         icon2: Some("deaf".into()),
         color2: Some("#ED4245".into()),
-        shape2: 0,
+        shape2: 1,
         border_color2: Some("#f0f0f0".into()),
-        title_position2: 0,
-        title_box_color2: None,
+        title_position2: 1,
+        title_box_color2: Some("#2c2c2c".into()),
         title_color2: Some("#00ffcc".into()),
         position: None,
         position2: 0,
@@ -299,6 +299,7 @@ fn shared_style_fields_agree_between_legacy_and_v2() {
             .filter(|v| !v.is_empty())
             .map(str::to_string)
     };
+    let get_int = |key: &str| -> Option<i64> { legacy.get(key).and_then(serde_json::Value::as_i64) };
 
     assert_eq!(get("color").as_deref(), style.color.as_deref(), "color");
     assert_eq!(
@@ -336,6 +337,34 @@ fn shared_style_fields_agree_between_legacy_and_v2() {
         style.title_color2.as_deref(),
         "title_color2 (active-state pair)"
     );
+    // Round-4 parity wave: title pinning/box and the active-state shape.
+    // Legacy carries the raw int columns; v2 mirrors them as optional
+    // numbers/strings (0/absent = the client default).
+    assert_eq!(
+        get_int("title_position").map(|v| v as u8),
+        style.title_position,
+        "title_position must reach the v2 wire"
+    );
+    assert_eq!(
+        get_int("title_position2").map(|v| v as u8),
+        style.title_position2,
+        "title_position2 (active-state pair)"
+    );
+    assert_eq!(
+        get("title_box_color").as_deref(),
+        style.title_box_color.as_deref(),
+        "title_box_color must reach the v2 wire"
+    );
+    assert_eq!(
+        get("title_box_color2").as_deref(),
+        style.title_box_color2.as_deref(),
+        "title_box_color2 (active-state pair)"
+    );
+    assert_eq!(
+        get_int("shape2").map(|v| v.to_string()),
+        style.shape2,
+        "shape2 (active-state pair, stringified like shape)"
+    );
     assert_eq!(
         get("unicode").as_deref(),
         style.icon.as_deref(),
@@ -357,6 +386,27 @@ fn shared_style_fields_agree_between_legacy_and_v2() {
         WidgetKind::Button,
         "shared kind semantics"
     );
+}
+
+/// The zero defaults stay off the v2 wire (optional fields, §4: absent
+/// means the client default) while legacy always carries the raw 0s.
+#[test]
+fn zero_title_position_and_shape_default_stay_off_the_v2_wire() {
+    let mut r = row("url", "button", Some("https://x.co"));
+    r.title_position = 0;
+    r.title_position2 = 0;
+    r.title_box_color = Some(String::new());
+    r.shape2 = 0;
+    let (legacy, tile) = both(&r);
+    let style = style_of(&tile);
+    assert_eq!(legacy["title_position"], 0);
+    assert_eq!(legacy["title_position2"], 0);
+    assert_eq!(legacy["shape2"], 0);
+    assert!(style.title_position.is_none());
+    assert!(style.title_position2.is_none());
+    // empty strings filter like every other optional color
+    assert!(style.title_box_color.is_none());
+    assert!(style.shape2.is_none());
 }
 
 #[test]
