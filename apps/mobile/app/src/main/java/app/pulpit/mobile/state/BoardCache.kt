@@ -8,9 +8,9 @@
 package app.pulpit.mobile.state
 
 import app.pulpit.mobile.proto.Board
+import app.pulpit.mobile.proto.PULPIT_JSON
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import java.io.File
 
@@ -27,12 +27,11 @@ data class CachePayload(
  *  a crash - the cache is a convenience, not a source of truth. */
 fun decodeCache(text: String): CachePayload? =
     runCatching {
-        Json { ignoreUnknownKeys = true }.decodeFromString<CachePayload>(text)
+        PULPIT_JSON.decodeFromString<CachePayload>(text)
     }.getOrNull()
 
 class BoardCache(private val dir: File) {
     private val file = File(dir, "board-cache.json")
-    private val json = Json { ignoreUnknownKeys = true }
 
     fun load(): CachePayload? {
         val text = runCatching { file.readText() }.getOrNull() ?: return null
@@ -46,7 +45,7 @@ class BoardCache(private val dir: File) {
         runCatching {
             dir.mkdirs()
             val tmp = File(dir, "board-cache.tmp")
-            tmp.writeText(json.encodeToString(payload))
+            tmp.writeText(PULPIT_JSON.encodeToString(payload))
             if (!tmp.renameTo(file)) {
                 file.delete()
                 tmp.renameTo(file)
