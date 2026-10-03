@@ -94,8 +94,15 @@ as a Rust rewrite of Deckboard 3.x; owns its identity and data directory
       pairing = `adb reverse tcp:8500 tcp:8500` + the connect screen's
       loopback shortcut. Structured logging: `Plog` (logcat + rotating
       filesDir/logs, pure formatter/rotation unit-tested).
-- [ ] **M5 - Widget kit**: knob/list/graph/interactive templates, custom
+- [x] **M5 - Widget kit**: knob/list/graph/interactive templates, custom
       gestures, widget manifest + client capabilities negotiation.
+      Shipped (2026-10-03, plan 013): hello/welcome capabilities
+      (declared + logged + echoed, nothing gated yet), custom gestures
+      (long-press, double-tap, swipe-left/right declared per tile via
+      `gestures` in options, server dispatch + Android detection),
+      knob/list/graph templates already rendered + interacted since the
+      aidev work. Gesture authoring is hand-edited options JSON until
+      the editor grows UI for it.
 - [ ] **M6 - Web widgets + media** (gated on M0-M5 surviving in daily use):
       board-scoped WebView layer, widget SDK (state/interact/fetch
       proxy/assets), media library with hash-based asset serving, photo/video

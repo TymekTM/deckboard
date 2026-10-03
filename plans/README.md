@@ -24,6 +24,8 @@ when done.
 | 010 | mobile: recompose only tiles whose channel changed | P3 | M | 009 | DONE (`29bbb78`, lane L4; State holders + per-tile TileCell + derivedStateOf) |
 | 011 | docs: AGENTS.md - Android client speaks v2 | P3 | S | - | DONE (lane L6, see E3; mobile naming itself landed with L4 `796cada`) |
 | 012 | Correctness/security audit findings (packages A-E, findings list with fix sketches) | P1 | L | E1 before C5; package D overlaps 006/007/009 - see the file | DONE (all packages incl. B2 step 6 + Android Keystore tokens; per-item table inside the file) |
+| 013 | M5 widget kit: capabilities negotiation + custom gestures | P2 | M | - | DONE (`1bc074d`; hello/welcome caps + long-press/double-tap/swipe gestures; editor UI for `gestures` deliberately out of scope) |
+| 014 | M8 discovery: Bluetooth-style pairing (mDNS + shared verification code) | P2 | M | - | DONE (`5f9e416` + fixes; mDNS advertise, pair-request + poll, Auto/Manual modes, custom in-app popup `2ef6cb6`; ADR-013). M8 leftovers (plugin API, APK sideload, updater) stay unchecked in ROADMAP |
 
 Plans 006-011 come from the second audit (see "Round 2: mobile battery
 and bugs" at the end of this file). Order: 006 → 007 → 008 (the battery
