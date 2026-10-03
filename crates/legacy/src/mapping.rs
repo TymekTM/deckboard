@@ -17,6 +17,18 @@ const RAW_COMMAND_TYPES: &[&str] = &[
     "vol",
 ];
 
+/// Defensive ceiling for board dimensions on the wire, matching
+/// `pulpit_backend::MAX_BOARD_DIM` (the import side's bound; a local
+/// constant because the backend crate is not a dependency here). The
+/// filler loop below costs W*H per board, and the client lays out a
+/// W*H grid: a junk row must not reach either at stored size
+/// (audit C4).
+const MAX_BOARD_DIM: i64 = 32;
+
+fn clamp_dim(v: i64) -> i64 {
+    v.clamp(1, MAX_BOARD_DIM)
+}
+
 pub struct Mapper {
     resolver: &'static StyleResolver,
 }
@@ -42,8 +54,8 @@ impl Mapper {
             "type": board.kind,
             "args": board.args,
             "order": board.order,
-            "width": board.width,
-            "height": board.height,
+            "width": clamp_dim(board.width),
+            "height": clamp_dim(board.height),
             "converted": board.converted,
             "staggered": true,
             "shortcuts": shortcuts,
@@ -51,7 +63,10 @@ impl Mapper {
     }
 
     /// Mapped buttons + filler cells, filtered to the variant's grid.
+    /// Fillers and filters run on the clamped dimensions, so an
+    /// oversized row cannot make this loop allocate W*H.
     fn shortcuts_payload(&self, board: &BoardRow, buttons: &[ButtonRow], pro: bool) -> Vec<Value> {
+        let (width, height) = (clamp_dim(board.width), clamp_dim(board.height));
         let board_buttons: Vec<(i64, i64, i64, i64)> = buttons
             .iter()
             .map(|b| (b.x.unwrap_or(0), b.y.unwrap_or(0), b.w, b.h))
@@ -62,8 +77,8 @@ impl Mapper {
         for b in buttons {
             mapped.push(self.shortcut_payload(b));
         }
-        for y in 0..board.height {
-            for x in 0..board.width {
+        for y in 0..height {
+            for x in 0..width {
                 let covered = board_buttons
                     .iter()
                     .any(|(bx, by, bw, bh)| x >= *bx && x < bx + bw && y >= *by && y < by + bh);
@@ -85,7 +100,7 @@ impl Mapper {
                 let x = v["x"].as_i64().unwrap_or(0);
                 let y = v["y"].as_i64().unwrap_or(0);
                 if pro {
-                    (x < board.width && y < board.height).then_some(v)
+                    (x < width && y < height).then_some(v)
                 } else if x >= 4 || y >= 3 {
                     None
                 } else {
@@ -456,6 +471,30 @@ mod tests {
             1,
         ));
         assert_eq!(s["extra"], "S::C");
+    }
+
+    #[test]
+    fn oversized_board_dimensions_are_clamped_in_the_payload() {
+        let m = Mapper::new();
+        let mut b = board();
+        b.width = 100;
+        b.height = 100;
+        let payload = m.board_payload(&b, &[], true);
+        // the wire never sees dimensions past the cap, and the filler
+        // loop is bounded by the clamped grid - never W*H of whatever
+        // junk the DB row carried (audit C4)
+        assert_eq!(payload["width"], 32);
+        assert_eq!(payload["height"], 32);
+        let shortcuts = payload["shortcuts"].as_array().unwrap();
+        assert_eq!(
+            shortcuts.len(),
+            32 * 32,
+            "fillers cover the clamped grid only"
+        );
+        // basic variant still crops to 4x3 from the clamped dims
+        let basic = m.board_payload(&b, &[], false);
+        assert_eq!(basic["width"], 32);
+        assert_eq!(basic["shortcuts"].as_array().unwrap().len(), 4 * 3);
     }
 
     #[test]

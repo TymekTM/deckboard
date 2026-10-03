@@ -340,7 +340,7 @@ async fn http_post_json_with_headers(
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_requests_are_rejected_on_the_sockets() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
 
     // Websocket upgrade with a foreign Origin: a web page open on this
@@ -1096,7 +1096,8 @@ async fn reaped_silent_session_ends_and_releases_held_keys() {
     wait_for_exec(&backend, (23, false)).await;
     let closed = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(msg) = ws.next().await {
-            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_))) {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            {
                 break;
             }
         }
