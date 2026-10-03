@@ -219,6 +219,10 @@ Boards are data. One board:
   (active-state shape, stringified like `shape`: `"1"` renders round
   while active). All optional with the same §4 fallback; the legacy
   wire has carried all five since the original app.
+- Board-switch tiles (legacy type `board`) with no title of their own
+  get the target board's name in `style.title` (added 2026-10, round
+  4). The legacy wire keeps the empty title and lets the client resolve
+  the name from the command, which the v2 wire does not carry.
 - **State-2 fallback rule (one rule for every field)**: while the tile
   is in its active state, each state-2 field (`color2`, `icon2`,
   `border_color2`, `icon_color2`, `title_color2`, `title_position2`,
@@ -405,6 +409,9 @@ disconnect and retries as usual.
   `title_position`/`title_position2` (numbers),
   `title_box_color`/`title_box_color2` and `shape2` to `style`.
   Additive optional fields per §10 - `v` stays 2.
+- Change log: 2026-10 (round 4) untitled board-switch tiles now carry
+  the target board's name in `style.title` (filled server-side; the
+  field itself is unchanged). No wire-shape change - `v` stays 2.
 - Wire compatibility is pinned by golden fixtures
   (`crates/proto/tests/fixtures/*.json`): Rust round-trips them and the
   Kotlin unit test parses the same files. Both must stay green.

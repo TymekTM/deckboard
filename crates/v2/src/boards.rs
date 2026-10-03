@@ -11,6 +11,7 @@ use pulpit_proto::{
     WidgetKind, WidgetManifest,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::assets::AssetStore;
 use crate::state::{ext_channel, StateEngine};
@@ -31,6 +32,7 @@ pub fn build_boards(
     // one grouped read for every board's shortcuts (was: one SELECT per
     // board on each rebuild)
     let buttons = backend.all_buttons_by_board();
+    let names = board_names(backend);
     backend
         .get_boards()
         .iter()
@@ -39,6 +41,7 @@ pub fn build_boards(
             build_board(
                 board,
                 rows.map(Vec::as_slice).unwrap_or(&[]),
+                &names,
                 assets,
                 engine,
             )
@@ -46,10 +49,23 @@ pub fn build_boards(
         .collect()
 }
 
+/// id -> name of every board. Board-switch tiles with no title of their
+/// own display the target's name; the desktop touch mode and the stock
+/// client resolve it client-side from the command, but the v2 wire
+/// carries no command, so the server resolves it here (MOB-09).
+pub fn board_names(backend: &dyn Backend) -> HashMap<i64, String> {
+    backend
+        .get_boards()
+        .into_iter()
+        .map(|board| (board.id, board.name))
+        .collect()
+}
+
 /// One board row plus its shortcuts -> one protocol board.
 pub fn build_board(
     board: &BoardRow,
     buttons: &[ButtonRow],
+    names: &HashMap<i64, String>,
     assets: &AssetStore,
     engine: &StateEngine,
 ) -> Board {
@@ -62,7 +78,7 @@ pub fn build_board(
         background: board_background(board, assets),
         tiles: buttons
             .iter()
-            .map(|row| build_tile(row, assets, engine))
+            .map(|row| build_tile(row, names, assets, engine))
             .collect(),
     }
 }
@@ -81,7 +97,12 @@ fn board_background(board: &BoardRow, assets: &AssetStore) -> Option<pulpit_prot
 /// One row -> one tile. The legacy payload supplies resolved style fields
 /// and the watch key (`extra`); state channels are namespaced `ext.<key>`
 /// so pushes land on the channel the tile reads.
-pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) -> Tile {
+pub fn build_tile(
+    row: &ButtonRow,
+    names: &HashMap<i64, String>,
+    assets: &AssetStore,
+    engine: &StateEngine,
+) -> Tile {
     let legacy = Mapper::new().shortcut_payload(row);
     let (kind, interactions) = widget_kind(row, &legacy);
     let state = state_ref(row, &legacy, engine);
@@ -117,7 +138,7 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
             params,
             state,
             interactions,
-            style: Some(style(row, &legacy)),
+            style: Some(style(row, &legacy, names)),
             web_package: None,
             asset_hash,
             asset_hash2,
@@ -268,7 +289,7 @@ fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<St
     Some(StateRef { channel, shape })
 }
 
-fn style(row: &ButtonRow, legacy: &Value) -> Style {
+fn style(row: &ButtonRow, legacy: &Value, names: &HashMap<i64, String>) -> Style {
     let color = legacy.get("color").and_then(Value::as_str);
     let unicode = legacy.get("unicode").and_then(Value::as_str);
     let unicode2 = legacy.get("unicode2").and_then(Value::as_str);
@@ -284,7 +305,7 @@ fn style(row: &ButtonRow, legacy: &Value) -> Style {
         icon: non_empty(unicode),
         icon2: non_empty(unicode2),
         icon_family: non_empty(prefix),
-        title: non_empty(row.title.as_deref()),
+        title: tile_title(row, names),
         // Legacy shape column is an int (0 = default); pass non-defaults
         // through so the client can render them.
         shape: (row.shape != 0).then(|| row.shape.to_string()),
@@ -312,6 +333,27 @@ fn style(row: &ButtonRow, legacy: &Value) -> Style {
 
 fn non_empty(value: Option<&str>) -> Option<String> {
     value.filter(|v| !v.is_empty()).map(str::to_string)
+}
+
+/// The tile's title: the row's own title, else (for board-switch tiles)
+/// the target board's name. The legacy wire leaves the title empty and
+/// lets the client resolve the name from the command; the v2 wire
+/// carries no command, so the server resolves it (MOB-09). An unknown
+/// target (deleted board) or junk command yields no injected title.
+fn tile_title(row: &ButtonRow, names: &HashMap<i64, String>) -> Option<String> {
+    if let Some(title) = non_empty(row.title.as_deref()) {
+        return Some(title);
+    }
+    if row.kind != "board" {
+        return None;
+    }
+    row.command
+        .as_deref()
+        .and_then(|c| serde_json::from_str::<Value>(c).ok())
+        .and_then(|cmd| cmd.get("id").and_then(Value::as_i64))
+        .and_then(|id| names.get(&id))
+        .filter(|name| !name.is_empty())
+        .cloned()
 }
 
 /// Legacy int column -> optional wire number, dropping the 0 default
@@ -397,7 +439,7 @@ mod tests {
         // answers with UNSUPPORTED_INTERACTION
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         assert_eq!(tile.manifest.interactions, set);
     }
 
@@ -413,7 +455,12 @@ mod tests {
     fn vol_mute_maps_to_toggle_with_channel() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("vol", "button", Some("vol_mute")), &assets, &engine);
+        let tile = build_tile(
+            &row("vol", "button", Some("vol_mute")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(
             tile.placement,
             Placement {
@@ -444,7 +491,12 @@ mod tests {
     fn plain_button_press_interactions() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("key", "button", Some("CTRL + K")), &assets, &engine);
+        let tile = build_tile(
+            &row("key", "button", Some("CTRL + K")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(tile.manifest.kind, WidgetKind::Button);
         assert_eq!(
             tile.manifest.interactions,
@@ -461,7 +513,12 @@ mod tests {
     fn graph_mode_becomes_series_channel() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("si-cpu", "graph", Some("cpu-key")), &assets, &engine);
+        let tile = build_tile(
+            &row("si-cpu", "graph", Some("cpu-key")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(tile.manifest.kind, WidgetKind::Graph);
         let state = tile.manifest.state.unwrap();
         assert_eq!(state.channel, "ext.cpu-key"); // raw command wins when set
@@ -473,7 +530,12 @@ mod tests {
     fn key_and_hold_buttons_declare_press_pair() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("key", "button", Some("A")), &assets, &engine);
+        let tile = build_tile(
+            &row("key", "button", Some("A")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(
             tile.manifest.interactions,
             vec![
@@ -484,7 +546,7 @@ mod tests {
         );
         let mut r = row("vol", "button", Some("vol_down"));
         r.options = Some(r#"{"hold":{"repeat":{"delay_ms":400,"interval_ms":120}}}"#.into());
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         assert!(tile
             .manifest
             .interactions
@@ -497,7 +559,7 @@ mod tests {
         let engine = StateEngine::new(120);
         let mut r = row("clock-display-time", "button", Some("clock-12h"));
         r.title = None;
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         let params = tile.manifest.params;
         assert_eq!(params["widget"], "clock");
         assert_eq!(params["clock_format"], "12h");
@@ -511,7 +573,7 @@ mod tests {
         r.icon = Some("headphones".into());
         r.icon2 = Some("deaf".into());
         r.color2 = Some("#ED4245".into());
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         let style = tile.manifest.style.unwrap();
         assert_eq!(style.icon_family.as_deref(), Some("fas"));
         assert!(
@@ -525,12 +587,22 @@ mod tests {
     fn slider_and_custom_value_kinds() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("speaker-volume", "slider", None), &assets, &engine);
+        let tile = build_tile(
+            &row("speaker-volume", "slider", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(tile.manifest.kind, WidgetKind::Slider);
         assert_eq!(tile.manifest.interactions, vec![Interaction::Slide]);
         assert_eq!(tile.manifest.state.unwrap().channel, "ext.speaker-volume");
 
-        let tile = build_tile(&row("toggle-microphone", "button", None), &assets, &engine);
+        let tile = build_tile(
+            &row("toggle-microphone", "button", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         // toggle-microphone resolves through the discord extension input
         // (custom-value app), but without that input registered it stays
         // a button - extension inputs are registered by the host.
@@ -544,7 +616,7 @@ mod tests {
         let mut r = row("url", "button", Some("https://x.co"));
         let png = format!("data:image/png;base64,{}", use_base64(b"img-bytes"));
         r.img = Some(png);
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         assert!(tile.manifest.asset_hash.is_some());
         assert_eq!(
             assets
@@ -560,7 +632,12 @@ mod tests {
         // with no command must still get its channel declared
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("ai-plan-limits", "status", Some("")), &assets, &engine);
+        let tile = build_tile(
+            &row("ai-plan-limits", "status", Some("")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         let state = tile.manifest.state.expect("type channel for status mode");
         assert_eq!(state.channel, "ext.ai-plan-limits");
         assert_eq!(state.shape, StateShape::Scalar);
@@ -575,13 +652,68 @@ mod tests {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
         let b = board_row(1_000_000, 1_000_000);
-        let board = build_board(&b, &[], &assets, &engine);
+        let board = build_board(&b, &[], &HashMap::new(), &assets, &engine);
         // v2 clients lay out a W*H grid from these numbers: a junk row
         // must not reach them at full size (audit C4)
         assert_eq!(board.width, 32);
         assert_eq!(board.height, 32);
-        let degenerate = build_board(&board_row(-5, 0), &[], &assets, &engine);
+        let degenerate = build_board(&board_row(-5, 0), &[], &HashMap::new(), &assets, &engine);
         assert_eq!((degenerate.width, degenerate.height), (1, 1));
+    }
+
+    #[test]
+    fn build_boards_labels_untitled_board_switch_tiles() {
+        // the production snapshot path: an untitled `board` tile on the
+        // home board must carry the target board's name in style.title
+        // (MOB-09 - the v2 wire carries no command for clients to
+        // resolve it themselves)
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let mut switch = row("board", "button", Some(r#"{"id": 2}"#));
+        switch.title = None;
+        switch.board_id = 7;
+        let mut home = board_row(4, 3);
+        home.id = 7;
+        home.name = "Home".into();
+        let mut media = board_row(2, 2);
+        media.id = 2;
+        media.name = "Media".into();
+        let backend = NamesBackend {
+            boards: vec![home, media],
+            buttons: vec![switch],
+        };
+        let boards = build_boards(&backend, &assets, &engine);
+        assert_eq!(boards[0].tiles.len(), 1);
+        let style = boards[0].tiles[0].manifest.style.as_ref().unwrap();
+        assert_eq!(style.title.as_deref(), Some("Media"));
+    }
+
+    /// Minimal Backend for the board-name wiring test: boards plus their
+    /// rows, everything else inert.
+    struct NamesBackend {
+        boards: Vec<pulpit_db::BoardRow>,
+        buttons: Vec<ButtonRow>,
+    }
+
+    impl Backend for NamesBackend {
+        fn get_boards(&self) -> Vec<pulpit_db::BoardRow> {
+            self.boards.clone()
+        }
+        fn get_board(&self, board_id: i64) -> Option<pulpit_db::BoardRow> {
+            self.boards.iter().find(|b| b.id == board_id).cloned()
+        }
+        fn get_buttons_by_board(&self, board_id: i64) -> Vec<ButtonRow> {
+            self.buttons
+                .iter()
+                .filter(|b| b.board_id == board_id)
+                .cloned()
+                .collect()
+        }
+        fn get_button(&self, _id: i64) -> Option<ButtonRow> {
+            None
+        }
+        fn exec(&self, _button: ButtonRow, _tap_start: bool, _sink: &mut dyn pulpit_actions::EventSink) {}
+        fn slider(&self, _button: ButtonRow, _value: f64) {}
     }
 
     fn board_row(width: i64, height: i64) -> pulpit_db::BoardRow {

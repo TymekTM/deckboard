@@ -12,6 +12,7 @@ use pulpit_legacy::Mapper;
 use pulpit_proto::{Interaction, WidgetKind};
 use pulpit_v2::boards::{build_tile, hold_repeat_config};
 use pulpit_v2::{AssetStore, StateEngine};
+use std::collections::HashMap;
 
 fn row(kind: &str, mode: &str, command: Option<&str>) -> ButtonRow {
     ButtonRow {
@@ -51,10 +52,18 @@ fn row(kind: &str, mode: &str, command: Option<&str>) -> ButtonRow {
 
 /// The same row through both wire builders.
 fn both(row: &ButtonRow) -> (serde_json::Value, pulpit_proto::Tile) {
+    both_with(row, &HashMap::new())
+}
+
+/// `both` with a board-id -> name map for board-switch tile titles.
+fn both_with(
+    row: &ButtonRow,
+    names: &HashMap<i64, String>,
+) -> (serde_json::Value, pulpit_proto::Tile) {
     let legacy = Mapper::new().shortcut_payload(row);
     let dir = tempfile::tempdir().unwrap();
     let assets = AssetStore::open(dir.path().to_path_buf()).unwrap();
-    let tile = build_tile(row, &assets, &StateEngine::new(120));
+    let tile = build_tile(row, names, &assets, &StateEngine::new(120));
     (legacy, tile)
 }
 
@@ -321,7 +330,7 @@ fn shared_style_fields_agree_between_legacy_and_v2() {
     let legacy = Mapper::new().shortcut_payload(&row);
     let (assets, _dir) = store();
     let engine = StateEngine::new(120);
-    let tile = build_tile(&row, &assets, &engine);
+    let tile = build_tile(&row, &HashMap::new(), &assets, &engine);
     let style = tile.manifest.style.as_ref().expect("style present");
 
     let get = |key: &str| -> Option<String> {
@@ -451,7 +460,7 @@ fn state2_image_reaches_the_v2_wire() {
     );
     let (assets, _dir) = store();
     let engine = StateEngine::new(120);
-    let tile = build_tile(&row, &assets, &engine);
+    let tile = build_tile(&row, &HashMap::new(), &assets, &engine);
     let hash = tile
         .manifest
         .asset_hash
@@ -464,6 +473,45 @@ fn state2_image_reaches_the_v2_wire() {
         .as_ref()
         .expect("img2 must reach the v2 wire as asset_hash2");
     assert_eq!(assets.get(hash2).unwrap(), b"face-active");
+}
+
+#[test]
+fn untitled_board_tile_shows_the_target_board_name() {
+    // MOB-09: an untitled board-switch tile shows the target board's
+    // name on the desktop (TileCell resolves it client-side from the
+    // command) but the v2 wire carried no command, so tablets showed an
+    // empty face. The legacy wire keeps the empty title (the stock
+    // client resolves the name itself); the v2 server resolves it, and
+    // both surfaces end up labeling the tile "Media".
+    let names = HashMap::from([(2, "Media".to_string())]);
+    let mut r = row("board", "button", Some(r#"{"id": 2}"#));
+    r.title = None;
+    let (legacy, tile) = both_with(&r, &names);
+    assert_eq!(legacy["title"].as_str(), None, "legacy title stays raw");
+    assert_eq!(style_of(&tile).title.as_deref(), Some("Media"));
+
+    // an explicit title always wins
+    let r = row("board", "button", Some(r#"{"id": 2}"#)); // title "T"
+    let (_, tile) = both_with(&r, &names);
+    assert_eq!(style_of(&tile).title.as_deref(), Some("T"));
+
+    // unknown target (board deleted): nothing to inject
+    let mut r = row("board", "button", Some(r#"{"id": 9}"#));
+    r.title = None;
+    let (_, tile) = both_with(&r, &names);
+    assert_eq!(style_of(&tile).title, None);
+
+    // junk command JSON: defensive, no injection
+    let mut r = row("board", "button", Some("not json"));
+    r.title = None;
+    let (_, tile) = both_with(&r, &names);
+    assert_eq!(style_of(&tile).title, None);
+
+    // non-board tiles never get a name injected
+    let mut r = row("url", "button", Some("https://x.co"));
+    r.title = None;
+    let (_, tile) = both_with(&r, &names);
+    assert_eq!(style_of(&tile).title, None);
 }
 
 fn store() -> (AssetStore, tempfile::TempDir) {

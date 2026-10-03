@@ -366,9 +366,15 @@ impl V2State {
     /// post-commit DB row. `None` when the row is already gone (delete).
     pub fn tile_set_op(&self, board_id: i64, tile_id: i64) -> Option<pulpit_proto::BoardOp> {
         let row = self.backend.get_button(tile_id)?;
+        let names = crate::boards::board_names(self.backend.as_ref());
         Some(pulpit_proto::BoardOp::TileSet {
             board: board_id,
-            tile: Box::new(crate::boards::build_tile(&row, &self.assets, &self.engine)),
+            tile: Box::new(crate::boards::build_tile(
+                &row,
+                &names,
+                &self.assets,
+                &self.engine,
+            )),
         })
     }
 
@@ -378,8 +384,9 @@ impl V2State {
     pub fn board_set_op(&self, board_id: i64) -> Option<pulpit_proto::BoardOp> {
         let board = self.backend.get_board(board_id)?;
         let buttons = self.backend.get_buttons_by_board(board_id);
+        let names = crate::boards::board_names(self.backend.as_ref());
         Some(pulpit_proto::BoardOp::BoardSet {
-            board: crate::boards::build_board(&board, &buttons, &self.assets, &self.engine),
+            board: crate::boards::build_board(&board, &buttons, &names, &self.assets, &self.engine),
         })
     }
 
