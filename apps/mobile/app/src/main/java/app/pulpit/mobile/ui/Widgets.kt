@@ -324,8 +324,12 @@ internal fun sparkY(v: Double, min: Double, span: Double): Double =
 /** Drag events fire hundreds of times per gesture and every slide send is
  *  a websocket round-trip the server executes - ship at most one value
  *  per [throttleMs], plus the final one on release ([push] with
- *  `force = true`). One instance per tile, remembered alongside it. */
-class SlideThrottle(private val throttleMs: Long = 30) {
+ *  `force = true`). One instance per tile, remembered alongside it.
+ *  The desktop's touch mode sends at most ~7/s (SLIDER_SEND_INTERVAL =
+ *  150 in TileCell.vue); 120 ms puts the deck in the same order
+ *  without feeling laggy (round 4, MOB-11 - this used to be 30 ms,
+ *  5x the desktop's rate of Wi-Fi wakeups and server execs). */
+class SlideThrottle(private val throttleMs: Long = SLIDE_THROTTLE_MS) {
     private var lastSentAt = 0L
 
     fun push(value: Float, force: Boolean = false, send: (Float) -> Unit) {
@@ -336,6 +340,9 @@ class SlideThrottle(private val throttleMs: Long = 30) {
         }
     }
 }
+
+/** Slide send cadence shared by sliders and knobs; see [SlideThrottle]. */
+const val SLIDE_THROTTLE_MS = 120L
 
 /** Bucket-average [history] down to at most [max] points (keeps shape,
  *  drops jitter). A no-op when the window already fits. */
