@@ -257,24 +257,46 @@ fn prune_old_logs(log_dir: &std::path::Path, prefix: &str, keep_days: u64) {
     }
 }
 
-/// Register one button-style source (extension input, Voicemeeter or
-/// Discord declaration) so the legacy mapper can style its tiles.
-fn register_ext_input(
-    value: &str,
-    icon: Option<&str>,
-    color: Option<&str>,
-    font_icon: &str,
-    mode: Option<&str>,
-    command: Option<&str>,
-) {
-    pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
-        value: value.to_string(),
-        icon: icon.map(str::to_string),
-        color: color.map(str::to_string),
-        font_icon: Some(font_icon.to_string()),
-        mode: mode.map(str::to_string),
-        command: command.map(str::to_string),
-    });
+/// Emit to the editor WebView only when its window can be seen: a
+/// tray-hidden window cannot render pushes, and every emit is an IPC
+/// round-trip with a second serialization of the payload. Tablets ride
+/// the hub broadcasts and are unaffected. Periodic lanes re-deliver on
+/// their next tick; change-gated callers must NOT advance their gate
+/// when this returns false, or the shown window keeps a stale value.
+fn emit_if_visible(app: &AppHandle, event: &str, payload: &serde_json::Value) -> bool {
+    let visible = app
+        .get_webview_window("main")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    if visible {
+        let _ = app.emit(event, payload);
+    }
+    visible
+}
+
+/// The desktop host's [`pulpit_host::ClientFeed`] impl: the v2 state
+/// engine, the legacy hub, and the editor WebView as the extra sink
+/// (gated on window visibility by [`emit_if_visible`]). `engine` is
+/// `None` when the v2 stack failed to start - pushes still reach the
+/// WebView and the stock clients.
+struct DesktopFeed {
+    app: AppHandle,
+    engine: Option<Arc<pulpit_v2::StateEngine>>,
+    hub: Arc<Hub>,
+}
+
+impl pulpit_host::ClientFeed for DesktopFeed {
+    fn engine_set(&self, key: &str, value: serde_json::Value) {
+        if let Some(engine) = &self.engine {
+            engine.set(&pulpit_v2::ext_channel(key), value);
+        }
+    }
+    async fn broadcast_status(&self, payload: &str) {
+        self.hub.broadcast("app_status_update", Some(payload)).await;
+    }
+    fn emit_status(&self, payload: &serde_json::Value) -> bool {
+        emit_if_visible(&self.app, "app-status-update", payload)
+    }
 }
 
 /// Open the database (read-write: the editor is now the single writer,
@@ -332,36 +354,18 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     let ext_dir = std::env::var_os("PULPIT_EXT_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| data_dir.join("extensions"));
-    // Native system-info and callurl replace their JS packages (the JS
-    // runtimes were the heaviest part of the extension fleet); the manager
-    // must not load them. Mirrors the headless server.
-    let native_replaced = ["deckboard-system-info", "deckboard-callurl"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
-    let (ext_manager, mut ext_events) = ExtManager::load(&ext_dir, &settings, &native_replaced);
+    // Extension inputs and every native declaration (Voicemeeter,
+    // Discord, system-info, callurl, AI dev-work) register through the
+    // shared host module, mirroring the headless server exactly.
+    let (ext_manager, ext_events) =
+        ExtManager::load(&ext_dir, &settings, &pulpit_host::native_replaced());
     for (package, name, error) in ext_manager.summary() {
         match error {
             Some(e) => tracing::warn!(package, name, error = e, "extension disabled"),
             None => tracing::info!(package, name, "extension ready"),
         }
     }
-    for input in ext_manager.inputs() {
-        register_ext_input(
-            &input.value,
-            input.icon.as_deref(),
-            input.color.as_deref(),
-            input.font_icon.as_deref().unwrap_or("fas"),
-            input.mode.as_deref(),
-            input.command.as_deref(),
-        );
-    }
-    for (value, icon, font_icon, color) in pulpit_vm::input_declarations() {
-        register_ext_input(value, icon, Some(color), font_icon, None, None);
-    }
-    for (value, icon, color, mode) in pulpit_discord::input_declarations() {
-        register_ext_input(value, Some(icon), Some(color), "fas", mode, None);
-    }
+    pulpit_host::register_inputs(&ext_manager);
 
     let backend = Arc::new(
         SqlBackend::new(db)
@@ -378,7 +382,6 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
     // /v2/pair. Shares the backend with the legacy layer; a broken devices
     // list or asset store only disables v2, never the whole editor.
-    let feed_v2 = Arc::new(pulpit_v2::StateEngine::new(pulpit_proto::SERIES_CAP));
     let v2 = {
         let devices = pulpit_v2::DeviceStore::load(data_dir.join("devices.json"));
         let assets = pulpit_v2::AssetStore::open(data_dir.join("assets"));
@@ -391,7 +394,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                     devices: Arc::new(devices),
                     pairing: Arc::new(pulpit_v2::Pairing::new()),
                     assets: Arc::new(assets),
-                    engine: feed_v2.clone(),
+                    engine: Arc::new(pulpit_v2::StateEngine::new(pulpit_proto::SERIES_CAP)),
                     generation: pulpit_v2::Generation::starting_at(1),
                     boards_cache: Default::default(),
                     pair_requests: Default::default(),
@@ -444,203 +447,39 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         ));
     }
     // Extension timers stretch to IDLE_TICK_FLOOR while no client is
-    // watching (see ExtManager::set_activity); keep the count current.
-    {
-        let ext = ext_manager.clone();
-        let hub = hub.clone();
-        let v2_hub = v2.as_ref().map(|v2| v2.hub.clone());
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                let mut clients = hub.len().await;
-                if let Some(v2_hub) = &v2_hub {
-                    clients += v2_hub.count();
-                }
-                ext.set_activity(clients);
-            }
-        });
-    }
-    // Extension pushes feed both protocols: the legacy app_status_update
-    // broadcast (stock client) and one v2 channel per data key.
-    fn feed_ext(engine: &pulpit_v2::StateEngine, data: &serde_json::Value) {
-        if let Some(map) = data.as_object() {
-            for (key, value) in map {
-                engine.set(&format!("ext.{key}"), value.clone());
-            }
-        }
-    }
+    // watching (see ExtManager::set_activity); the shared activity loop
+    // keeps the count current.
+    tauri::async_runtime::spawn(pulpit_host::activity_loop(
+        ext_manager.clone(),
+        hub.clone(),
+        v2.as_ref().map(|v2| v2.hub.clone()),
+    ));
 
-    // Emit to the editor WebView only when its window can be seen: a
-    // tray-hidden window cannot render pushes, and every emit is an IPC
-    // round-trip with a second serialization of the payload. Tablets ride
-    // the hub broadcasts and are unaffected. Periodic lanes re-deliver on
-    // their next tick; change-gated callers must NOT advance their gate
-    // when this returns false, or the shown window keeps a stale value.
-    fn emit_if_visible(app: &AppHandle, event: &str, payload: &serde_json::Value) -> bool {
-        let visible = app
-            .get_webview_window("main")
-            .map(|w| w.is_visible().unwrap_or(false))
-            .unwrap_or(false);
-        if visible {
-            let _ = app.emit(event, payload);
-        }
-        visible
-    }
-
-    // extensions push custom values -> app_status_update, like the original
-    {
-        let hub = hub.clone();
-        let app = app.clone();
-        let feed_v2 = feed_v2.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some(pulpit_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
-                tracing::debug!(keys = ?data.as_object().map(|o| o.keys().collect::<Vec<_>>()), "extension value push");
-                feed_ext(&feed_v2, &data);
-                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
-                hub.broadcast("app_status_update", Some(&payload.to_string()))
-                    .await;
-                emit_if_visible(&app, "app-status-update", &payload);
-            }
-        });
-    }
-
-    // native system-info: declarations style si-* tiles like the JS package
-    // did, and its push loop feeds CPU/RAM and friends to both protocols on
-    // the original cadence (the JS runtime itself was dropped in M2).
-    for (value, icon, font_icon, color, mode) in pulpit_sysinfo::input_declarations() {
-        register_ext_input(value, Some(icon), Some(color), font_icon, Some(mode), None);
-    }
-    {
-        let mut sysinfo_values = pulpit_sysinfo::spawn_push();
-        let hub = hub.clone();
-        let app = app.clone();
-        let feed_v2 = feed_v2.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some(data) = sysinfo_values.recv().await {
-                feed_ext(&feed_v2, &data);
-                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
-                hub.broadcast("app_status_update", Some(&payload.to_string()))
-                    .await;
-                emit_if_visible(&app, "app-status-update", &payload);
-            }
-        });
-    }
-
-    // native AI dev-work source: declarations style the ai-* display tiles
-    // (plan limits, agent progress), and its poll loop feeds both protocols
-    // from local transcripts, agent sessions and configured plan APIs.
-    for (value, icon, color, mode) in pulpit_aidev::input_declarations() {
-        register_ext_input(value, Some(icon), Some(color), "fas", Some(mode), None);
-    }
-    {
-        // the config location was resolved at the top of setup_core
-        // (PULPIT_AIDEV_CONFIG override or pulpitApp/aidev.json)
-        let aidev_config = aidev_config.clone();
-        // the transcript sources live in the real user home, not the
-        // pulpitApp data dir
-        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        let paths = pulpit_aidev::Paths {
-            config: aidev_config,
-            zcode_cli: home.join(".zcode").join("cli"),
-            claude_projects: home.join(".claude").join("projects"),
-            codex_sessions: home.join(".codex").join("sessions"),
-            opencode_db: home
-                .join(".local")
-                .join("share")
-                .join("opencode")
-                .join("opencode.db"),
-            antigravity_conversations: home
-                .join(".gemini")
-                .join("antigravity")
-                .join("conversations"),
-        };
-        let mut aidev_values = pulpit_aidev::spawn_push(paths);
-        let hub = hub.clone();
-        let app = app.clone();
-        let feed_v2 = feed_v2.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some(data) = aidev_values.recv().await {
-                feed_ext(&feed_v2, &data);
-                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
-                hub.broadcast("app_status_update", Some(&payload.to_string()))
-                    .await;
-                emit_if_visible(&app, "app-status-update", &payload);
-            }
-        });
-    }
-
-    // master audio status watcher: the original polls every 5 s and pushes
-    // speaker-volume/speaker-muted; that is what flips mute tiles live.
-    // The active output device rides along (THIRD_PARTY_APP, like the
-    // original) but is read only every 6th cycle (~30 s, like the headless
-    // server) and pushed only when it changed, so tablets are not spammed.
-    // Volume/mute likewise broadcast only on change: the v2 engine dedupes
-    // anyway, the legacy lane and the WebView do not.
-    {
-        let hub = hub.clone();
-        let app = app.clone();
-        let backend = backend.clone();
-        let feed_v2 = feed_v2.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut last_device: Option<String> = None;
-            let mut last_level: Option<f32> = None;
-            let mut last_muted: Option<bool> = None;
-            let mut tick: u32 = 0;
-            loop {
-                tick = tick.wrapping_add(1);
-                let want_device = tick.is_multiple_of(6);
-                interval.tick().await;
-                // Speaker COM calls block; keep them off the runtime
-                // workers. The shared SqlBackend owns the lazy speaker
-                // instance, so exec switches and watcher reads agree.
-                // `speaker_snapshot` builds ONE COM chain for all values.
-                let snapshot_backend = backend.clone();
-                let snapshot = tauri::async_runtime::spawn_blocking(move || {
-                    snapshot_backend.speaker_snapshot(want_device)
-                })
-                .await
-                .ok();
-                if let Some((Some(volume), Some(muted), _)) = snapshot {
-                    // percent 0..=100 -> fraction like the original n/100
-                    let level = (volume / 100.0 * 1000.0).round() / 1000.0;
-                    feed_v2.set("speaker-volume", serde_json::json!(level));
-                    feed_v2.set("speaker-muted", serde_json::json!(muted));
-                    if last_level != Some(level) || last_muted != Some(muted) {
-                        let payload = serde_json::json!({
-                            "app": "APP_CUSTOM_VALUE",
-                            "data": {"speaker-volume": level, "speaker-muted": muted},
-                        });
-                        hub.broadcast("app_status_update", Some(&payload.to_string()))
-                            .await;
-                        // advance the gate only once the WebView got it; a
-                        // hidden window retries on the next tick (<= 5 s)
-                        if emit_if_visible(&app, "app-status-update", &payload) {
-                            last_level = Some(level);
-                            last_muted = Some(muted);
-                        }
-                    }
-                }
-                if let Some((_, _, Some(id))) = snapshot {
-                    if last_device.as_deref() != Some(id.as_str()) {
-                        feed_v2.set("speaker-device", serde_json::json!(id));
-                        let payload = serde_json::json!({
-                            "app": "THIRD_PARTY_APP",
-                            "data": {"speaker-device": id},
-                        });
-                        hub.broadcast("app_status_update", Some(&payload.to_string()))
-                            .await;
-                        if emit_if_visible(&app, "app-status-update", &payload) {
-                            last_device = Some(id.clone());
-                        }
-                    }
-                }
-            }
-        });
-    }
+    // Producer pumps (extension fleet, native system-info, AI dev-work,
+    // speaker watcher) live in the shared host module too - one
+    // implementation, same lanes and change-gating as the headless
+    // server (CORE-06), with the WebView as this host's extra sink.
+    let feed = Arc::new(DesktopFeed {
+        app: app.clone(),
+        engine: v2.as_ref().map(|v2| v2.engine.clone()),
+        hub: hub.clone(),
+    });
+    tauri::async_runtime::spawn(pulpit_host::forward_ext_events(
+        feed.clone(),
+        ext_events,
+    ));
+    tauri::async_runtime::spawn(pulpit_host::forward_producer(
+        feed.clone(),
+        pulpit_sysinfo::spawn_push(),
+    ));
+    tauri::async_runtime::spawn(pulpit_host::forward_producer(
+        feed.clone(),
+        pulpit_aidev::spawn_push(pulpit_host::aidev_paths(aidev_config.clone())),
+    ));
+    tauri::async_runtime::spawn(pulpit_host::speaker_watch(
+        feed.clone(),
+        backend.clone() as Arc<dyn Backend>,
+    ));
 
     let state = Arc::new(AppState {
         hub: hub.clone(),

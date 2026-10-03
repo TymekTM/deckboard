@@ -3691,6 +3691,7 @@ dependencies = [
  "pulpit-db",
  "pulpit-discord",
  "pulpit-ext",
+ "pulpit-host",
  "pulpit-legacy",
  "pulpit-proto",
  "pulpit-sysinfo",
@@ -3740,6 +3741,25 @@ dependencies = [
  "tokio",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "pulpit-host"
+version = "1.3.0"
+dependencies = [
+ "dirs 5.0.1",
+ "pulpit-actions",
+ "pulpit-aidev",
+ "pulpit-db",
+ "pulpit-discord",
+ "pulpit-ext",
+ "pulpit-legacy",
+ "pulpit-sysinfo",
+ "pulpit-v2",
+ "pulpit-vm",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3793,6 +3813,7 @@ dependencies = [
  "pulpit-db",
  "pulpit-discord",
  "pulpit-ext",
+ "pulpit-host",
  "pulpit-legacy",
  "pulpit-os",
  "pulpit-proto",
