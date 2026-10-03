@@ -203,6 +203,7 @@ async fn pair_request_create(
     };
     let pairing = state.pairing.clone();
     let decision_request = request.clone();
+    let pairing_code = code.clone();
     tokio::spawn(async move {
         let gate = pairing.request_gate();
         let decision = tokio::task::spawn_blocking(move || match gate {
@@ -216,6 +217,9 @@ async fn pair_request_create(
         .unwrap_or(false);
         use crate::devices::PairDecision;
         request.set_decision(if decision {
+            // the operator just compared this code on the dialog: the
+            // hello that consumes it must not ask a second time
+            pairing.pre_approve(&pairing_code);
             PairDecision::Approved
         } else {
             PairDecision::Rejected
