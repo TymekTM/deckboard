@@ -279,6 +279,14 @@ function sliderValue() {
 }
 function startSlider(event) {
   const rect = event.currentTarget.getBoundingClientRect();
+  // capture the pointer so the drag survives the pointer leaving the
+  // tile (or the window losing it mid-move); release is implicit on
+  // pointerup, and the window-level listeners still receive every event
+  try {
+    event.currentTarget.setPointerCapture(event.pointerId);
+  } catch {
+    /* capture is best-effort - the fallback listeners keep working */
+  }
   const setVal = (e) => {
     sliderVal.value = Math.min(1, Math.max(0, 1 - (e.clientY - rect.top) / rect.height));
   };

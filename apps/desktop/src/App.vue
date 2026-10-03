@@ -154,6 +154,18 @@ const settingsOpen = ref(false);
 // everywhere: {x, y, items: [{label, icon, danger, run}]}
 const contextMenu = ref(null);
 
+// transient failure feedback (012 lower-priority): api.js wrappers reject
+// silently otherwise, so a failed save/import leaves the user guessing
+const flash = ref(null);
+let flashTimer = null;
+
+function flashError(message, error) {
+  if (error) console.error(message, error);
+  flash.value = error ? `${message}: ${error}` : message;
+  if (flashTimer) clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => (flash.value = null), 6000);
+}
+
 function openContextMenu(event, items) {
   contextMenu.value = {
     x: Math.min(event.clientX, window.innerWidth - 216),
@@ -195,23 +207,27 @@ async function pasteTile(snapshot, pos) {
   const h = Math.max(1, snapshot.h || 1);
   const x = clamp(pos.x, 0, Math.max(0, board.width - w));
   const y = clamp(pos.y, 0, Math.max(0, board.height - h));
-  const id = await api.createButton(
-    board.id,
-    snapshot.type || "key",
-    snapshot.mode || "button",
-    x,
-    y
-  );
-  await api.updateButton({
-    ...snapshot,
-    id,
-    board_id: board.id,
-    x,
-    y,
-    w,
-    h,
-  });
-  await loadBoards();
+  try {
+    const id = await api.createButton(
+      board.id,
+      snapshot.type || "key",
+      snapshot.mode || "button",
+      x,
+      y
+    );
+    await api.updateButton({
+      ...snapshot,
+      id,
+      board_id: board.id,
+      x,
+      y,
+      w,
+      h,
+    });
+    await loadBoards();
+  } catch (e) {
+    flashError("Pasting the tile failed", e);
+  }
 }
 
 function tileContextMenu(tile, event) {
@@ -326,7 +342,11 @@ async function loadBoards() {
       currentId.value = boards.value[0]?.id ?? null;
     }
   }
-  if (touchBoardId.value === null) touchBoardId.value = currentId.value;
+  // touchBoardId must never dangle on a deleted board - fall back to the
+  // current one (null currentId keeps it null, same as before)
+  if (!boards.value.some((b) => b.id === touchBoardId.value)) {
+    touchBoardId.value = currentId.value;
+  }
 }
 
 async function load() {
@@ -356,26 +376,31 @@ async function tileCreated(form) {
   const boardId_ = form.board_id ?? currentId.value;
   const board = boards.value.find((b) => b.id === boardId_);
   if (!board) return;
-  const id = await api.createButton(
-    board.id,
-    form.type,
-    form.mode || "button",
-    form.x,
-    form.y
-  );
-  await api.updateButton({
-    ...form,
-    id,
-    board_id: board.id,
-    w: form.w || 1,
-    h: form.h || 1,
-  });
-  createFlow.value = null;
-  await loadBoards();
-  const tile = boards.value
-    .find((b) => b.id === board.id)
-    ?.buttons.find((b) => b.id === id);
-  if (tile) editingTile.value = tile;
+  try {
+    const id = await api.createButton(
+      board.id,
+      form.type,
+      form.mode || "button",
+      form.x,
+      form.y
+    );
+    await api.updateButton({
+      ...form,
+      id,
+      board_id: board.id,
+      w: form.w || 1,
+      h: form.h || 1,
+    });
+    createFlow.value = null;
+    await loadBoards();
+    const tile = boards.value
+      .find((b) => b.id === board.id)
+      ?.buttons.find((b) => b.id === id);
+    if (tile) editingTile.value = tile;
+  } catch (e) {
+    // keep the dialog open with the entered values on a failed save
+    flashError("Creating the tile failed", e);
+  }
 }
 
 async function tileSlider(tile, value) {
@@ -383,7 +408,13 @@ async function tileSlider(tile, value) {
 }
 
 async function tileMoved(tile, x, y, w, h) {
-  await api.moveButton(tile.id, tile.board_id, x, y, w, h);
+  try {
+    await api.moveButton(tile.id, tile.board_id, x, y, w, h);
+  } catch (e) {
+    flashError("Moving the tile failed", e);
+    await loadBoards();
+    return;
+  }
   tile.x = x;
   tile.y = y;
   tile.w = w;
@@ -391,7 +422,13 @@ async function tileMoved(tile, x, y, w, h) {
 }
 
 async function tileEdited(button) {
-  await api.updateButton(button);
+  try {
+    await api.updateButton(button);
+  } catch (e) {
+    // keep the dialog open so the edits are not lost
+    flashError("Saving the tile failed", e);
+    return;
+  }
   editingTile.value = null;
   await loadBoards();
 }
@@ -404,7 +441,12 @@ async function tileDeleted(tile) {
     kind: "warning",
   });
   if (!ok) return;
-  await api.deleteButton(tile.id, tile.board_id);
+  try {
+    await api.deleteButton(tile.id, tile.board_id);
+  } catch (e) {
+    flashError("Deleting the tile failed", e);
+    return;
+  }
   editingTile.value = null;
   await loadBoards();
 }
@@ -417,7 +459,11 @@ async function doExport() {
   });
   if (!path) return;
   const ids = boards.value.map((b) => b.id);
-  await api.exportBoards(ids, path);
+  try {
+    await api.exportBoards(ids, path);
+  } catch (e) {
+    flashError("Exporting boards failed", e);
+  }
 }
 
 async function doImport() {
@@ -427,8 +473,12 @@ async function doImport() {
     filters: [{ name: "Board JSON", extensions: ["boardjson"] }],
   });
   if (!path) return;
-  await api.importBoards(path);
-  await loadBoards();
+  try {
+    await api.importBoards(path);
+    await loadBoards();
+  } catch (e) {
+    flashError("Importing boards failed", e);
+  }
 }
 
 async function clearCurrentBoard() {
@@ -466,7 +516,8 @@ function bumpZoom(dir) {
 
 let unlisteners = [];
 onMounted(async () => {
-  await load();
+  // listeners register BEFORE the initial load (012 lower-priority): a
+  // rejected load must not leave the app deaf to tray/hotkey/board events
   unlisteners.push(
     await listen("toggle-touch-mode", toggleTouch),
     await listen("change-board", (e) => {
@@ -479,6 +530,10 @@ onMounted(async () => {
   window.addEventListener("mousedown", onGlobalMousedown, true);
   window.addEventListener("keydown", onKeydown, true);
   document.addEventListener("visibilitychange", onVisibilityChange);
+  load().catch((e) => {
+    // status stays dbOk:false, so the banner explains the state
+    console.error("initial load failed", e);
+  });
 });
 onUnmounted(() => {
   window.removeEventListener("mousedown", onGlobalMousedown, true);
@@ -595,6 +650,11 @@ function onKeydown(event) {
         Database is locked or missing. Close the original Deckboard app and
         restart the editor.
       </div>
+
+      <!-- transient failure feedback (save/import/export errors) -->
+      <Transition name="pop">
+        <div v-if="flash" class="flash" role="status">{{ flash }}</div>
+      </Transition>
 
       <template v-if="status.dbOk">
         <header v-if="!touchMode" class="board-head" @contextmenu.prevent="currentBoard && boardContextMenu(currentBoard, $event)">
@@ -942,6 +1002,23 @@ function onKeydown(event) {
   line-height: 1.4;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
   z-index: 25;
+}
+.flash {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(640px, 90%);
+  background: var(--danger);
+  color: #fff;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  z-index: 26;
+  pointer-events: none;
+  overflow-wrap: anywhere;
 }
 .board-head {
   display: flex;
