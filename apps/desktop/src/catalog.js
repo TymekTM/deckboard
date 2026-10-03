@@ -479,3 +479,15 @@ export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
 // Grid geometry of the original editor: 96 px cell, 100 px row.
 export const CELL_W = 96;
 export const ROW_H = 100;
+
+// Board width/height cap (012 C4). Mirrors `MAX_BOARD_DIM = 32` in
+// pulpit-backend (import-side bounds); keep the two in sync so the editor
+// can never create a board the backend would reject.
+export const MAX_BOARD_DIM = 32;
+
+// Clamp a board dimension input to the backend's integer bounds.
+export function boardDim(value, fallback = 6) {
+  const n = Math.trunc(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(MAX_BOARD_DIM, Math.max(1, n));
+}

@@ -2,6 +2,7 @@
 import { computed, reactive } from "vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import { MAX_BOARD_DIM, boardDim } from "../catalog";
 
 const props = defineProps({
   mode: { type: String, required: true }, // 'create' | 'edit'
@@ -26,21 +27,21 @@ function overlayClose() {
 }
 
 async function save() {
+  // clamp dimensions to the backend's integer bounds (012 C4): the
+  // number input's min/max only steer the spinner, they do not validate
+  // pasted or typed values
+  const width = boardDim(form.width);
+  const height = boardDim(form.height);
   if (props.mode === "create") {
-    await api.createBoard(
-      form.name || "New board",
-      form.background,
-      Number(form.width),
-      Number(form.height)
-    );
+    await api.createBoard(form.name || "New board", form.background, width, height);
     emit("saved");
     return;
   }
   await api.updateBoard({
     ...props.board,
     name: form.name,
-    width: Number(form.width),
-    height: Number(form.height),
+    width,
+    height,
     background: form.background,
   });
   emit("saved");
@@ -81,11 +82,11 @@ async function deleteBoard() {
         <div class="row">
           <label class="field">
             Columns (width)
-            <input v-model.number="form.width" type="number" min="1" max="15" />
+            <input v-model.number="form.width" type="number" min="1" :max="MAX_BOARD_DIM" step="1" />
           </label>
           <label class="field">
             Rows (height)
-            <input v-model.number="form.height" type="number" min="1" max="15" />
+            <input v-model.number="form.height" type="number" min="1" :max="MAX_BOARD_DIM" step="1" />
           </label>
           <label class="field">
             Background
