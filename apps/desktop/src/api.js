@@ -28,6 +28,7 @@ export const api = {
   listDevices: () => invoke("list_devices"),
   revokeDevice: (id) => invoke("revoke_device", { id }),
   resolveOperatorAsk: (id, approved) => invoke("resolve_operator_ask", { id, approved }),
+  takePendingTouchToggle: () => invoke("take_pending_touch_toggle"),
   adbDevices: () => invoke("adb_devices"),
   adbInstallApk: (path) => invoke("adb_install_apk", { path }),
   checkForUpdates: () => invoke("check_for_updates"),

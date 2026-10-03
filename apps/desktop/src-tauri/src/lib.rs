@@ -196,6 +196,7 @@ pub fn run() {
             list_devices,
             revoke_device,
             resolve_operator_ask,
+            take_pending_touch_toggle,
             adb_devices,
             adb_install_apk,
             check_for_updates,
@@ -712,9 +713,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show-hide" => toggle_main_window(app),
-            "touch-mode" => {
-                let _ = app.emit("toggle-touch-mode", ());
-            }
+            "touch-mode" => toggle_touch_mode(app),
             "autostart" => {
                 use tauri_plugin_autostart::ManagerExt;
                 let launch = app.autolaunch();
@@ -760,6 +759,37 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
+/// A touch-mode toggle that arrived while the WebView was torn down
+/// (DESK-07): the fresh app takes it once its listeners and boards are
+/// up, via the [`take_pending_touch_toggle`] command.
+static PENDING_TOUCH_TOGGLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Toggle touch mode from the tray item or the global hotkey (DESK-07).
+/// The idle sweep may have torn the WebView down - emitting
+/// `toggle-touch-mode` then reaches nobody and, worse, no window
+/// appears. With a live window the emit is delivered (and the window
+/// surfaced so the flip is visible); without one the window is rebuilt
+/// and the intended toggle parked in [`PENDING_TOUCH_TOGGLE`] for the
+/// fresh app to consume on mount - an emit racing the page load would
+/// be lost.
+fn toggle_touch_mode(app: &AppHandle) {
+    match app.get_webview_window("main") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = app.emit("toggle-touch-mode", ());
+        }
+        None => {
+            tracing::info!("rebuilding the main window WebView for the touch toggle");
+            if let Err(e) = create_main_window(app) {
+                tracing::error!("could not rebuild the main window: {e}");
+                return;
+            }
+            PENDING_TOUCH_TOGGLE.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// Register the touch-mode hotkey. The combo is user-configurable
 /// (`pulpitApp/editor.json`, default Ctrl+Alt+D - the original's
 /// `toggleTouchMode` concept); an unusable stored combo falls back to the
@@ -778,7 +808,7 @@ fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) -> Result<(), String
         .global_shortcut()
         .on_shortcut(shortcut, |app, _s, event| {
             if event.state() == ShortcutState::Pressed {
-                let _ = app.emit("toggle-touch-mode", ());
+                toggle_touch_mode(app);
             }
         });
     match result {
@@ -1958,6 +1988,14 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Take (and clear) a touch-mode toggle that was parked while the
+/// WebView was torn down (DESK-07). Called by the fresh app after its
+/// listeners and boards are up.
+#[tauri::command]
+fn take_pending_touch_toggle() -> bool {
+    PENDING_TOUCH_TOGGLE.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The QR payload for pairing, kept separate so the command body stays

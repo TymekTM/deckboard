@@ -561,10 +561,22 @@ onMounted(async () => {
   window.addEventListener("mousedown", onGlobalMousedown, true);
   window.addEventListener("keydown", onKeydown, true);
   document.addEventListener("visibilitychange", onVisibilityChange);
-  load().catch((e) => {
-    // status stays dbOk:false, so the banner explains the state
-    console.error("initial load failed", e);
-  });
+  load()
+    .catch((e) => {
+      // status stays dbOk:false, so the banner explains the state
+      console.error("initial load failed", e);
+    })
+    .finally(() => {
+      // a touch-mode toggle that arrived while the WebView was torn
+      // down: mount into the intended mode once listeners and boards
+      // are up (the original emit would have been lost pre-mount)
+      api
+        .takePendingTouchToggle()
+        .then((pending) => {
+          if (pending) toggleTouch();
+        })
+        .catch(() => {});
+    });
 });
 onUnmounted(() => {
   window.removeEventListener("mousedown", onGlobalMousedown, true);
