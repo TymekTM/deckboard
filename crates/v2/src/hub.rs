@@ -159,7 +159,11 @@ impl V2Hub {
             }
         }
         for id in &dead {
-            tracing::info!(session = id, device = device_id, "v2 session closed: device revoked");
+            tracing::info!(
+                session = id,
+                device = device_id,
+                "v2 session closed: device revoked"
+            );
             self.remove(*id);
         }
         dead.len()
@@ -555,7 +559,11 @@ mod tests {
         // the real revoke closes exactly that device's live session
         assert!(store.revoke(&device.id));
         hub.close_device_sessions(&device.id);
-        assert_eq!(hub.count(), 1, "only the revoked device's session is closed");
+        assert_eq!(
+            hub.count(),
+            1,
+            "only the revoked device's session is closed"
+        );
         assert!(
             *a.cancelled().borrow(),
             "the revoked session's task must be cancelled"
