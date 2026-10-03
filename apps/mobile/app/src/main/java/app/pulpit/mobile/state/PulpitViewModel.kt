@@ -248,6 +248,11 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         val envelope = token?.let { t ->
             tokenCipher.encrypt(t)?.let { (iv, data) -> encodeEnvelope(iv, data) }
         }
+        if (token != null && envelope == null) {
+            // encryption failed (unpair with a null token is the normal
+            // path): the reason is worth a line, the token never is.
+            Log.w(TAG, "token vault: encrypt failed - token not persisted, re-pair after restart")
+        }
         if (envelope == null) {
             editor.remove("token")
         } else {

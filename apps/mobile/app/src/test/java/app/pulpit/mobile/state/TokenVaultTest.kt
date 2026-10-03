@@ -2,6 +2,7 @@ package app.pulpit.mobile.state
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.fail
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -73,9 +74,9 @@ class TokenVaultTest {
     fun envelopeRoundTrips() {
         val raw = encodeEnvelope(fakeIv, fakeCiphertext)
         assertTrue(raw.startsWith("enc1:"))
-        val (iv, data) = decodeEnvelope(raw) ?: return assertNull("envelope decoded", null)
-        assertEquals(fakeIv.toList(), iv.toList())
-        assertEquals(fakeCiphertext.toList(), data.toList())
+        val framed = decodeEnvelope(raw) ?: return fail("envelope did not decode: $raw")
+        assertEquals(fakeIv.toList(), framed.first.toList())
+        assertEquals(fakeCiphertext.toList(), framed.second.toList())
     }
 
     @Test

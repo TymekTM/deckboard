@@ -18,7 +18,8 @@ data class TokenLoad(
 )
 
 /** Envelope marker + version. Not a token value, safe to match. */
-private const val PREFIX = "enc1:"
+private const val SCHEME = "enc1"
+private const val PREFIX = "$SCHEME:"
 
 /** GCM's standard 96-bit IV; AndroidKeyStore generates one per encrypt. */
 private const val IV_BYTES = 12
@@ -50,7 +51,7 @@ fun encodeEnvelope(iv: ByteArray, data: ByteArray): String =
 /** Inverse of [encodeEnvelope]; null when the framing is not intact. */
 fun decodeEnvelope(raw: String): Pair<ByteArray, ByteArray>? {
     val parts = raw.split(":")
-    if (parts.size != 3 || parts[0] != "enc1") return null
+    if (parts.size != 3 || parts[0] != SCHEME) return null
     val iv = unhex(parts[1]) ?: return null
     val data = unhex(parts[2]) ?: return null
     if (iv.size != IV_BYTES || data.isEmpty()) return null
