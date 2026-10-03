@@ -61,7 +61,6 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -271,21 +270,19 @@ fun GraphTile(
             // same shape, calmer line.
             val points = downsample(history.points, MAX_DRAWN_POINTS)
             if (points.size < 2) return@Canvas
-            // normalize around the window's average so the ordinary level
-            // sits at mid-height: a strong machine idles near a few percent
-            // and a fixed 0..100 scale would pin the whole curve to the
-            // floor. The span has an absolute and relative floor so a quiet
-            // series stays calm instead of amplifying noise to full height.
-            val avg = points.sum() / points.size
-            val dev = maxOf(points.max() - avg, avg - points.min())
-            val half = maxOf(dev, 0.2 * abs(avg), 5.0)
-            val minV = avg - half
-            val span = 2.0 * half
+            // Normalize to the window's own min..max with a 5% pad - the
+            // exact rule of the desktop's sparkline (TileCell.vue
+            // sparkPoints: min, max, span = max - min || 1, y = 95 - t *
+            // 90), so both surfaces draw the same amplitude from the
+            // same series: a machine idling at 2-4% spans the full tile
+            // on both, instead of a fraction of it here.
+            val minV = points.min()
+            val span = (points.max() - minV).takeIf { it != 0.0 } ?: 1.0
             val stepX = size.width / (points.size - 1)
             val line = Path()
             points.forEachIndexed { i, v ->
                 val x = i * stepX
-                val y = size.height - ((v - minV) / span).toFloat().coerceIn(0f, 1f) * size.height
+                val y = size.height - (sparkY(v, minV, span) * size.height).toFloat()
                 if (i == 0) line.moveTo(x, y) else line.lineTo(x, y)
             }
             // wash the area under the curve with a lighter tone of the
@@ -316,6 +313,13 @@ private fun liveFromSeries(history: SeriesWindow): String? {
 /** Upper bound on points drawn per chart; larger windows are averaged
  *  per bucket so small tiles stay readable. */
 private const val MAX_DRAWN_POINTS = 40
+
+/** Sparkline y fraction (0 = top of the tile, 1 = bottom) over the
+ *  window's min..max with the desktop's 5% padding - the exact rule of
+ *  TileCell.vue's sparkPoints (`95 - t * 90` in percent space), kept
+ *  here as the single shared formula (MOB-08). */
+internal fun sparkY(v: Double, min: Double, span: Double): Double =
+    0.95 - ((v - min) / span) * 0.90
 
 /** Drag events fire hundreds of times per gesture and every slide send is
  *  a websocket round-trip the server executes - ship at most one value
