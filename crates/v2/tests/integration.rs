@@ -582,6 +582,102 @@ async fn pairing_flow_mints_welcome_and_device() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn hello_names_are_sanitized_before_persisting() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let device = state.devices.create("Old name");
+    let addr = spawn_server(state.clone()).await;
+
+    // A hostile hello.name: control characters, padding and 100 chars.
+    // The welcome, the registry and the logs must only ever see the
+    // trimmed, control-free, 64-char-capped form.
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let junk = format!(" {} \u{7}\u{0} ", "N".repeat(100));
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h1",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0", "name": junk}),
+        ),
+    )
+    .await;
+    let welcome: Welcome = typed(next_frame(&mut ws).await, TYPE_WELCOME);
+    let expected = "N".repeat(64);
+    assert_eq!(welcome.device.name, expected);
+    assert_eq!(state.devices.list()[0].name, expected);
+
+    // A blank/junk-only name must not wipe the stored name: sanitize to
+    // None means "keep what the registry has".
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h2",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0", "name": " \u{1}\t "}),
+        ),
+    )
+    .await;
+    let welcome: Welcome = typed(next_frame(&mut ws).await, TYPE_WELCOME);
+    assert_eq!(welcome.device.name, expected, "blank names must not rename");
+
+    // Pairing with no usable name falls back to "Device".
+    let (status, _, body) = http_post_json(addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 200);
+    let code = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h3",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0", "name": "\u{2}"}),
+        ),
+    )
+    .await;
+    let welcome: Welcome = typed(next_frame(&mut ws).await, TYPE_WELCOME);
+    assert_eq!(welcome.device.name, "Device");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_revoked_mid_handshake_is_unauthorized() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let device = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+
+    // The upgrade verifies the token, then the device is revoked before
+    // hello arrives. touch/rename now return None; the session must die
+    // with `unauthorized` instead of serving the stale pre-auth entry.
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    assert!(state.devices.revoke(&device.id));
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h1",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0"}),
+        ),
+    )
+    .await;
+    let err = next_frame(&mut ws).await;
+    assert_eq!(err.ack.as_deref(), Some("h1"));
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(payload.code, error_code::UNAUTHORIZED);
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_))) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "revoked device's socket must close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn token_connect_delivers_full_snapshot() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let device = state.devices.create("Tablet salon");

@@ -179,19 +179,35 @@ async fn run_session(
     let mut issued_token: Option<String> = None;
     let device = match auth {
         Auth::Device(device) => {
-            match hello.name.as_deref().filter(|n| !n.is_empty()) {
-                // hello may rename a paired device; persisted so the next
-                // welcome and the desktop device list agree. The welcome
-                // carries the updated entry, not the pre-auth snapshot.
-                Some(name) if name != device.name => {
-                    state.devices.rename(&device.id, name).unwrap_or(device)
+            // hello.name may rename a paired device; persisted so the next
+            // welcome and the desktop device list agree. The welcome
+            // carries the updated entry, not the pre-auth snapshot. The
+            // name is untrusted client input: sanitized before it can
+            // reach the registry, the logs or the desktop device list.
+            let rename_to = sanitize_device_name(hello.name.as_deref());
+            let touched = match rename_to {
+                Some(name) if name != device.name => state.devices.rename(&device.id, &name),
+                _ => state.devices.touch(&device.id),
+            };
+            match touched {
+                Some(device) => device,
+                // The entry vanished between the upgrade's verify and
+                // here (revoked mid-handshake): treat as revoked, not as
+                // the stale pre-auth snapshot (audit B2 step 3).
+                None => {
+                    session.send_frame(&error_ack(
+                        &frame,
+                        error_code::UNAUTHORIZED,
+                        "device no longer trusted",
+                    ));
+                    return End::Fatal;
                 }
-                _ => state.devices.touch(&device.id).unwrap_or(device),
             }
         }
         Auth::Pair(code) => match state.pairing.consume(&code) {
             Ok(()) => {
-                let name = hello.name.clone().unwrap_or_else(|| "Device".into());
+                let name = sanitize_device_name(hello.name.as_deref())
+                    .unwrap_or_else(|| "Device".to_string());
                 tracing::warn!(session = session.id, name = %name, "pairing auto-accepted (no UI yet)");
                 let device = state.devices.create(&name);
                 issued_token = Some(device.token.clone());
@@ -562,6 +578,26 @@ fn exec_blocking(
     }
 }
 
+/// Device names from `hello.name`: untrusted client input that ends up
+/// in logs, the registry and the desktop device list - trimmed,
+/// control-character-free, capped, `None` when nothing usable remains.
+fn sanitize_device_name(raw: Option<&str>) -> Option<String> {
+    let name: String = raw
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(DEVICE_NAME_MAX_CHARS)
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Cap for `hello.name` (audit B2): enough for any honest device label,
+/// small enough that junk cannot bloat logs or `devices.json`.
+const DEVICE_NAME_MAX_CHARS: usize = 64;
+
 /// Naive semver-ish compare: numeric dot parts, missing parts are 0.
 fn version_lt(client: &str, min: &str) -> bool {
     fn parts(v: &str) -> Vec<u64> {
@@ -592,6 +628,25 @@ mod tests {
         assert!(!version_lt("1.0.0", "0.9.9"));
         assert!(version_lt("0.2.0", "9.9.9"));
         assert!(!version_lt("garbage", "0.0.0"));
+    }
+
+    #[test]
+    fn device_names_are_sanitized() {
+        // trim + control stripping, alone and combined
+        assert_eq!(
+            sanitize_device_name(Some("  Tablet salon \n")),
+            Some("Tablet salon".into())
+        );
+        assert_eq!(sanitize_device_name(Some("a\u{0}b\u{7}c")), Some("abc".into()));
+        assert_eq!(sanitize_device_name(Some(" \u{1}\t ")), None);
+        assert_eq!(sanitize_device_name(Some("")), None);
+        assert_eq!(sanitize_device_name(None), None);
+        // cap at 64 chars, by characters not bytes
+        let long = "ą".repeat(100);
+        assert_eq!(
+            sanitize_device_name(Some(&long)).unwrap().chars().count(),
+            DEVICE_NAME_MAX_CHARS
+        );
     }
 
     #[test]
