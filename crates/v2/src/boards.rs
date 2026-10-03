@@ -4,7 +4,7 @@
 //! derives state channels and converts legacy data-URL images into the
 //! asset store.
 
-use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_db::{BoardRow, ButtonRow, MAX_BOARD_DIM};
 use pulpit_legacy::{Backend, Mapper};
 use pulpit_proto::{
     background_from_legacy, Board, Interaction, Placement, StateRef, StateShape, Style, Tile,
@@ -15,13 +15,6 @@ use std::collections::HashMap;
 
 use crate::assets::AssetStore;
 use crate::state::{ext_channel, StateEngine};
-
-/// Defensive ceiling for board dimensions on the wire, matching
-/// `pulpit_backend::MAX_BOARD_DIM` (the import side's bound; a local
-/// constant because the backend crate is not a dependency here). v2
-/// clients lay out a W*H grid from these numbers, so a junk row must
-/// not reach them at stored size (audit C4).
-const MAX_BOARD_DIM: i64 = 32;
 
 /// All boards with their tiles, in legacy `order`.
 pub fn build_boards(

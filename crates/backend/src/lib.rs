@@ -236,10 +236,10 @@ impl SqlBackend {
     }
 }
 
-/// Largest board grid any surface will build. The import path rejects
-/// wider/taller boards outright; the same bound belongs in the editor UI
-/// and both wire builders (audit item C4).
-pub const MAX_BOARD_DIM: i64 = 32;
+/// Largest board grid any surface will build: one definition in
+/// `pulpit_db`, re-exported here for the import path (which rejects
+/// wider/taller boards outright) and both wire builders (audit C4).
+pub use pulpit_db::MAX_BOARD_DIM;
 
 /// One exported button row: the DB columns minus `id`.
 fn button_json(button: &ButtonRow) -> serde_json::Value {
