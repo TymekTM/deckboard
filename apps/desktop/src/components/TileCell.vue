@@ -180,10 +180,12 @@ function laneProvider(label) {
 
 // The backend summary names the worst window, which a filtered-out row
 // may no longer be: recompute from the visible percent rows when the
-// tile has any, else keep the producer's line.
+// tile has any, else keep the producer's line. The AI-usage settings
+// can turn the line off entirely (`hide_summary` from the producer).
 const statusSummary = computed(() => {
   const data = statusData.value;
   if (!data) return "";
+  if (data.hide_summary) return "";
   const percentRows = data.rows.filter(
     (row) => row.percent != null && !planWindowHidden(row.label),
   );

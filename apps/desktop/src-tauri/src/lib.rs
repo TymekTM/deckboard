@@ -32,6 +32,9 @@ struct DesktopState {
     /// `pulpitApp/editor.json` - editor-local settings (hotkey), kept
     /// separate from the original app's settings.json.
     settings_path: Option<std::path::PathBuf>,
+    /// `pulpitApp/aidev.json` - the AI dev-work producer's config (plan
+    /// API keys, and the AI-usage tile selection under `status`).
+    aidev_config: Option<std::path::PathBuf>,
 }
 
 impl DesktopState {
@@ -198,6 +201,8 @@ pub fn run() {
             check_for_updates,
             export_boards,
             import_boards,
+            aidev_status_config,
+            set_aidev_status_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -281,6 +286,11 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // (Ustawienia -> Serwer) applies.
     let data_dir = pulpit_db::data_dir();
     let settings_path = data_dir.join("editor.json");
+    // PULPIT_AIDEV_CONFIG overrides the aidev config location (profiling
+    // / hermetic runs), like PULPIT_DB for the database
+    let aidev_config = std::env::var_os("PULPIT_AIDEV_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("aidev.json"));
     let stored_editor: serde_json::Value = std::fs::read_to_string(&settings_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -304,6 +314,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             v2: None,
             hotkey: std::sync::Mutex::new(DEFAULT_HOTKEY.to_string()),
             settings_path: None,
+            aidev_config: Some(aidev_config),
         };
     }
     let db = db.unwrap();
@@ -518,11 +529,9 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         register_ext_input(value, Some(icon), Some(color), "fas", Some(mode), None);
     }
     {
-        // PULPIT_AIDEV_CONFIG overrides the aidev config location
-        // (profiling / hermetic runs), like PULPIT_DB for the database
-        let aidev_config = std::env::var_os("PULPIT_AIDEV_CONFIG")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("aidev.json"));
+        // the config location was resolved at the top of setup_core
+        // (PULPIT_AIDEV_CONFIG override or pulpitApp/aidev.json)
+        let aidev_config = aidev_config.clone();
         // the transcript sources live in the real user home, not the
         // pulpitApp data dir
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -707,6 +716,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         v2: v2.clone(),
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
+        aidev_config: Some(aidev_config),
     }
 }
 
@@ -1591,6 +1601,43 @@ mod tests {
     }
 
     #[test]
+    fn aidev_status_selection_defaults_and_parses() {
+        // absent section: everything detected, summary line on
+        let (show, summary) = aidev_status_selection(&serde_json::Value::Null);
+        assert!(show.is_empty());
+        assert!(summary);
+        let raw: serde_json::Value = serde_json::from_str(
+            r#"{"poll_secs":30,"status":{"show":["glm:5h","codex:week"],"summary":false}}"#,
+        )
+        .expect("seed json");
+        let (show, summary) = aidev_status_selection(&raw);
+        assert_eq!(show, ["glm:5h", "codex:week"]);
+        assert!(!summary);
+    }
+
+    #[test]
+    fn persist_aidev_status_keeps_provider_keys() {
+        let path =
+            std::env::temp_dir().join(format!("pulpit-aidev-rmw-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        persist_editor_setting(&path, "providers", serde_json::json!({"codex": {}}))
+            .expect("seed providers");
+        persist_editor_setting(
+            &path,
+            "status",
+            serde_json::json!({"show": ["glm:5h"], "summary": false}),
+        )
+        .expect("write status");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        // the producer's API keys survive the selection write
+        assert_eq!(saved["providers"]["codex"], serde_json::json!({}));
+        assert_eq!(saved["status"]["show"], serde_json::json!(["glm:5h"]));
+        assert_eq!(saved["status"]["summary"], false);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn read_image_data_rejects_files_over_the_cap() {
         let path =
             std::env::temp_dir().join(format!("pulpit-image-cap-{}.png", std::process::id()));
@@ -1965,6 +2012,74 @@ async fn set_server_port(state: State<'_, DesktopState>, port: u16) -> Result<()
         .as_ref()
         .ok_or_else(|| "Brak ścieżki ustawień (uruchomienie awaryjne).".to_string())?;
     persist_editor_setting(path, "port", serde_json::json!(port))
+}
+
+/// Detected plan-limits rows plus the current AI-usage selection
+/// (Ustawienia -> AI usage). `detected` fills up as the producer cycles,
+/// so the checkbox list auto-follows whatever the machine reports.
+#[derive(serde::Serialize)]
+struct AidevStatusConfig {
+    detected: Vec<pulpit_aidev::DetectedRow>,
+    show: Vec<String>,
+    summary: bool,
+}
+
+/// The `status` section of aidev.json, with the defaults an absent
+/// section implies: no selection (everything detected is shown) and the
+/// summary line on.
+fn aidev_status_selection(raw: &serde_json::Value) -> (Vec<String>, bool) {
+    let show = raw
+        .pointer("/status/show")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let summary = raw
+        .pointer("/status/summary")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(true);
+    (show, summary)
+}
+
+#[tauri::command]
+fn aidev_status_config(state: State<'_, DesktopState>) -> Result<AidevStatusConfig, String> {
+    let path = state
+        .aidev_config
+        .as_ref()
+        .ok_or_else(|| "Brak ścieżki konfiguracji aidev.".to_string())?;
+    let raw: serde_json::Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let (show, summary) = aidev_status_selection(&raw);
+    Ok(AidevStatusConfig {
+        detected: pulpit_aidev::detected_rows(),
+        show,
+        summary,
+    })
+}
+
+/// Persist the AI-usage tile settings to aidev.json (read-modify-write,
+/// atomic). The producer re-reads the file every cycle, so a change
+/// lands within one poll interval without an app restart.
+#[tauri::command]
+async fn set_aidev_status_config(
+    state: State<'_, DesktopState>,
+    show: Vec<String>,
+    summary: bool,
+) -> Result<(), String> {
+    let path = state
+        .aidev_config
+        .clone()
+        .ok_or_else(|| "Brak ścieżki konfiguracji aidev.".to_string())?;
+    persist_editor_setting(
+        &path,
+        "status",
+        serde_json::json!({ "show": show, "summary": summary }),
+    )
 }
 
 #[tauri::command]
