@@ -63,12 +63,12 @@ fun hex(color: String?, fallback: Color): Color =
     color?.let { runCatching { Color(android.graphics.Color.parseColor(it.trim())) }.getOrNull() }
         ?: fallback
 
-/** shape: 0 = square, 1 = rounded, 2 = circle. Square tiles still get a
- *  small corner radius so the grid reads softly on a tablet. */
-private fun shapeOf(shape: Int, radius: Float): Shape = when (shape) {
-    1 -> RoundedCornerShape(radius)
-    2 -> CircleShape
-    else -> RoundedCornerShape(radius / 2f)
+/** Shape mapping mirrors the desktop's TileCell exactly
+ *  (`shape === 1 ? "50%" : "8px"`): 1 = circle, anything else (0,
+ *  unknown values) = the soft 8dp corner square tiles get. */
+private fun shapeOf(shape: Int): Shape = when (shape) {
+    1 -> CircleShape
+    else -> RoundedCornerShape(8.dp)
 }
 
 /** Title pinning inside the tile, mirroring the desktop's pos-* classes:
@@ -152,7 +152,7 @@ fun Tile(
     // active state swaps the shape pair too (state 2 falls back to
     // state 1 per field, §4); shapes travel as stringified ints
     val shapeValue = pick(style?.shape, style?.shape2)?.toIntOrNull() ?: 0
-    val shape = shapeOf(shapeValue, tileSize.value * 0.18f)
+    val shape = shapeOf(shapeValue)
     // title pinning + box color with the same per-field state-2 fallback
     fun pickInt(first: Int?, second: Int?): Int? = if (active) second ?: first else first
     val titlePos = pickInt(style?.titlePosition, style?.titlePosition2) ?: 0
