@@ -3,7 +3,7 @@
 //! modules 5981/8742/2836). Field names and defaults are contractual:
 //! the stock Android client renders exactly these fields.
 
-use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_db::{BoardRow, ButtonRow, MAX_BOARD_DIM};
 use serde_json::{json, Map, Value};
 
 use crate::props::{Props, StyleResolver, FALLBACK_COLOR};
@@ -17,14 +17,11 @@ const RAW_COMMAND_TYPES: &[&str] = &[
     "vol",
 ];
 
-/// Defensive ceiling for board dimensions on the wire, matching
-/// `pulpit_backend::MAX_BOARD_DIM` (the import side's bound; a local
-/// constant because the backend crate is not a dependency here). The
-/// filler loop below costs W*H per board, and the client lays out a
-/// W*H grid: a junk row must not reach either at stored size
-/// (audit C4).
-const MAX_BOARD_DIM: i64 = 32;
-
+/// Defensive ceiling for board dimensions on the wire
+/// ([`pulpit_db::MAX_BOARD_DIM`], one definition for the import bound
+/// and both wire builders). The filler loop below costs W*H per board,
+/// and the client lays out a W*H grid: a junk row must not reach
+/// either at stored size (audit C4).
 fn clamp_dim(v: i64) -> i64 {
     v.clamp(1, MAX_BOARD_DIM)
 }

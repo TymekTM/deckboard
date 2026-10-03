@@ -54,6 +54,13 @@ pub struct BoardRow {
     pub converted: i64,
 }
 
+/// Largest board grid any surface will build. The import path rejects
+/// wider/taller boards outright; the same bound belongs in the editor
+/// UI and both wire builders (audit item C4). One definition here, so
+/// the import bound and the wire clamps can never drift apart
+/// (`pulpit_backend` re-exports it).
+pub const MAX_BOARD_DIM: i64 = 32;
+
 /// Row of the `Shortcuts` table (one macro button/slider/wheel). Serde shape
 /// matches the `macros` entries of a `.boardjson` export.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
