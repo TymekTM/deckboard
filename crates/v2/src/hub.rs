@@ -363,6 +363,13 @@ mod tests {
             }
         }
         assert_eq!(hub.count(), 0, "wedged session must be closed");
+        // The teardown must also end the session task: the cancel
+        // signal is what run() selects on (audit C2) - without it the
+        // read loop would linger as a zombie with no writer.
+        assert!(
+            *session.cancelled().borrow(),
+            "hub-side removal must cancel the session task"
+        );
     }
 
     #[test]
@@ -377,6 +384,16 @@ mod tests {
         stale.age_last_seen_by(10 * 60_000);
         hub.reap_silent(180_000);
         assert_eq!(hub.count(), 1, "fresh session survives the reap");
+        // the reaped session's task must end too (audit C2), and the
+        // survivor's must not
+        assert!(
+            *stale.cancelled().borrow(),
+            "the reaper must cancel the session task"
+        );
+        assert!(
+            !*fresh.cancelled().borrow(),
+            "the survivor must keep running"
+        );
         hub.broadcast_frame(&frame());
         assert_eq!(hub.count(), 1);
     }

@@ -1067,6 +1067,45 @@ async fn hub_teardown_ends_the_session_and_releases_held_keys() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn reaped_silent_session_ends_and_releases_held_keys() {
+    let backend = sample_backend();
+    let (state, _dir) = test_state(backend.clone(), |_| {});
+    let (device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={token}")).await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    // Hold a key down, then go silent: the reaper (silence watchdog)
+    // tears the session down hub-side. The key release only runs in the
+    // session task's tail, so observing it also proves the task ran to
+    // completion instead of lingering as a zombie read loop (audit C2).
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "r1",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    wait_for_exec(&backend, (23, true)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    state.hub.reap_silent(0);
+    assert_eq!(state.hub.count(), 0, "silent session must be reaped");
+    wait_for_exec(&backend, (23, false)).await;
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_))) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "reaped client must see its socket close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn undeclared_interactions_are_rejected() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let (device, token) = state.devices.create("Tablet");
