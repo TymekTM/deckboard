@@ -24,7 +24,7 @@ open = "5"
 rand = "0.8"
 futures-util = "0.3"
 tokio-tungstenite = "0.24"
-ts-rs = { version = "12", features = ["serde-json-impl"] }
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 base64 = "0.23"
 sha2 = "0.10"
 hex = "0.4"
