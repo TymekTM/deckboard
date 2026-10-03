@@ -54,6 +54,12 @@ object V2 {
     const val INT_PRESS_END = "press-end"
     const val INT_SLIDE = "slide"
 
+    // M5 custom gestures (declared per tile via `gestures` in options)
+    const val INT_LONG_PRESS = "long-press"
+    const val INT_DOUBLE_TAP = "double-tap"
+    const val INT_SWIPE_LEFT = "swipe-left"
+    const val INT_SWIPE_RIGHT = "swipe-right"
+
     // state shapes
     const val SHAPE_SCALAR = "scalar"
     const val SHAPE_SERIES = "series"
@@ -104,6 +110,8 @@ data class Welcome(
     /** Issued only in the welcome that completes a pairing. */
     val token: String? = null,
     val channels: Map<String, ChannelInfo> = emptyMap(),
+    /** M5: what the server supports (mirrors hello.capabilities). */
+    val capabilities: List<String> = emptyList(),
 )
 
 @Serializable

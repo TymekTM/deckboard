@@ -63,6 +63,22 @@ class ProtoFixturesTest {
         assertEquals(V2.SHAPE_SERIES, welcome.channels["ext.si-cpu-usage"]!!.shape)
         assertEquals(120, welcome.channels["ext.si-cpu-usage"]!!.cap)
         assertEquals(V2.SHAPE_SCALAR, welcome.channels["ext.speaker-muted"]!!.shape)
+        // M5 capability negotiation: the server echoes its own set
+        assertTrue(welcome.capabilities.contains("series"))
+        assertTrue(welcome.capabilities.contains("gestures"))
+    }
+
+    @Test
+    fun interactionLongPressParses() {
+        // M5 custom gestures ride the ordinary interaction frame
+        val frame = fixture("interaction-longpress.json")
+        assertEquals("interaction", frame.type)
+        val payload = json.decodeFromString(
+            InteractionPayload.serializer(),
+            frame.payload.toString(),
+        )
+        assertEquals("long-press", payload.interaction)
+        assertEquals(21L, payload.tile)
     }
 
     @Test

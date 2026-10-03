@@ -636,6 +636,15 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** M5 custom gestures: sent only for interactions the tile declares
+     *  (the server enforces the same list, so an undeclared gesture is a
+     *  guaranteed typed error - do not send it). */
+    fun gesture(boardId: Long, tile: Tile, name: String) {
+        if (tile.interacts(name)) {
+            client?.gesture(boardId, tile.id, name)
+        }
+    }
+
     fun selectBoard(board: Board) {
         _currentBoard.value = board
     }

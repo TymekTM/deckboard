@@ -185,6 +185,16 @@ fn interaction() {
     assert_eq!(i.args.value, Some(0.5));
 }
 
+/// M5 custom gestures ride the ordinary interaction frame; the fixture
+/// pins the wire shape of a declared gesture (empty args, kebab name).
+#[test]
+fn interaction_longpress() {
+    let (frame, i) = pinned::<InteractionPayload>("interaction-longpress", TYPE_INTERACTION);
+    assert_eq!(frame.id.as_deref(), Some("i10"));
+    assert_eq!(i.interaction, Interaction::LongPress);
+    assert_eq!(i.args, InteractionArgs::default());
+}
+
 #[test]
 fn server_shutdown() {
     // A pure control push: no id/ack and an empty payload object - there

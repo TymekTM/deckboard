@@ -112,7 +112,8 @@ QR payload: `pulpit://<host>:<port>?pair=<CODE>`.
 ```json
 { "v": 2, "id": "h1", "type": "hello",
   "payload": { "client": "pulpit-mobile", "version": "0.2.0",
-               "name": "Tablet salon", "capabilities": [] } }
+               "name": "Tablet salon",
+               "capabilities": ["kinds:button", "series", "gestures:long-press"] } }
 ```
 
 `welcome` (server → client, replies to `hello`):
@@ -123,7 +124,8 @@ QR payload: `pulpit://<host>:<port>?pair=<CODE>`.
                "min_client": "0.0.0", "generation": 7,
                "device": { "id": "9ab...", "name": "Tablet salon" },
                "token": "64-hex-chars...",
-               "channels": { "ext.si-cpu-usage": { "shape": "series", "cap": 120 } } } }
+               "channels": { "ext.si-cpu-usage": { "shape": "series", "cap": 120 } },
+               "capabilities": ["series", "state.patch", "assets", "assets2", "gestures"] } }
 ```
 
 - `channels` is the full catalog of live state channels: name →
@@ -132,6 +134,12 @@ QR payload: `pulpit://<host>:<port>?pair=<CODE>`.
   `outdated-client` after `hello` (enforcement is a server config; M1
   ships `0.0.0` = never block - we publish both ends).
 - Version mismatch without a block: degrade by capability, never guess.
+- Capabilities (M5): free-form `name` or `name:value` strings. The
+  client declares what it renders/accepts (`kinds:*`, `series`,
+  `state.patch`, `assets`, `assets2`, `gestures:*`), the server echoes
+  its own set in `welcome.capabilities`. Both sides log the sets; no
+  behavior is gated on them yet. Old servers never send the field, old
+  clients ignore it.
 
 After `welcome` the server immediately pushes `boards.sync` and then
 `state.sync` (sections 4-5). There is no client-pull variant; a confused
@@ -270,14 +278,22 @@ Client → server, one frame per user gesture:
 ```
 
 - Kinds: `tap`, `press-start`, `press-end`, `slide` (`args.value`, 0..1),
-  `wheel` (`args.delta`), `drag` (`args.dx`, `args.dy`). `press-start` /
-  `press-end` replace the legacy `isTapStart` bool pair.
+  `long-press`, `double-tap`, `swipe-left`, `swipe-right` (M5 custom
+  gestures, no args), `wheel` (`args.delta`), `drag` (`args.dx`,
+  `args.dy`). `press-start` / `press-end` replace the legacy `isTapStart`
+  bool pair.
 - Clients send only gestures the tile declares in `interactions`.
   Declarations: plain buttons declare `tap` (fire once on release);
   key-style commands and tiles with `params.hold.repeat` declare
   `tap` + `press-start` + `press-end` (down/up semantics, hold-to-repeat);
-  sliders/knobs declare `slide`; displays declare none. The server
-  rejects undeclared gestures with `unsupported-interaction`.
+  sliders/knobs declare `slide`; displays declare none. A tile may add
+  M5 custom gestures through its options JSON:
+  `{"gestures": ["long-press", "double-tap", "swipe-left", "swipe-right"]}` -
+  the closed set travels into `interactions` and each declared gesture
+  fires the tile's action once on completion (alternative triggers, not
+  press modes: no key-hold, no repeat; never on slider/knob, where the
+  drag surface belongs to the value). The server rejects undeclared
+  gestures with `unsupported-interaction`.
 - The server validates the tile exists and answers
   `ack {ok: true}` (payload `{}`) or `error` (`unknown-tile`,
   `unsupported-interaction` for gestures the tile/backend cannot serve,

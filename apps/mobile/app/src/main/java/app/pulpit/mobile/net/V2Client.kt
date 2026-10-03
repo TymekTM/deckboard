@@ -158,6 +158,12 @@ class V2Client(
         sendInteraction(boardId, tileId, V2.INT_SLIDE, InteractionArgs(value = value.toDouble()))
     }
 
+    /** M5 custom gestures ride the ordinary interaction frame; the
+     *  ViewModel gates on the tile's declared interactions. */
+    fun gesture(boardId: Long, tileId: Long, name: String) {
+        sendInteraction(boardId, tileId, name, null)
+    }
+
     private fun sendInteraction(boardId: Long, tileId: Long, interaction: String, args: InteractionArgs?) {
         val payload = InteractionPayload(
             board = boardId,
@@ -205,7 +211,12 @@ class V2Client(
                     type = V2.TYPE_HELLO,
                     payload = json.encodeToJsonElement(
                         Hello.serializer(),
-                        Hello(client = CLIENT, version = VERSION, name = deviceName.ifBlank { null }),
+                        Hello(
+                            client = CLIENT,
+                            version = VERSION,
+                            name = deviceName.ifBlank { null },
+                            capabilities = CLIENT_CAPABILITIES,
+                        ),
                     ),
                 ),
             )
@@ -327,6 +338,27 @@ class V2Client(
             .pingInterval(KEEPALIVE_SECONDS, TimeUnit.SECONDS)
             .build()
         const val CLIENT = "pulpit-mobile"
+
+        /** M5 capability negotiation: what this client renders/accepts,
+         *  declared in every hello. The list mirrors the UI's actual
+         *  surface (widget kinds, live-state features, gestures); new
+         *  capabilities join when the client really implements them. */
+        val CLIENT_CAPABILITIES = listOf(
+            "kinds:button",
+            "kinds:toggle",
+            "kinds:slider",
+            "kinds:knob",
+            "kinds:graph",
+            "kinds:list",
+            "series",
+            "state.patch",
+            "assets",
+            "assets2",
+            "gestures:long-press",
+            "gestures:double-tap",
+            "gestures:swipe-left",
+            "gestures:swipe-right",
+        )
         /** Client version reported in hello. Derived from versionName,
          *  which build.gradle.kts reads out of the workspace Cargo.toml -
          *  the single version source (this used to be a drifting

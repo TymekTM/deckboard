@@ -395,5 +395,6 @@ private fun TileCell(
         onPressStart = { vm.pressStart(boardId, t) },
         onPressEnd = { vm.pressEnd(boardId, t) },
         onSlider = { v -> vm.slider(boardId, t, v) },
+        onGesture = { name -> vm.gesture(boardId, t, name) },
     )
 }

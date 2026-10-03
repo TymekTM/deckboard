@@ -173,7 +173,16 @@ pub struct Welcome {
     /// it already.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// M5 capability negotiation: what this server supports. The client
+    /// declares its own set in `hello.capabilities`; neither side gates
+    /// behavior on the sets yet (declared + logged + echoed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
+
+/// The server's own capability set, echoed in every `welcome` (M5).
+pub const SERVER_CAPABILITIES: &[&str] =
+    &["series", "state.patch", "assets", "assets2", "gestures"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
@@ -344,6 +353,13 @@ pub enum Interaction {
     PressStart,
     PressEnd,
     Slide,
+    /// M5 custom gestures: declared per tile (`gestures` in the options
+    /// JSON); each fires the tile's action once on completion - they are
+    /// alternative triggers, not press modes (no key-hold, no repeat).
+    LongPress,
+    DoubleTap,
+    SwipeLeft,
+    SwipeRight,
     Wheel,
     Drag,
     /// Custom gesture only known to newer clients; ignored otherwise.

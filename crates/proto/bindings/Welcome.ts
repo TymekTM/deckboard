@@ -16,4 +16,10 @@ generation: number, device: Device, channels?: { [key in string]: ChannelInfo },
  * pairing (docs/protocol-v2.md §3 step 4); reconnecting devices know
  * it already.
  */
-token?: string | null, };
+token?: string | null, 
+/**
+ * M5 capability negotiation: what this server supports. The client
+ * declares its own set in `hello.capabilities`; neither side gates
+ * behavior on the sets yet (declared + logged + echoed).
+ */
+capabilities?: Array<string>, };

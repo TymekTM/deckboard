@@ -14,6 +14,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
@@ -102,6 +104,7 @@ fun Tile(
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
     onSlider: (Float) -> Unit,
+    onGesture: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val style = tile.style
@@ -249,6 +252,7 @@ fun Tile(
                         // a cancelled touch resets the face without firing
                         pressed = false
                     },
+                    onGesture = onGesture,
                 )
             }
         }
@@ -269,15 +273,24 @@ private fun ButtonTile(
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
     onPressCancel: () -> Unit,
+    onGesture: (String) -> Unit,
 ) {
     // the gesture block below lives as long as tile.id; a live tile edit
     // (board.delta) swaps the callbacks underneath it, so read the newest
     val pressStart by rememberUpdatedState(onPressStart)
     val pressEnd by rememberUpdatedState(onPressEnd)
+    val onGestureLatest by rememberUpdatedState(onGesture)
     // the tile object swaps too (an edit can change press modes): the
     // cancel decision must use the current interactions, not the ones
     // from the composition that started the gesture
     val currentTile by rememberUpdatedState(tile)
+    // M5 custom gestures: the tap detector gains long-press/double-tap
+    // when the tile declares them, and a passive drag observer classifies
+    // declared swipes. The tracker suppresses the release tap once a
+    // gesture spoke, so one touch fires exactly one interaction.
+    val tracker = remember(tile.id) { GestureTracker() }
+    val wantsSwipe =
+        tile.interacts(V2.INT_SWIPE_LEFT) || tile.interacts(V2.INT_SWIPE_RIGHT)
     // icon-only faces (discord voice toggles): the color and the glyph
     // carry the state, a label would only repeat it
     val title = if (iconOnly) "" else listOfNotNull(
@@ -288,9 +301,56 @@ private fun ButtonTile(
     Box(
         Modifier
             .fillMaxSize()
-            .pointerInput(tile.id) {
+            .then(
+                if (wantsSwipe) {
+                    Modifier.pointerInput(tile.id) {
+                        // passive observer: measures the whole drag and
+                        // classifies it on release; the tap detector still
+                        // sees the touch, the tracker just marks it spent
+                        var total = Offset.Zero
+                        detectDragGestures(
+                            onDragStart = {
+                                tracker.reset()
+                                total = Offset.Zero
+                            },
+                            onDrag = { change, _ ->
+                                total += change.positionChange()
+                            },
+                            onDragEnd = {
+                                tracker.moved = true
+                                when (classifySwipe(total.x, total.y, SWIPE_MIN_PX)) {
+                                    Swipe.Left -> onGestureLatest(V2.INT_SWIPE_LEFT)
+                                    Swipe.Right -> onGestureLatest(V2.INT_SWIPE_RIGHT)
+                                    Swipe.None -> {}
+                                }
+                            },
+                            onDragCancel = { tracker.moved = true },
+                        )
+                    }
+                } else {
+                    Modifier
+                }
+            )
+            .pointerInput(tile.id, tile.interactions) {
                 detectTapGestures(
+                    onLongPress = if (tile.interacts(V2.INT_LONG_PRESS)) {
+                        { _ ->
+                            tracker.longPressed = true
+                            onGestureLatest(V2.INT_LONG_PRESS)
+                        }
+                    } else {
+                        null
+                    },
+                    onDoubleTap = if (tile.interacts(V2.INT_DOUBLE_TAP)) {
+                        { _ ->
+                            tracker.doubleTapped = true
+                            onGestureLatest(V2.INT_DOUBLE_TAP)
+                        }
+                    } else {
+                        null
+                    },
                     onPress = {
+                        tracker.reset()
                         pressStart()
                         var released = false
                         try {
@@ -298,10 +358,12 @@ private fun ButtonTile(
                             // cancelled (finger slid off, parent stole it)
                             released = tryAwaitRelease()
                         }                         finally {
-                            // a cancelled touch is not a tap, but a hold
-                            // tile's key is still down: its press-end must
-                            // go out even then
-                            if (released || currentTile.interacts(V2.INT_PRESS_END)) {
+                            // a long press or a swipe already sent this
+                            // touch's interaction; the plain release must
+                            // not fire a second one
+                            if (tracker.consumed) {
+                                onPressCancel()
+                            } else if (released || currentTile.interacts(V2.INT_PRESS_END)) {
                                 pressEnd()
                             } else {
                                 onPressCancel()

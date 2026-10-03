@@ -250,6 +250,12 @@ async fn run_session(
     };
     session.set_device(device.clone());
     tracing::info!(session = session.id, device = %device.name, client = %hello.client, version = %hello.version, "v2 client authenticated");
+    // M5 capability negotiation: the declared set is logged so a missing
+    // feature on some client is diagnosable from the server log. Gating
+    // pushes on it is a separate, later decision.
+    if !hello.capabilities.is_empty() {
+        tracing::info!(session = session.id, capabilities = ?hello.capabilities, "client capabilities");
+    }
 
     // Broadcast fan-out starts only now that the session is authenticated:
     // a pre-auth socket must never see pushes. Attaching before the boards
@@ -273,6 +279,7 @@ async fn run_session(
         },
         channels: state.engine.catalog(),
         token: issued_token,
+        capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
     };
     session.send_frame(&Frame {
         v: PROTOCOL_VERSION,
@@ -494,6 +501,16 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
             let value = payload.args.value.unwrap_or(0.0);
             let backend = state.backend.clone();
             tokio::task::spawn_blocking(move || backend.slider(button, value));
+        }
+        // M5 custom gestures: alternative triggers of the tile's action
+        // with release semantics - one execution each, no key-hold, no
+        // server-side repeat (that stays with press-start).
+        Interaction::LongPress
+        | Interaction::DoubleTap
+        | Interaction::SwipeLeft
+        | Interaction::SwipeRight => {
+            ack_ok();
+            exec_once(state, button, false);
         }
         // Unreachable while the allowed-interactions check stands (no tile
         // declares wheel/drag); kept as a defensive typed error.

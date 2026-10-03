@@ -170,7 +170,12 @@ fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>
 }
 
 fn widget_kind_for(row: &ButtonRow, app: Option<&str>) -> (WidgetKind, Vec<Interaction>) {
-    match row.mode.as_str() {
+    let params: Value = row
+        .options
+        .as_deref()
+        .and_then(|o| serde_json::from_str(o).ok())
+        .unwrap_or(Value::Null);
+    let (kind, mut interactions) = match row.mode.as_str() {
         "slider" => (WidgetKind::Slider, vec![Interaction::Slide]),
         "knob" => (WidgetKind::Knob, vec![Interaction::Slide]),
         "graph" => (WidgetKind::Graph, vec![]),
@@ -183,11 +188,6 @@ fn widget_kind_for(row: &ButtonRow, app: Option<&str>) -> (WidgetKind, Vec<Inter
             // commands act on touch down/up and configured holds need the
             // press pair for the server-side repeat; every other button
             // fires once on release.
-            let params: Value = row
-                .options
-                .as_deref()
-                .and_then(|o| serde_json::from_str(o).ok())
-                .unwrap_or(Value::Null);
             let press_pair = matches!(row.kind.as_str(), "key" | "advance-key")
                 || hold_repeat_config(&params).is_some();
             let interactions = if press_pair {
@@ -201,7 +201,44 @@ fn widget_kind_for(row: &ButtonRow, app: Option<&str>) -> (WidgetKind, Vec<Inter
             };
             (WidgetKind::Button, interactions)
         }
+    };
+    // M5 custom gestures (`{"gestures": [...]}` in the options JSON):
+    // alternative triggers of the tile's action, on top of the kind's
+    // defaults. Slider/knob tiles keep the drag surface for the value
+    // only. Deduped so a hand-edited `["tap"]` cannot double-declare.
+    if !matches!(row.mode.as_str(), "slider" | "knob") {
+        for gesture in declared_gestures(&params) {
+            if !interactions.contains(&gesture) {
+                interactions.push(gesture);
+            }
+        }
     }
+    (kind, interactions)
+}
+
+/// Gestures a tile declares in its options JSON
+/// (`{"gestures": ["long-press", "swipe-left"]}`). The set is closed to
+/// the four names the clients implement; unknown names are dropped so a
+/// hand-edited file cannot smuggle arbitrary interaction labels.
+pub fn declared_gestures(params: &Value) -> Vec<Interaction> {
+    const KNOWN: &[(&str, Interaction)] = &[
+        ("long-press", Interaction::LongPress),
+        ("double-tap", Interaction::DoubleTap),
+        ("swipe-left", Interaction::SwipeLeft),
+        ("swipe-right", Interaction::SwipeRight),
+    ];
+    let Some(list) = params.get("gestures").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(Value::as_str)
+        .filter_map(|name| {
+            KNOWN
+                .iter()
+                .find(|(known, _)| *known == name)
+                .map(|(_, interaction)| *interaction)
+        })
+        .collect()
 }
 
 /// State channel + shape, registered with the engine as a side effect so
@@ -322,6 +359,33 @@ mod tests {
                 "{kind}/{mode}/{command:?}"
             );
         }
+    }
+
+    #[test]
+    fn declared_gestures_extend_the_interactions_of_a_button() {
+        let mut r = row("vol", "button", Some("vol_mute"));
+        r.options = Some(r#"{"gestures": ["long-press", "swipe-left", "not-a-gesture"]}"#.into());
+        let set = allowed_interactions(&r);
+        assert!(set.contains(&Interaction::LongPress));
+        assert!(set.contains(&Interaction::SwipeLeft));
+        // unknown names are dropped, tap stays the base trigger
+        assert!(!set.contains(&Interaction::Other));
+        assert_eq!(set.first(), Some(&Interaction::Tap));
+        // the manifest the client sees (build_tile) must equal the
+        // per-event gate, or a client could send a gesture the server
+        // answers with UNSUPPORTED_INTERACTION
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let tile = build_tile(&r, &assets, &engine);
+        assert_eq!(tile.manifest.interactions, set);
+    }
+
+    #[test]
+    fn sliders_do_not_take_declared_gestures() {
+        // the drag surface belongs to the value on slider/knob tiles
+        let mut r = row("volume", "slider", None);
+        r.options = Some(r#"{"gestures": ["long-press"]}"#.into());
+        assert_eq!(allowed_interactions(&r), vec![Interaction::Slide]);
     }
 
     #[test]
