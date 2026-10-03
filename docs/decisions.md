@@ -79,7 +79,7 @@ not tunnel it through the internet. Protocol v2 authenticates at the
 WebSocket upgrade: pairing mints a one-time code (8 chars, 5 min, loopback
 `POST /v2/pair`, QR `pulpit://host:port?pair=<code>`); the tablet
 connects with it, sends `hello`, and the desktop shows a "trust this
-devices?" prompt (M1 headless: auto-accept with a warning log; the prompt
+device?" prompt (M1 headless: auto-accept with a warning log; the prompt
 ships with the desktop UI). Trusting creates a per-device entry in
 `~/pulpitApp/devices.json` (`{id, name, token, created, last_seen}`),
 where `token` persists only as a `sha256:` digest - the raw token never
