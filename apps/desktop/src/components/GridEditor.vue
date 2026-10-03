@@ -13,9 +13,8 @@ const props = defineProps({
   zoom: { type: Number, default: 1 },
   // type -> {icon, color, mode, dual} fallbacks from the action catalog
   typeMeta: { type: Object, default: () => ({}) },
-  // live state pushes (APP_CUSTOM_VALUE / APP_*), see applyStatusUpdate
+  // live state pushes (APP_CUSTOM_VALUE), see applyStatusUpdate
   customValues: { type: Object, default: () => ({}) },
-  appStates: { type: Object, default: () => ({}) },
   // board id -> name, for board-switch tiles without a title
   boardNames: { type: Object, default: () => ({}) },
 });
@@ -307,7 +306,6 @@ function onGridClick(event) {
         :touch="touch"
         :type-meta="typeMeta"
         :custom-values="customValues"
-        :app-states="appStates"
         :board-names="boardNames"
         :active="activeTiles.has(tile.id)"
         :dragging="Boolean(drag && drag.tile.id === tile.id)"

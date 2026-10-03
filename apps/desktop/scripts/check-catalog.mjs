@@ -4,8 +4,12 @@
 //   1. every dual-flagged entry (second-state styling editable) has a
 //      STATE_BINDINGS binding, so nobody ships a toggle tile without
 //      deciding what drives its second state;
-//   2. binding keys point at real catalog entries (catches renames);
-//   3. the plan-windows options token round-trips through
+//   2. no binding uses the `app` state lane - no host ever emits
+//      APP_OBS/APP_TWITCH/... events (integrations push per-key custom
+//      values instead), so an `app` binding can never see a value and
+//      would dead-code the tile's live state (DESK-09);
+//   3. binding keys point at real catalog entries (catches renames);
+//   4. the plan-windows options token round-trips through
 //      parsePlanWindows/setPlanWindows, the one shared by the edit
 //      dialog and the status tile's row filter (DESK-10).
 import {
@@ -19,8 +23,15 @@ const failures = [];
 
 const dualEntries = CATALOG.filter((c) => c.value && c.dual);
 for (const entry of dualEntries) {
-  if (!STATE_BINDINGS[entry.value]) {
+  const binding = STATE_BINDINGS[entry.value];
+  if (!binding) {
     failures.push(`dual entry "${entry.value}" has no STATE_BINDINGS entry`);
+    continue;
+  }
+  if (binding.app) {
+    failures.push(
+      `binding "${entry.value}" uses the dead app-state lane ("${binding.app}"); no APP_* emitter exists - use watch or an empty binding`,
+    );
   }
 }
 

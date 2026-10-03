@@ -18,10 +18,12 @@ const touchBoardId = ref(null);
 const knownInputs = ref([]);
 const audioDevices = ref([]);
 
-// Live state mirrors of the original client: customValues holds pushed
-// values (APP_CUSTOM_VALUE), appStates per-integration status (APP_OBS...).
+// Live state mirror of the original client: customValues holds pushed
+// values. Every producer (extensions, sysinfo, aidev, the audio watcher,
+// device ids via THIRD_PARTY_APP) lands here - the original's per-app
+// state lane (APP_OBS etc.) has no emitter, so no appStates map exists
+// (DESK-09).
 const customValues = reactive({});
-const appStates = reactive({});
 
 // While the window is hidden to tray, state pushes are buffered per app
 // and applied on the next show - writing to the reactive maps would still
@@ -57,18 +59,6 @@ function applyStatusUpdate(payload) {
   switch (payload.app) {
     case "APP_CUSTOM_VALUE":
       mergeCustomValues(data);
-      break;
-    case "APP_OBS":
-      mergeAppState("obs", data);
-      break;
-    case "APP_TWITCH":
-      mergeAppState("twitch", data);
-      break;
-    case "APP_VMOD":
-      mergeAppState("vmod", data);
-      break;
-    case "APP_DISCORD":
-      mergeAppState("discord", data);
       break;
     case "THIRD_PARTY_APP":
       // device id strings; keep them in customValues so the existing
@@ -113,18 +103,6 @@ function mergeCustomValues(data) {
       if (!jsonEqual(value, customValues[key])) customValues[key] = value;
     }
   }
-}
-
-function mergeAppState(name, data) {
-  const prev = appStates[name];
-  const next = { ...(prev || {}) };
-  let changed = false;
-  for (const [k, v] of Object.entries(data)) {
-    if (prev && jsonEqual(prev[k], v)) continue;
-    next[k] = v;
-    changed = true;
-  }
-  if (changed) appStates[name] = next;
 }
 
 // type -> {icon, color, mode} fallbacks: static catalog + extensions
@@ -723,7 +701,6 @@ function onKeydown(event) {
             :zoom="zoom"
             :type-meta="typeMeta"
             :custom-values="customValues"
-            :app-states="appStates"
             :board-names="boardNames"
             @tile-open="editingTile = $event"
             @tile-moved="tileMoved"
@@ -737,7 +714,6 @@ function onKeydown(event) {
             touch
             :type-meta="typeMeta"
             :custom-values="customValues"
-            :app-states="appStates"
             :board-names="boardNames"
             @tile-exec="runTileNow($event.id)"
             @tile-slider="tileSlider"

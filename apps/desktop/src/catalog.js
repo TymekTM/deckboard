@@ -426,35 +426,45 @@ export function findTypeMeta(type) {
 // tables (crates/legacy/assets/buttonprops.json is the authoritative copy
 // of the toggle keys): which live value decides whether a tile shows its
 // second state. `watch` keys into customValues (APP_CUSTOM_VALUE pushes),
-// `app`/`key` into per-app state (APP_OBS etc.), optional `cmd` names the
-// command-JSON field compared against the pushed value (defaults to `key`).
+// optional `cmd` names the command-JSON field compared against the pushed
+// value (defaults to `key`).
+// The original's per-app state lane (APP_OBS/APP_TWITCH/APP_VMOD/...
+// events feeding `app`-scoped bindings) is deliberately gone: no host
+// ever emits those events - extensions, sysinfo, aidev and discord all
+// push per-key custom values, the `watch` style - so every `app` binding
+// evaluated against an empty map and its dual tiles only ever used the
+// session tap-flip (DESK-09). check-catalog.mjs rejects `app` bindings
+// so the lane does not sneak back without an emitter.
 // Every dual-flagged catalog entry MUST have a binding here - the empty
 // binding is a conscious "tap flip until the integration pushes state"
 // decision, and scripts/check-catalog.mjs enforces the pairing.
 export const STATE_BINDINGS = {
   "speaker-device": { watch: "speaker-device", key: "speaker" },
-  // OBS truthiness fix (012 C5): these used to read the whole app state
-  // object, so any push lit every OBS tile (Boolean({}) === true); they
-  // compare their own key now, like the original's toggle_key table.
-  "obs-studio-mode": { app: "obs", key: "studioMode" },
-  "obs-scene": { app: "obs", key: "activeScene", cmd: "scene" },
-  "obs-source": { app: "obs", key: "activeSources", cmd: "source" },
-  "obs-device-audio": { app: "obs", key: "activeDevices", cmd: "device" },
-  "obs-filter": { app: "obs", key: "activeFilters", cmd: "filter" },
-  "slobs-scene": { app: "slobs", key: "activeScene", cmd: "scene" },
-  "slobs-source": { app: "slobs", key: "activeSources", cmd: "source" },
-  "slobs-device-audio": { app: "slobs", key: "activeDevices", cmd: "device" },
-  "xsplit-scene": { app: "xsplit", key: "activeScene", cmd: "scene" },
-  "twitch-slow": { app: "twitch", key: "slow" },
-  "twitch-follow-only": { app: "twitch", key: "followerOnly" },
-  "twitch-subs-only": { app: "twitch", key: "subscriberOnly" },
-  "twitch-emote-only": { app: "twitch", key: "emoteOnly" },
-  "discord-voice-channel": { app: "discord", key: "channel" },
-  "discord-toggle-mute": { app: "discord", key: "mute" },
-  "discord-toggle-deaf": { app: "discord", key: "deaf" },
-  "vmod-voice": { app: "vmod", key: "voice" },
-  "vmod-hearmyself": { app: "vmod", key: "hearmyself" },
-  "vmod-voicechanger": { app: "vmod", key: "voicechanger" },
+  // obs/slobs/xsplit/twitch/discord integrations have no live push in
+  // Pulpit (the JS-app extensions that owned the app-state lane are
+  // gone; exec pushes at most a per-key custom value): their dual tiles
+  // fall back to the session tap flip, like the vm toggles below.
+  "obs-studio-mode": {},
+  "obs-scene": {},
+  "obs-source": {},
+  "obs-device-audio": {},
+  "obs-filter": {},
+  "slobs-scene": {},
+  "slobs-source": {},
+  "slobs-device-audio": {},
+  "xsplit-scene": {},
+  "twitch-slow": {},
+  "twitch-follow-only": {},
+  "twitch-subs-only": {},
+  "twitch-emote-only": {},
+  "discord-voice-channel": {},
+  "discord-toggle-mute": {},
+  "discord-toggle-deaf": {},
+  // vmod-* tiles arrive as runtime extension inputs, not catalog rows;
+  // same tap-flip decision
+  "vmod-voice": {},
+  "vmod-hearmyself": {},
+  "vmod-voicechanger": {},
   // Voicemeeter strip/bus parameter toggles have no live push yet
   // (pulpit_vm is fire-and-forget), so the tap flip decides until a
   // state source exists - an empty binding records that decision.
@@ -467,7 +477,7 @@ export const STATE_BINDINGS = {
 // ToggleButton isActive(): boolean state wins, arrays/strings compare
 // against the command payload. `cmd` is the pre-parsed tile.command - the
 // caller owns the parse (once per command change, not per call).
-export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
+export function stateActive(tile, cmd, customValues, typeMeta) {
   const binding = STATE_BINDINGS[tile.type];
   let value;
   if (tile.type === "vol") {
@@ -475,9 +485,6 @@ export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
     value = customValues["speaker-muted"];
   } else if (binding?.watch) {
     value = customValues[binding.watch];
-  } else if (binding?.app) {
-    const state = appStates[binding.app];
-    value = binding.key ? state?.[binding.key] : state;
   } else if (typeMeta?.[tile.type]?.mode === "custom-value") {
     // extension tiles declared as custom-value follow their variable,
     // keyed by the action value (the original's toggle_key fallback)

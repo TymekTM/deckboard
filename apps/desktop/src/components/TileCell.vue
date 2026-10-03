@@ -11,9 +11,8 @@ const props = defineProps({
   touch: { type: Boolean, default: false },
   // type -> {icon, color, mode, dual} fallbacks from the action catalog
   typeMeta: { type: Object, default: () => ({}) },
-  // live state pushes (APP_CUSTOM_VALUE / APP_*), see applyStatusUpdate
+  // live state pushes (APP_CUSTOM_VALUE), see applyStatusUpdate
   customValues: { type: Object, default: () => ({}) },
-  appStates: { type: Object, default: () => ({}) },
   // board id -> name, for board-switch tiles without a title
   boardNames: { type: Object, default: () => ({}) },
   // editor-preview dual-state flip from the parent's session Set
@@ -38,7 +37,7 @@ const cmd = computed(() => {
 // Whether the tile renders its second state. A known live state wins
 // (original ToggleButton isActive); otherwise the session tap flip.
 const activeState = computed(() => {
-  const state = stateActive(props.tile, cmd.value, props.customValues, props.appStates, props.typeMeta);
+  const state = stateActive(props.tile, cmd.value, props.customValues, props.typeMeta);
   return state !== null ? state : props.active;
 });
 
