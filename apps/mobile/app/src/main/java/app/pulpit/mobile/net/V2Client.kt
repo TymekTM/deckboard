@@ -20,10 +20,10 @@ import app.pulpit.mobile.proto.StateSync
 import app.pulpit.mobile.proto.V2
 import app.pulpit.mobile.proto.Welcome
 import app.pulpit.mobile.proto.decodeDeltaOps
+import app.pulpit.mobile.proto.PULPIT_JSON
 import app.pulpit.mobile.state.Plog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -103,7 +103,7 @@ class V2Client(
     private val pairCode: String?,
     private val deviceName: String,
 ) {
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val json = PULPIT_JSON
 
     private val _state = MutableStateFlow<ConnState>(ConnState.Connecting(host, port))
     val state: StateFlow<ConnState> = _state

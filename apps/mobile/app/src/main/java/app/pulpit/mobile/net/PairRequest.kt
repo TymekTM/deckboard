@@ -6,10 +6,10 @@
 
 package app.pulpit.mobile.net
 
+import app.pulpit.mobile.proto.PULPIT_JSON
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -40,15 +40,13 @@ data class DiscoveredDesktop(
 /** A refused request: 409 (one already live), loopback, browser-origin. */
 class PairRequestRejected(message: String) : Exception(message)
 
-private val json = Json { ignoreUnknownKeys = true }
-
 suspend fun createPairRequest(
     http: OkHttpClient,
     host: String,
     port: Int,
     name: String,
 ): PairRequestCreated = withContext(Dispatchers.IO) {
-    val payload = Json.encodeToString(PairRequestName.serializer(), PairRequestName(name))
+    val payload = PULPIT_JSON.encodeToString(PairRequestName.serializer(), PairRequestName(name))
     val request = Request.Builder()
         .url("http://$host:$port/v2/pair-request")
         .post(payload.toRequestBody("application/json".toMediaType()))
@@ -61,7 +59,7 @@ suspend fun createPairRequest(
         if (!resp.isSuccessful) {
             throw PairRequestRejected("Komputer odrzucił żądanie (HTTP ${resp.code})")
         }
-        json.decodeFromString(PairRequestCreated.serializer(), text)
+        PULPIT_JSON.decodeFromString(PairRequestCreated.serializer(), text)
     }
 }
 
@@ -74,6 +72,6 @@ suspend fun pairRequestStatus(http: OkHttpClient, host: String, port: Int, id: S
             if (!resp.isSuccessful) {
                 return@use "unknown"
             }
-            json.decodeFromString(PairRequestStatus.serializer(), resp.body?.string().orEmpty()).status
+            PULPIT_JSON.decodeFromString(PairRequestStatus.serializer(), resp.body?.string().orEmpty()).status
         }
     }
