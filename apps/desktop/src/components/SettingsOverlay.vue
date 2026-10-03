@@ -88,8 +88,12 @@ async function saveHotkey() {
     hotkey.value = combo;
     hotkeyError.value = "";
     editingHotkey.value = false;
-  } catch {
-    hotkeyError.value = "Ten skrót jest zajęty lub niedozwolony — wybierz inną kombinację.";
+  } catch (e) {
+    // the backend message says why the combo was refused (taken by
+    // another app, unparseable) - show it instead of a generic guess
+    hotkeyError.value = e
+      ? String(e)
+      : "Ten skrót jest zajęty lub niedozwolony — wybierz inną kombinację.";
   }
 }
 

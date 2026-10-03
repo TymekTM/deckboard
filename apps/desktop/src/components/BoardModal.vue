@@ -1,6 +1,8 @@
 <script setup>
-import { reactive } from "vue";
+import { computed, reactive } from "vue";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import { MAX_BOARD_DIM, boardDim } from "../catalog";
 
 const props = defineProps({
   mode: { type: String, required: true }, // 'create' | 'edit'
@@ -15,40 +17,59 @@ const form = reactive({
   background: props.board?.background ?? "#437072",
 });
 
+// Overlay click only closes when nothing was edited (012 A9); the same
+// ask()-confirmation the board context menu uses guards Clear/Delete.
+const initialSnapshot = JSON.stringify({ ...form });
+const dirty = computed(() => JSON.stringify({ ...form }) !== initialSnapshot);
+
+function overlayClose() {
+  if (!dirty.value) emit("close");
+}
+
 async function save() {
+  // clamp dimensions to the backend's integer bounds (012 C4): the
+  // number input's min/max only steer the spinner, they do not validate
+  // pasted or typed values
+  const width = boardDim(form.width, props.board?.width ?? 6);
+  const height = boardDim(form.height, props.board?.height ?? 4);
   if (props.mode === "create") {
-    await api.createBoard(
-      form.name || "New board",
-      form.background,
-      Number(form.width),
-      Number(form.height)
-    );
+    await api.createBoard(form.name || "New board", form.background, width, height);
     emit("saved");
     return;
   }
   await api.updateBoard({
     ...props.board,
     name: form.name,
-    width: Number(form.width),
-    height: Number(form.height),
+    width,
+    height,
     background: form.background,
   });
   emit("saved");
 }
 
 async function clearBoard() {
+  const ok = await ask(`Clear every tile from "${props.board.name}"?`, {
+    title: "Clear board",
+    kind: "warning",
+  });
+  if (!ok) return;
   await api.clearBoard(props.board.id);
   emit("saved");
 }
 
 async function deleteBoard() {
+  const ok = await ask(`Delete board "${props.board.name}"?`, {
+    title: "Delete board",
+    kind: "warning",
+  });
+  if (!ok) return;
   await api.deleteBoard(props.board.id);
   emit("saved");
 }
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
+  <div class="overlay" @click.self="overlayClose">
     <div class="modal">
       <div class="modal-head" :style="{ '--canvas-head': form.background }">
         {{ mode === "create" ? "New board" : "Edit board" }}
@@ -61,11 +82,11 @@ async function deleteBoard() {
         <div class="row">
           <label class="field">
             Columns (width)
-            <input v-model.number="form.width" type="number" min="1" max="15" />
+            <input v-model.number="form.width" type="number" min="1" :max="MAX_BOARD_DIM" step="1" />
           </label>
           <label class="field">
             Rows (height)
-            <input v-model.number="form.height" type="number" min="1" max="15" />
+            <input v-model.number="form.height" type="number" min="1" :max="MAX_BOARD_DIM" step="1" />
           </label>
           <label class="field">
             Background

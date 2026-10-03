@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
-import { ask, open } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { CATALOG } from "../catalog";
 import { api } from "../api";
 import SelectField from "./SelectField.vue";
@@ -343,12 +343,31 @@ async function pickImage(field) {
 
 // ---- save / delete ---------------------------------------------------------
 
-async function removeTile() {
-  const ok = await ask(`Delete tile "${form.title || form.type}"?`, {
-    title: "Delete tile",
-    kind: "warning",
+// the delete confirmation lives in App.vue's tileDeleted (012 A9), the
+// single choke point for both this dialog and the context menu
+function removeTile() {
+  emit("delete");
+}
+
+// ---- dirty guard -----------------------------------------------------------
+
+// Overlay click only closes the dialog when nothing was edited (012 A9):
+// an accidental click outside must not discard a configured tile. The
+// snapshot covers every writer: the form copy plus the command-mapping
+// reactives (fields, steps, boardId) that merge into form.command on save.
+function formSnapshot() {
+  return JSON.stringify({
+    form: { ...form },
+    fields: { ...fields },
+    steps: steps.value,
+    boardId: boardId.value,
   });
-  if (ok) emit("delete");
+}
+const initialSnapshot = formSnapshot();
+const dirty = computed(() => formSnapshot() !== initialSnapshot);
+
+function overlayClose() {
+  if (!dirty.value) emit("close");
 }
 
 function save() {
@@ -410,7 +429,7 @@ function colorOr(val, fallback) {
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
+  <div class="overlay" @click.self="overlayClose">
     <div class="modal btn-modal">
       <div class="modal-head" :style="{ '--tint': boardBackground }">
         {{ isCreate ? "New Button" : "Edit Button" }}

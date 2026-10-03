@@ -479,3 +479,18 @@ export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
 // Grid geometry of the original editor: 96 px cell, 100 px row.
 export const CELL_W = 96;
 export const ROW_H = 100;
+
+// Board width/height cap (012 C4). Matches the backend's
+// MAX_BOARD_DIM = 32 bound on board dimensions (the Rust import-side
+// bounds live in the backend crate); keep the two in sync so the editor
+// can never create a board the backend would reject.
+export const MAX_BOARD_DIM = 32;
+
+// Clamp a board dimension input to the backend's integer bounds; the
+// fallback (the form's own default for that field) applies only when the
+// input is not a number at all.
+export function boardDim(value, fallback) {
+  const n = Math.trunc(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(MAX_BOARD_DIM, Math.max(1, n));
+}
