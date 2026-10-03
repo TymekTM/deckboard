@@ -136,15 +136,12 @@ async fn pair_create(
         return (StatusCode::FORBIDDEN, "browser requests are not allowed").into_response();
     }
     let code = state.pairing.new_code();
-    // M1 has no desktop UI: log the QR-able URL so the operator can relay
-    // it to the device by hand.
-    let host = local_lan_ip()
-        .await
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    tracing::info!(
-        url = %format!("pulpit://{}:{}?pair={}", host, state.config.public_port, code),
-        "pairing code minted - expires in 5 minutes"
-    );
+    // The code is delivered to the loopback caller in the response body
+    // and never written to the log: logs outlive the 5-minute TTL by
+    // weeks and pairing auto-accepts, so a logged code is a standing
+    // invite (audit B2). The message is a static string so the secret
+    // cannot be interpolated into it by accident.
+    tracing::info!("{}", pair_minted_message());
     Json(json!({
         "code": code,
         "expires_in": crate::devices::PAIR_CODE_TTL.as_secs(),
@@ -152,12 +149,10 @@ async fn pair_create(
     .into_response()
 }
 
-/// Best-effort LAN address (the local end of the default route); never
-/// sends a packet. Falls back to loopback when there is no route.
-async fn local_lan_ip() -> Option<String> {
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
-    socket.connect("8.8.8.8:80").await.ok()?;
-    Some(socket.local_addr().ok()?.ip().to_string())
+/// The `POST /v2/pair` log line - deliberately takes no code argument
+/// so the secret cannot leak into it.
+fn pair_minted_message() -> &'static str {
+    "pairing code minted - expires in 5 minutes (code suppressed in logs)"
 }
 
 async fn asset_get(

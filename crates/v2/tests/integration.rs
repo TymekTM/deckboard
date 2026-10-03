@@ -385,6 +385,73 @@ async fn browser_requests_are_rejected_on_the_sockets() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pairing_codes_never_reach_the_log() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let addr = spawn_server(state).await;
+
+    let captured = capture_all_tracing_events();
+    let (status, _, body) = http_post_json(addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 200);
+    let pair: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let code = pair["code"].as_str().unwrap().to_string();
+    assert_eq!(code.len(), 8);
+
+    // The mint log line fires inside the handler, before the response;
+    // the pause only lets any straggler event land before the scan.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let events = captured.lock().unwrap().clone();
+    assert!(
+        !events.is_empty(),
+        "expected at least the mint log line to be captured"
+    );
+    let leakers: Vec<String> = events.iter().filter(|e| e.contains(&code)).cloned().collect();
+    assert!(
+        leakers.is_empty(),
+        "pairing code leaked into the log: {leakers:?}"
+    );
+}
+
+/// Installs a process-wide capturing tracing layer and returns the
+/// recorded event texts (message + field values). Global, not
+/// thread-local: the axum handlers log on worker threads.
+fn capture_all_tracing_events() -> Arc<Mutex<Vec<String>>> {
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            use tracing::field::Visit;
+            struct Fields(Vec<String>);
+            impl Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push(format!("{}={:?}", field.name(), value));
+                }
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0.push(format!("{}={}", field.name(), value));
+                }
+            }
+            let mut fields = Fields(Vec::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0.join(" "));
+        }
+    }
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    use tracing_subscriber::prelude::*;
+    let registry = tracing_subscriber::registry().with(Capture(captured.clone()));
+    // Fails (and is ignored) if some other test already installed one;
+    // the emptiness assert in the caller then fails loudly instead of
+    // silently passing.
+    let _ = tracing::subscriber::set_global_default(registry);
+    captured
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unauthenticated_ws_is_rejected() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let addr = spawn_server(state).await;
