@@ -219,9 +219,16 @@ pub enum PairError {
     Expired,
 }
 
+/// The desktop's fresh-pairing approval decision: the sanitized device
+/// name in, trust out. Blocking by contract - see [`Pairing::ask_trust`].
+type TrustGate = dyn Fn(&str) -> bool + Send + Sync;
+
 /// In-memory pool of live one-time codes. Codes burn on use, valid or not:
 /// a second connection attempt with the same code always fails. A burst
 /// of wrong codes (a guessing client) burns every outstanding code.
+///
+/// Fresh pairings also pass an operator gate ([`Pairing::set_trust_gate`]):
+/// minting a device needs the desktop's trust decision (audit B2 step 6).
 #[derive(Default)]
 pub struct Pairing {
     codes: std::sync::Mutex<HashMap<String, Instant>>,
@@ -231,6 +238,9 @@ pub struct Pairing {
     /// How long a code stays valid. `PAIR_CODE_TTL` in production;
     /// tests shrink it so expiry is observable without waiting.
     ttl: Duration,
+    /// The fresh-pairing approval gate; `None` (headless builds, tests)
+    /// keeps the pre-UI auto-accept behavior, with its warning log.
+    trust: std::sync::Mutex<Option<std::sync::Arc<TrustGate>>>,
 }
 
 impl Pairing {
@@ -316,6 +326,32 @@ impl Pairing {
         failures.retain(|at| at.elapsed() < self.ttl);
         failures.len() >= MAX_FAILED_PAIR_ATTEMPTS
     }
+
+    /// Installs the operator-approval gate for fresh pairings (the
+    /// desktop does this at startup; headless builds keep the
+    /// auto-accept default). Receives the sanitized device name.
+    pub fn set_trust_gate<F>(&self, gate: F)
+    where
+        F: Fn(&str) -> bool + Send + Sync + 'static,
+    {
+        *self.trust.lock().expect("pairing poisoned") = Some(std::sync::Arc::new(gate));
+    }
+
+    /// Consults the trust gate about a fresh pairing. Blocking on
+    /// purpose: the session calls it from its blocking pool and bounds
+    /// the wait by the pairing-code TTL - a gate that never answers
+    /// (nobody at the desktop) denies once the code would have expired
+    /// anyway. `false` rejects the hello.
+    pub fn ask_trust(&self, name: &str) -> bool {
+        let gate = self.trust.lock().expect("pairing poisoned").clone();
+        match gate {
+            Some(gate) => gate(name),
+            None => {
+                tracing::warn!(name = %name, "pairing auto-accepted (no trust gate installed)");
+                true
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +391,26 @@ mod tests {
             1,
             "exactly one consumer may mint off a one-time code"
         );
+    }
+
+    #[test]
+    fn pairing_gate_decides_fresh_devices() {
+        let pairing = Pairing::new();
+        // no gate installed: the headless default auto-accepts (the
+        // pre-UI behavior, with its warning log)
+        assert!(pairing.ask_trust("Tablet salon"));
+
+        // an installed gate decides: this one approves the salon
+        // tablet and denies the stranger
+        let (ask_tx, ask_rx) = std::sync::mpsc::channel::<String>();
+        pairing.set_trust_gate(move |name| {
+            let _ = ask_tx.send(name.to_string());
+            name == "Tablet salon"
+        });
+        assert!(pairing.ask_trust("Tablet salon"));
+        assert!(!pairing.ask_trust("Stranger"));
+        assert_eq!(ask_rx.recv().unwrap(), "Tablet salon");
+        assert_eq!(ask_rx.recv().unwrap(), "Stranger");
     }
 
     #[test]
