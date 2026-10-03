@@ -127,10 +127,28 @@ class V2Client(
                 return
             }
         }
+        // MOB-01: a malformed host/port (saved by an older build, or a
+        // 5-digit port that passed the digit filter) must surface as a
+        // Failed state, never as OkHttp's IllegalArgumentException
+        // through the caller - a paired device would crash-loop at
+        // every launch otherwise. The same bad address can never
+        // connect, so the failure is terminal.
+        val invalid = addressError(host, port)
+        if (invalid != null) {
+            Log.w(TAG, "invalid address \"$host:$port\" - not connecting")
+            _state.value = ConnState.Failed(invalid, retryable = false)
+            return
+        }
         val url = "ws://$host:$port/v2/ws?$auth"
         Log.i(TAG, "connecting to ws://$host:$port/v2/ws")
         _state.value = ConnState.Connecting(host, port)
-        webSocket = http.newWebSocket(Request.Builder().url(url).build(), listener)
+        webSocket = runCatching {
+            http.newWebSocket(Request.Builder().url(url).build(), listener)
+        }.getOrElse {
+            Log.w(TAG, "cannot build socket URL for \"$host:$port\": ${it.message}")
+            _state.value = ConnState.Failed("invalid address: \"$host:$port\"", retryable = false)
+            null
+        }
     }
 
     fun disconnect() {

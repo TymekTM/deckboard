@@ -54,6 +54,9 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
     var port by remember(cfg.port) { mutableStateOf(cfg.port.toString()) }
     var name by remember(cfg.name) { mutableStateOf(cfg.name) }
     var pairCode by remember { mutableStateOf("") }
+    // MOB-01: set when the typed host/port cannot become a URL - shown
+    // instead of connecting (and before saveConfig persists the bad pair)
+    var addressError by remember { mutableStateOf<String?>(null) }
     val paired = !cfg.token.isNullOrBlank()
 
     // M8 pairing modes: Auto (pick a desktop discovered over mDNS, both
@@ -258,14 +261,32 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
             else -> {}
         }
 
+        addressError?.let {
+            Text(
+                text = it,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+
         if (!paired && autoMode) {
             // the auto flow is self-contained: picking a desktop starts
             // the request and approval connects on its own
         } else {
             Button(
                 onClick = {
+                    // MOB-01: validate before saving - a persisted
+                    // malformed host crashed (and re-crashed) the app
+                    // on every paired launch
+                    val portNum = port.toIntOrNull() ?: 0
+                    val err = app.pulpit.mobile.net.addressError(host.trim(), portNum)
+                    if (err != null) {
+                        addressError = err
+                        return@Button
+                    }
+                    addressError = null
                     vm.saveConfig(
-                        cfg.copy(host = host.trim(), port = port.toIntOrNull() ?: 8500, name = name.trim()),
+                        cfg.copy(host = host.trim(), port = portNum, name = name.trim()),
                     )
                     if (paired) {
                         vm.connect()
