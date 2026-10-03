@@ -61,7 +61,6 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -72,6 +71,23 @@ import kotlin.math.sin
 
 private fun parse(value: Double?): String =
     if (value == null) "" else if (value == ceil(value)) value.toInt().toString() else "%.1f".format(value)
+
+/** Static busy ring, shared by the board overlay and the connect
+ *  screen: deck tablets often run with animator scales off, which
+ *  freezes an indeterminate spinner into an invisible dot. A fixed
+ *  300-degree arc reads as "busy" on every device (round 4, MOB-04). */
+@Composable
+fun RingSpinner(modifier: Modifier = Modifier) {
+    Canvas(modifier.size(34.dp)) {
+        drawArc(
+            color = Color.White,
+            startAngle = -90f,
+            sweepAngle = 300f,
+            useCenter = false,
+            style = Stroke(width = 6f, cap = StrokeCap.Round),
+        )
+    }
+}
 
 /** Clock visual styles. Tapping the tile cycles to the next entry and
  *  the choice persists per tile id in shared preferences. */
@@ -191,7 +207,7 @@ fun ClockTile(
             else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 if (icon.isNotEmpty()) {
                     Text(
-                        text = faChar(icon),
+                        text = icon,
                         fontFamily = iconFamily,
                         fontSize = 20.sp,
                         color = titleColor,
@@ -254,21 +270,19 @@ fun GraphTile(
             // same shape, calmer line.
             val points = downsample(history.points, MAX_DRAWN_POINTS)
             if (points.size < 2) return@Canvas
-            // normalize around the window's average so the ordinary level
-            // sits at mid-height: a strong machine idles near a few percent
-            // and a fixed 0..100 scale would pin the whole curve to the
-            // floor. The span has an absolute and relative floor so a quiet
-            // series stays calm instead of amplifying noise to full height.
-            val avg = points.sum() / points.size
-            val dev = maxOf(points.max() - avg, avg - points.min())
-            val half = maxOf(dev, 0.2 * abs(avg), 5.0)
-            val minV = avg - half
-            val span = 2.0 * half
+            // Normalize to the window's own min..max with a 5% pad - the
+            // exact rule of the desktop's sparkline (TileCell.vue
+            // sparkPoints: min, max, span = max - min || 1, y = 95 - t *
+            // 90), so both surfaces draw the same amplitude from the
+            // same series: a machine idling at 2-4% spans the full tile
+            // on both, instead of a fraction of it here.
+            val minV = points.min()
+            val span = (points.max() - minV).takeIf { it != 0.0 } ?: 1.0
             val stepX = size.width / (points.size - 1)
             val line = Path()
             points.forEachIndexed { i, v ->
                 val x = i * stepX
-                val y = size.height - ((v - minV) / span).toFloat().coerceIn(0f, 1f) * size.height
+                val y = size.height - (sparkY(v, minV, span) * size.height).toFloat()
                 if (i == 0) line.moveTo(x, y) else line.lineTo(x, y)
             }
             // wash the area under the curve with a lighter tone of the
@@ -300,21 +314,12 @@ private fun liveFromSeries(history: SeriesWindow): String? {
  *  per bucket so small tiles stay readable. */
 private const val MAX_DRAWN_POINTS = 40
 
-/** Drag events fire hundreds of times per gesture and every slide send is
- *  a websocket round-trip the server executes - ship at most one value
- *  per [throttleMs], plus the final one on release ([push] with
- *  `force = true`). One instance per tile, remembered alongside it. */
-class SlideThrottle(private val throttleMs: Long = 30) {
-    private var lastSentAt = 0L
-
-    fun push(value: Float, force: Boolean = false, send: (Float) -> Unit) {
-        val now = System.currentTimeMillis()
-        if (force || now - lastSentAt >= throttleMs) {
-            lastSentAt = now
-            send(value)
-        }
-    }
-}
+/** Sparkline y fraction (0 = top of the tile, 1 = bottom) over the
+ *  window's min..max with the desktop's 5% padding - the exact rule of
+ *  TileCell.vue's sparkPoints (`95 - t * 90` in percent space), kept
+ *  here as the single shared formula (MOB-08). */
+internal fun sparkY(v: Double, min: Double, span: Double): Double =
+    0.95 - ((v - min) / span) * 0.90
 
 /** Bucket-average [history] down to at most [max] points (keeps shape,
  *  drops jitter). A no-op when the window already fits. */
@@ -335,21 +340,19 @@ internal fun downsample(history: List<Double>, max: Int): List<Double> {
 @Composable
 fun KnobTile(
     tile: Tile,
-    baseColor: Color,
     iconColor: Color,
     titleColor: Color,
     liveValue: Double?,
     onSlider: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // null until somebody drags; the channel's live value positions the
-    // dial then (see SliderTile in Tile.kt for the full rationale)
-    var dragValue by remember(tile.id) { mutableStateOf<Float?>(null) }
-    val liveSlide by rememberUpdatedState(liveValue?.coerceIn(0.0, 1.0)?.toFloat())
-    val value = dragValue ?: liveSlide ?: 0.5f
-    val slide = remember(tile.id) { SlideThrottle() }
+    // one drag protocol with the slider template (MOB-13): see
+    // SlideDragController for the live-echo and convergence policy
+    val slide = remember(tile.id) { SlideDragController() }
     // see ButtonTile (Tile.kt): the drag block outlives a live tile edit
+    val live by rememberUpdatedState(liveValue)
     val sendSlide by rememberUpdatedState(onSlider)
+    val value = slide.current(liveValue)
     val arcColor = tile.style?.color2?.let { hex(it, titleColor) } ?: titleColor
 
     Box(
@@ -368,25 +371,23 @@ fun KnobTile(
                         val radius = max(1.0, kotlin.math.hypot(pos.x.toDouble(), pos.y.toDouble()))
                         val ring = radius.coerceAtMost(size.width / 2.0)
                         val dead = ring * 0.25
-                        val cur = dragValue ?: liveSlide ?: 0.5f
+                        val cur = slide.current(live)
                         val raw = ((angle - 135.0 + 360.0) % 360.0) / 270.0
                         val clamped = raw.coerceIn(0.0, 1.0).toFloat()
                         val scaled = if (radius < dead) cur else clamped
                         if (scaled != cur) {
-                            dragValue = scaled
-                            slide.push(scaled, send = sendSlide)
+                            slide.move(scaled, send = sendSlide)
                         }
                     },
                     onDragEnd = {
                         // converge: the last sampled value always reaches
                         // the server, throttling only smooths the path
-                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
+                        slide.end(live, send = sendSlide)
                     },
                     onDragCancel = {
                         // a cancelled drag still commits its last sampled
                         // position (like the desktop), then follows live
-                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
-                        dragValue = null
+                        slide.cancel(live, send = sendSlide)
                     },
                 )
             },

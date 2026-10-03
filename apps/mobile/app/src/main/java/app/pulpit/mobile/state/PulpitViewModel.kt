@@ -36,10 +36,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 data class ServerConfig(
     val host: String,
@@ -114,9 +112,19 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     val series: StateFlow<Map<String, List<Double>>> = _series
 
     /** Decoded tile/board images by asset hash (content-addressed, so the
-     *  map is safe across reconnects to any server). */
+     *  map is safe across reconnects to any server). Bounded by an
+     *  estimated byte budget (MOB-07): older entries evict as new boards
+     *  bring their own assets in. */
     private val _bitmaps = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
     val bitmaps: StateFlow<Map<String, ImageBitmap>> = _bitmaps
+
+    private val bitmapLru = BoundedLru<String, ImageBitmap>(BITMAP_BUDGET_BYTES) {
+        it.width.toLong() * it.height * 4L
+    }.apply {
+        // an evicted hash may fetch again if its tile reappears on
+        // screen later (the LaunchedEffect in BoardScreen re-requests)
+        onEvict = { assetFetches.remove(it) }
+    }
 
     /** Hashes fetched, in flight, or failed this process (main thread
      *  only). Failures retry ASSET_RETRIES times with backoff; forgetPairing
@@ -139,6 +147,11 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Set while a pairing is in flight (no token yet). */
     private var pendingPairCode: String? = null
+
+    /** The decision-poll coroutine for the live pair request (MOB-16):
+     *  cancelPairRequest must be able to reach it, or "Przerwij" leaves
+     *  the loop polling the desktop every 2 s until the request TTL. */
+    private var pairPollJob: Job? = null
 
     /** Channels the server declared as series in the welcome catalog.
      *  Patches for these append to the chart window even when the
@@ -172,9 +185,9 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
      *  server-side, so no second dialog). */
     fun startPairRequest(host: String, port: Int, deviceName: String) {
         if (_pairRequest.value != null) return
-        scope.launch {
+        pairPollJob = scope.launch {
             try {
-                val created = createPairRequest(sharedHttp, host, port, deviceName)
+                val created = createPairRequest(V2Client.httpCalls, host, port, deviceName)
                 _pairRequest.value = PairRequestUi(host, port, created.code, deviceName)
                 pollPairDecision(host, port, created.request_id, created.expires_in_secs)
             } catch (e: Exception) {
@@ -188,58 +201,62 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Leaves the waiting state without touching the desktop (its dialog
-     *  still resolves on its own; the unanswered request expires). */
+     *  still resolves on its own; the unanswered request expires). The
+     *  poll job stops too (MOB-16) - no pointless radio wakeups until
+     *  the TTL, and a later startPairRequest gets a clean slate. */
     fun cancelPairRequest() {
+        pairPollJob?.cancel()
+        pairPollJob = null
         _pairRequest.value = null
     }
 
     private suspend fun pollPairDecision(host: String, port: Int, id: String, ttlSecs: Long) {
-        val deadline = System.currentTimeMillis() + (ttlSecs + 5) * 1000
-        while (System.currentTimeMillis() < deadline) {
-            delay(2000)
-            val status = try {
-                pairRequestStatus(sharedHttp, host, port, id)
-            } catch (_: Exception) {
-                continue
-            }
-            when (status) {
-                "approved" -> {
-                    val ui = _pairRequest.value
-                    _pairRequest.value = null
-                    if (ui != null) {
-                        withContext(Dispatchers.Main.immediate) {
-                            saveConfig(
-                                _config.value.copy(
-                                    host = ui.host,
-                                    port = ui.port,
-                                    name = ui.deviceName,
-                                ),
-                            )
-                            connectWithPairCode(ui.code)
-                        }
+        // the loop is extracted (pollPairDecisionLoop) so the exit rules
+        // are unit-tested: decision word, user cancel, or deadline
+        val decision = pollPairDecisionLoop(
+            deadlineMs = System.currentTimeMillis() + (ttlSecs + 5) * 1000,
+            now = { System.currentTimeMillis() },
+            sleep = { delay(2000) },
+            stillWaiting = { _pairRequest.value != null },
+            poll = { pairRequestStatus(V2Client.httpCalls, host, port, id) },
+        )
+        when (decision) {
+            "approved" -> {
+                val ui = _pairRequest.value
+                _pairRequest.value = null
+                if (ui != null) {
+                    withContext(Dispatchers.Main.immediate) {
+                        saveConfig(
+                            _config.value.copy(
+                                host = ui.host,
+                                port = ui.port,
+                                name = ui.deviceName,
+                            ),
+                        )
+                        connectWithPairCode(ui.code)
                     }
-                    return
-                }
-                "rejected" -> {
-                    _pairRequest.value = null
-                    _connState.value =
-                        ConnState.Failed("komputer odrzucił parowanie", retryable = false)
-                    return
-                }
-                "expired" -> {
-                    _pairRequest.value = null
-                    _connState.value = ConnState.Failed(
-                        "żądanie wygasło - uruchom parowanie ponownie",
-                        retryable = false,
-                    )
-                    return
                 }
             }
-        }
-        if (_pairRequest.value != null) {
-            _pairRequest.value = null
-            _connState.value =
-                ConnState.Failed("komputer nie odpowiedział w czasie", retryable = false)
+            "rejected" -> {
+                _pairRequest.value = null
+                _connState.value =
+                    ConnState.Failed("komputer odrzucił parowanie", retryable = false)
+            }
+            "expired" -> {
+                _pairRequest.value = null
+                _connState.value = ConnState.Failed(
+                    "żądanie wygasło - uruchom parowanie ponownie",
+                    retryable = false,
+                )
+            }
+            // null = the deadline passed with no decision (the stillWaiting
+            // cancel path leaves the state alone - cancelPairRequest or a
+            // newer request owns it)
+            null -> if (_pairRequest.value != null) {
+                _pairRequest.value = null
+                _connState.value =
+                    ConnState.Failed("komputer nie odpowiedział w czasie", retryable = false)
+            }
         }
     }
 
@@ -322,28 +339,41 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Kick off a fetch for [hash]. Reads [ServerConfig.token], so nothing
      *  loads before the device is authenticated. Failures back off and
-     *  retry a few times - e.g. an asset fetched during a server restart. */
-    fun ensureAsset(hash: String, attempt: Int = 0) {
-        if (_bitmaps.value.containsKey(hash) || !assetFetches.add(hash)) return
+     *  retry a few times - e.g. an asset fetched during a server restart.
+     *  [maxDim] is the decode target: tiles render ~150px (512 is plenty
+     *  even for a 2x2 tile), board backgrounds render full-screen and
+     *  decode larger (MOB-07) - a background sampled at the old tile cap
+     *  upscaled to the whole display read as visibly soft. */
+    fun ensureAsset(hash: String, maxDim: Int = ASSET_TILE_DIM, attempt: Int = 0) {
+        if (bitmapLru.contains(hash) || !assetFetches.add(hash)) return
         val cfg = _config.value
         val token = cfg.token ?: return
         scope.launch {
             val bitmap = withContext(Dispatchers.IO) {
                 runCatching {
                     val url = "http://${cfg.host}:${cfg.port}/assets/$hash?token=$token"
-                    sharedHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                    V2Client.httpCalls.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                         if (!resp.isSuccessful) return@use null
+                        val body = resp.body ?: return@use null
+                        // MOB-12: bail on an asset too big to be a tile
+                        // image or background - the sampled decode was
+                        // always capped, the read was not, and a multi-MB
+                        // body buffered whole into the heap of a 1 GB
+                        // tablet. A lying or absent Content-Length is
+                        // caught by the capped stream read itself.
+                        if (body.contentLength() > ASSET_MAX_BYTES) return@use null
                         // one read: OkHttp streams cannot be consumed twice
-                        val bytes = resp.body?.byteStream()?.readBytes() ?: return@use null
-                        // a tile renders ~150px; decode with a power-of-two
-                        // sample so a future full-res photo cannot eat the
-                        // heap of a 1 GB tablet
+                        val bytes = readAtMost(body.byteStream(), ASSET_MAX_BYTES.toInt())
+                            ?: return@use null
+                        // decode with a power-of-two sample at the purpose's
+                        // target size, so a future full-res photo cannot eat
+                        // the heap of a 1 GB tablet
                         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
                         val sampled = BitmapFactory.Options().apply {
                             inSampleSize = maxOf(
-                                bounds.outWidth / ASSET_MAX_DIM,
-                                bounds.outHeight / ASSET_MAX_DIM,
+                                bounds.outWidth / maxDim,
+                                bounds.outHeight / maxDim,
                                 1,
                             )
                         }
@@ -352,11 +382,12 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                 }.getOrNull()
             }
             if (bitmap != null) {
-                _bitmaps.value = _bitmaps.value + (hash to bitmap.asImageBitmap())
+                bitmapLru.put(hash, bitmap.asImageBitmap())
+                _bitmaps.value = bitmapLru.snapshot()
             } else if (attempt < ASSET_RETRIES) {
                 delay(30_000L * (attempt + 1))
                 assetFetches.remove(hash)
-                ensureAsset(hash, attempt + 1)
+                ensureAsset(hash, maxDim, attempt + 1)
             }
         }
     }
@@ -473,6 +504,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun forgetPairing() {
+        cancelPairRequest()
         saveConfig(_config.value.copy(token = null))
         stopKeepAlive()
         disconnect()
@@ -482,6 +514,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         _values.value = emptyMap()
         _series.value = emptyMap()
         _channelMeta.value = emptyMap()
+        bitmapLru.clear()
         _bitmaps.value = emptyMap()
         assetFetches.clear()
     }
@@ -760,13 +793,51 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         /** Shutdown-overlay probe cadence; see the init loop. */
         private const val PROBE_SECONDS = 30L
 
-        /** Decode cap for tile images: tiles render around 150px, so a
-         *  512px sample is plenty even on a 2x2-tile widget. */
-        private const val ASSET_MAX_DIM = 512
+        /** Decode targets (MOB-07): tiles render around 150px, so a
+         *  512px sample is plenty even on a 2x2-tile widget; board
+         *  backgrounds render full-screen, so they decode at ~screen
+         *  width instead of the tile cap (sampling to 512 and
+         *  upscaling blurred every background). */
+        const val ASSET_TILE_DIM = 512
+        const val ASSET_BG_DIM = 1280
 
-        /** Shared by reconnects and asset fetches - see V2Client.http. */
-        private val sharedHttp = OkHttpClient.Builder()
-            .connectTimeout(6, TimeUnit.SECONDS)
-            .build()
+        /** Bitmap cache budget: an ARGB-estimated byte cap big enough
+         *  for a boardful of tile images plus a couple of backgrounds,
+         *  small enough to be safe on the deck's 1 GB (MOB-07). */
+        const val BITMAP_BUDGET_BYTES = 32L * 1024 * 1024
+
+        /** Asset response cap: tile images and backgrounds are a few
+         *  hundred KB; anything past this is not a decode candidate but
+         *  a heap spike (MOB-12). */
+        const val ASSET_MAX_BYTES = 10L * 1024 * 1024
     }
+}
+
+/** The pair-decision poll loop, extracted for a unit test (MOB-16):
+ *  sleeps, then checks the request is still waiting (the user may have
+ *  pressed "Przerwij"), then asks the desktop. Transient poll errors
+ *  keep looping like they always did; the exit rules are the decision
+ *  word, [stillWaiting] turning false (null return), or the deadline.
+ *  Cancellation (cancelPairRequest cancels the job) propagates through
+ *  [sleep] and [poll] like any suspend call. */
+internal suspend fun pollPairDecisionLoop(
+    deadlineMs: Long,
+    now: () -> Long,
+    sleep: suspend () -> Unit,
+    stillWaiting: () -> Boolean,
+    poll: suspend () -> String,
+): String? {
+    while (now() < deadlineMs) {
+        sleep()
+        if (!stillWaiting()) return null
+        val status = try {
+            poll()
+        } catch (_: Exception) {
+            continue
+        }
+        when (status) {
+            "approved", "rejected", "expired" -> return status
+        }
+    }
+    return null
 }

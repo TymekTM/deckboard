@@ -4,6 +4,7 @@ node_modules/
 
 # Android / mobile build outputs
 apps/mobile/.gradle/
+apps/mobile/.kotlin/
 apps/mobile/build/
 apps/mobile/app/build/
 apps/mobile/local.properties

@@ -21,6 +21,12 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
 
+/** The one Json config for every protocol parse/encode on this client
+ *  (round 4, SWEEP-14 - four separately-built instances used to drift
+ *  apart): unknown keys ignored (protocol evolution rules), lenient so
+ *  sloppy-but-unambiguous payloads from older servers still decode. */
+val PULPIT_JSON: Json = Json { ignoreUnknownKeys = true; isLenient = true }
+
 /** Protocol constants. */
 object V2 {
     const val PROTOCOL = 2
@@ -63,8 +69,6 @@ object V2 {
     // state shapes
     const val SHAPE_SCALAR = "scalar"
     const val SHAPE_SERIES = "series"
-    const val SHAPE_TOGGLE = "toggle"
-    const val SHAPE_LIST = "list"
 }
 
 @Serializable

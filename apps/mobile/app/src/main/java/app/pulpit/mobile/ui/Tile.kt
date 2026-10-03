@@ -221,7 +221,7 @@ fun Tile(
             }
             when (template) {
                 "slider" -> SliderTile(tile, color, icon, iconFamily, iconColor, liveValue, onSlider)
-                "knob" -> KnobTile(tile, titleColor, iconColor, titleColor, liveValue, onSlider)
+                "knob" -> KnobTile(tile, iconColor, titleColor, liveValue, onSlider)
                 "graph" -> GraphTile(tile, series, liveText, channel, titleColor)
                 "clock" -> ClockTile(tile, icon, iconFamily, titleColor)
                 "list" ->
@@ -289,6 +289,14 @@ private fun ButtonTile(
     // declared swipes. The tracker suppresses the release tap once a
     // gesture spoke, so one touch fires exactly one interaction.
     val tracker = remember(tile.id) { GestureTracker() }
+    // MOB-03: a tile that declares double-tap without the press pair
+    // takes its tap from detectTapGestures' onTap - the detector
+    // suppresses the first tap when a second lands inside the window,
+    // which the release path cannot do (tryAwaitRelease returns before
+    // onDoubleTap can mark the tracker). Press-mode tiles keep the
+    // release path: their release sends press-end, never a tap.
+    val tapFromDetector = tile.interacts(V2.INT_DOUBLE_TAP) &&
+        !tile.interacts(V2.INT_PRESS_END)
     val wantsSwipe =
         tile.interacts(V2.INT_SWIPE_LEFT) || tile.interacts(V2.INT_SWIPE_RIGHT)
     // icon-only faces (discord voice toggles): the color and the glyph
@@ -349,6 +357,14 @@ private fun ButtonTile(
                     } else {
                         null
                     },
+                    // only registered for the MOB-03 tiles above; when
+                    // onDoubleTap is registered Compose defers the first
+                    // tap through the double-tap window for us
+                    onTap = if (tapFromDetector) {
+                        { pressEnd() }
+                    } else {
+                        null
+                    },
                     onPress = {
                         tracker.reset()
                         pressStart()
@@ -360,13 +376,24 @@ private fun ButtonTile(
                         }                         finally {
                             // a long press or a swipe already sent this
                             // touch's interaction; the plain release must
-                            // not fire a second one
-                            if (tracker.consumed) {
-                                onPressCancel()
-                            } else if (released || currentTile.interacts(V2.INT_PRESS_END)) {
-                                pressEnd()
-                            } else {
-                                onPressCancel()
+                            // not fire a second one - but a press-mode
+                            // tile still owes its press-end even then
+                            // (MOB-02): only press-end stops the server's
+                            // hold-repeat loop, so the release decision
+                            // handles consumed gestures explicitly
+                            when (
+                                releaseDecision(
+                                    consumed = tracker.consumed,
+                                    released = released,
+                                    declaresPressEnd = currentTile.interacts(V2.INT_PRESS_END),
+                                    declaresPressPair = currentTile.interacts(V2.INT_PRESS_START) &&
+                                        currentTile.interacts(V2.INT_PRESS_END),
+                                    tapSentFromOnTap = currentTile.interacts(V2.INT_DOUBLE_TAP) &&
+                                        !currentTile.interacts(V2.INT_PRESS_END),
+                                )
+                            ) {
+                                ReleaseDecision.Fire -> pressEnd()
+                                ReleaseDecision.Cancel -> onPressCancel()
                             }
                         }
                     },
@@ -387,7 +414,7 @@ private fun ButtonTile(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             if (image == null && unicode.isNotEmpty()) {
                 Text(
-                    text = faChar(unicode),
+                    text = unicode,
                     fontFamily = iconFamily,
                     fontSize = 26.sp,
                     color = iconColor,
@@ -423,16 +450,13 @@ private fun SliderTile(
     liveValue: Double?,
     onSlider: (Float) -> Unit,
 ) {
-    // null until somebody drags: the channel's live value drives the fill
-    // then (the desktop's touch mode mirrors the same way). A completed
-    // drag keeps its position - the face must not flicker back while the
-    // echo patch travels - a cancelled one hands control back to live.
-    var dragValue by remember(tile.id) { mutableStateOf<Float?>(null) }
-    val liveSlide by rememberUpdatedState(liveValue?.coerceIn(0.0, 1.0)?.toFloat())
-    val value = dragValue ?: liveSlide ?: 0.5f
-    val slide = remember(tile.id) { SlideThrottle() }
-    // see ButtonTile: the drag block outlives a live tile edit
+    // one drag protocol with the knob template (MOB-13): see
+    // SlideDragController for the live-echo and convergence policy
+    val slide = remember(tile.id) { SlideDragController() }
+    // see ButtonTile above: the drag block outlives a live tile edit
+    val live by rememberUpdatedState(liveValue)
     val sendSlide by rememberUpdatedState(onSlider)
+    val value = slide.current(liveValue)
     val fill = tile.style?.color2?.let { hex(it, baseColor.copy(alpha = 0.6f)) }
         ?: baseColor.copy(alpha = 0.55f)
 
@@ -442,26 +466,21 @@ private fun SliderTile(
             .pointerInput(tile.id) {
                 detectDragGestures(
                     onDragStart = { offset ->
-                        val start = (1f - offset.y / size.height).coerceIn(0f, 1f)
-                        dragValue = start
-                        slide.push(start, force = true, send = sendSlide)
+                        slide.start((1f - offset.y / size.height).coerceIn(0f, 1f), sendSlide)
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        val next = (1f - change.position.y / size.height).coerceIn(0f, 1f)
-                        dragValue = next
-                        slide.push(next, send = sendSlide)
+                        slide.move((1f - change.position.y / size.height).coerceIn(0f, 1f), sendSlide)
                     },
                     onDragEnd = {
                         // converge: the last sampled value always reaches
                         // the server, throttling only smooths the path
-                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
+                        slide.end(live, sendSlide)
                     },
                     onDragCancel = {
                         // a cancelled drag still commits its last sampled
                         // position (like the desktop), then follows live
-                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
-                        dragValue = null
+                        slide.cancel(live, sendSlide)
                     },
                 )
             },
@@ -475,7 +494,7 @@ private fun SliderTile(
         )
         if (icon.isNotEmpty()) {
             Text(
-                text = faChar(icon),
+                text = icon,
                 fontFamily = iconFamily,
                 fontSize = 22.sp,
                 color = iconColor,
@@ -484,5 +503,3 @@ private fun SliderTile(
     }
 }
 
-// the payload already carries the actual glyph character
-fun faChar(unicode: String): String = unicode
