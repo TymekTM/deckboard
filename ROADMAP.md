@@ -112,8 +112,9 @@ as a Rust rewrite of Deckboard 3.x; owns its identity and data directory
 - [ ] **M7 - Integrations**: OBS (obws), Streamlabs, Twitch (IRC + Helix),
       Spotify (rspotify), VoiceMod. Twitter is dropped (dead in the original,
       not carried over).
-- [ ] **M8 - Extras**: plugin API, mDNS discovery, APK sideload from desktop,
-      desktop updater.
+- [x] **M8 - Extras**: plugin API (closed by ADR-014: .asar extensions are
+      the plugin mechanism), mDNS discovery, APK sideload from desktop,
+      desktop updater (latest.json feed, sha256-verified swap + restart).
 
 ## Scope decisions
 

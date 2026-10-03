@@ -177,3 +177,25 @@ desktops/tablets may coexist - discovery is multi-instance by
 nature, pairing is always pairwise and operator-gated. Loopback
 callers cannot use the request endpoint (the desktop has its own
 UI), and browser origins are refused as everywhere else (B1).
+
+## ADR-014: .asar extensions are the plugin API (M8 closed)
+
+Status: accepted (2026-10-03, v1.3.0)
+
+M8's "plugin API" is resolved by what already ships: user-installed
+extensions (.asar packages, ADR-012) are the plugin mechanism. They
+register custom tile kinds through the same input declarations the
+native sources use, push values over the same channels (legacy
+APP_CUSTOM_VALUE and v2 ext.*), and are trusted code by the same
+policy. Building a second, sandboxed scripting API would duplicate
+that path with a new trust model attached - a design discussion with
+no current user need. If a sandboxed API ever becomes necessary, it
+will be a new ADR; until then the extension surface is frozen as the
+official plugin mechanism, and the ROADMAP M8 item is closed by this
+decision rather than by new code. The M8 updater, by contrast, is
+real code: the desktop checks a `latest.json` feed (repo default,
+editor.json override, "off" to disable), downloads the release asset
+over HTTPS with a size cap, verifies the manifest sha256, swaps the
+exe (rename dance safe against crashes - rollback restores the
+running build) and restarts through a detached cmd intermediary so
+the single-instance guard never sees two live processes.
