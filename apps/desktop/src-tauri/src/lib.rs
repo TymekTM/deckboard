@@ -11,6 +11,9 @@ use pulpit_legacy::{AppState, Backend, EditorBroadcaster, Hub};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 /// Everything the UI commands need, built once in [`setup_core`].
 struct DesktopState {
     backend: Option<Arc<SqlBackend>>,
@@ -189,6 +192,7 @@ pub fn run() {
             create_pairing_code,
             list_devices,
             revoke_device,
+            resolve_operator_ask,
             export_boards,
             import_boards,
         ])
@@ -392,16 +396,16 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     if let Some(v2) = &v2 {
         let app = app.clone();
         v2.pairing
-            .set_trust_gate(move |name| trust_dialog(&app, name.to_string()));
+            .set_trust_gate(move |name| ask_operator(&app, "trust", name, None));
     }
     // M8 Bluetooth-style pair-requests (plan 014): a tablet that found us
-    // over mDNS asks to pair; the dialog shows the verification code the
-    // tablet is displaying too - pairing completes only when the numbers
-    // match and the operator confirms.
+    // over mDNS asks to pair; the editor popup shows the verification code
+    // the tablet is displaying too - pairing completes only when the
+    // numbers match and the operator confirms.
     if let Some(v2) = &v2 {
         let app = app.clone();
         v2.pairing.set_pair_request_gate(move |name, code| {
-            pair_request_dialog(&app, name.to_string(), code.to_string())
+            ask_operator(&app, "pair-request", name, Some(code.to_string()))
         });
     }
     // M8 discovery: announce the server on mDNS so tablets can find it
@@ -1182,78 +1186,70 @@ fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, S
     })
 }
 
-/// The pairing trust prompt (audit B2 step 6): a native modal dialog
-/// asking the operator to trust a first-time device. Runs on the pairing
-/// session's blocking thread, so the wait costs no socket-loop time; the
-/// caller bounds the wait by the pairing-code TTL and drops a late
-/// answer (the one-time code is burned - a retry needs a fresh one).
-fn trust_dialog(app: &AppHandle, name: String) -> bool {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    tracing::info!(name = %name, "asking the operator to trust a new pairing");
-    dialog_on_main_thread(app, move |app| {
-        app.dialog()
-            .message(format!(
-                "\"{name}\" wants to connect to Pulpit.\n\nTrust this device? Denying - or leaving \
-                 this dialog unanswered until the code expires - rejects the pairing; the tablet can \
-                 retry with a fresh code."
-            ))
-            .title("New tablet")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "Trust".into(),
-                "Deny".into(),
-            ))
-    })
+/// The operator gates (B2 trust prompt + M8 pair-request) ask through
+/// the editor's own pairing popup - a styled in-app modal - instead of a
+/// native dialog. `ask_operator` emits `operator-ask` to the webview and
+/// parks the calling worker thread on a channel until
+/// [`resolve_operator_ask`] answers (or the timeout denies). Runs on the
+/// pairing session's blocking thread / the pair-request worker, so the
+/// wait costs no socket-loop time. Deny-safe by construction: a closed
+/// webview, an emit failure, a timeout or a dropped channel all deny -
+/// nothing here can accidentally approve.
+fn pending_asks() -> &'static std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>> {
+    static PENDING: OnceLock<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>> =
+        OnceLock::new();
+    PENDING.get_or_init(Default::default)
 }
 
-/// M8 Bluetooth-style pairing (plan 014): both screens show the same
-/// verification code; pairing completes only on an explicit confirm.
-/// Denying - or leaving the dialog unanswered past the code TTL -
-/// rejects the request and the tablet's poll turns into a rejection.
-fn pair_request_dialog(app: &AppHandle, name: String, code: String) -> bool {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    tracing::info!(name = %name, "pair-request: asking the operator to compare codes");
-    dialog_on_main_thread(app, move |app| {
-        app.dialog()
-            .message(format!(
-                "\"{name}\" chce połączyć się z Pulpitem.\n\nKod weryfikacyjny: {code}\n\nZgadza się z kodem na tablecie? Odrzucenie - lub brak odpowiedzi do wygaśnięcia żądania - odrzuca parowanie."
-            ))
-            .title("Żądanie parowania")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "Zaufaj".into(),
-                "Odrzuć".into(),
-            ))
-    })
+/// How long the popup may wait for the operator: the pairing-code TTL
+/// (5 min) plus a grace gap, so the popup outlives the code it gates.
+const OPERATOR_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(360);
+
+fn next_ask_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "ask-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
-/// The gate dialogs are answered from worker threads (spawn_blocking),
-/// and `blocking_show` is unreliable there - on Windows it can return
-/// without ever showing a window, which reads as an accidental APPROVE.
-/// The safe pattern: dispatch the dialog to the main thread with the
-/// non-blocking `show`, and park the worker on a channel until the
-/// operator answers. The callers bound the wait by the pairing TTL.
-fn dialog_on_main_thread(
-    app: &AppHandle,
-    build: impl FnOnce(&AppHandle) -> tauri_plugin_dialog::MessageDialogBuilder<tauri::Wry>
-        + Send
-        + 'static,
-) -> bool {
+fn ask_operator(app: &AppHandle, kind: &str, name: &str, code: Option<String>) -> bool {
+    let id = next_ask_id();
     let (tx, rx) = std::sync::mpsc::channel();
-    let handle = app.clone();
-    let dispatch = app.run_on_main_thread(move || {
-        let builder = build(&handle);
-        builder.show(move |approved| {
-            let _ = tx.send(approved);
-        });
-    });
-    match dispatch {
-        Ok(()) => rx.recv().unwrap_or(false),
-        // no main loop to answer on (headless/test): deny, never approve
-        Err(e) => {
-            tracing::warn!(error = %e, "dialog dispatch failed - denying");
+    pending_asks()
+        .lock()
+        .expect("asks poisoned")
+        .insert(id.clone(), tx);
+    let payload = serde_json::json!({ "id": id, "kind": kind, "name": name, "code": code });
+    if let Err(e) = app.emit("operator-ask", payload) {
+        tracing::warn!(error = %e, "operator ask: webview emit failed - denying");
+        pending_asks().lock().expect("asks poisoned").remove(&id);
+        return false;
+    }
+    tracing::info!(kind, name, "operator ask shown in the editor");
+    let answer = match rx.recv_timeout(OPERATOR_ASK_TIMEOUT) {
+        Ok(approved) => approved,
+        Err(_) => {
+            tracing::warn!(kind, name, "operator ask unanswered - denying");
             false
         }
+    };
+    pending_asks().lock().expect("asks poisoned").remove(&id);
+    answer
+}
+
+/// The editor's answer to a shown ask. Unknown ids (already resolved or
+/// expired) are errors so a double-click cannot resurrect a decision.
+#[tauri::command]
+fn resolve_operator_ask(id: String, approved: bool) -> Result<(), String> {
+    let sender = pending_asks().lock().expect("asks poisoned").remove(&id);
+    match sender {
+        Some(tx) => tx
+            .send(approved)
+            .map_err(|_| "ask already gone".to_string()),
+        None => Err("no such ask (already resolved or expired)".to_string()),
     }
 }
 

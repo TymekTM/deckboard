@@ -27,6 +27,7 @@ export const api = {
   createPairingCode: () => invoke("create_pairing_code"),
   listDevices: () => invoke("list_devices"),
   revokeDevice: (id) => invoke("revoke_device", { id }),
+  resolveOperatorAsk: (id, approved) => invoke("resolve_operator_ask", { id, approved }),
   listAudioDevices: () => invoke("list_audio_devices"),
   exportBoards: (ids, path) => invoke("export_boards", { ids, path }),
   importBoards: (path) => invoke("import_boards", { path }),

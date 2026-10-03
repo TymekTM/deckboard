@@ -8,6 +8,7 @@ import GridEditor from "./components/GridEditor.vue";
 import EditTileModal from "./components/EditTileModal.vue";
 import BoardModal from "./components/BoardModal.vue";
 import SettingsOverlay from "./components/SettingsOverlay.vue";
+import OperatorAskModal from "./components/OperatorAskModal.vue";
 
 const boards = ref([]);
 const currentId = ref(null);
@@ -824,6 +825,9 @@ function onKeydown(event) {
         </button>
       </div>
     </Transition>
+
+    <!-- operator gates (B2 trust / M8 pair-request) as in-app popups -->
+    <OperatorAskModal />
   </div>
 </template>
 
