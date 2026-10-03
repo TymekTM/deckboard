@@ -388,15 +388,14 @@ async fn browser_requests_are_rejected_on_the_sockets() {
     // without an Origin header.
     let (status, _, _) = http_request(
         addr,
-        format!(
-            "POST /v2/pair HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
-        ),
+        "POST /v2/pair HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+            .to_string(),
     )
     .await;
     assert_eq!(status, 403, "rebound Host must be rejected");
 
     // No Origin header at all: the native tablet client's normal shape.
-    let mut request = (&format!("ws://{addr}/v2/ws?token={}", token))
+    let request = (&format!("ws://{addr}/v2/ws?token={}", token))
         .into_client_request()
         .unwrap();
     assert!(
@@ -748,7 +747,7 @@ async fn pairing_flow_mints_welcome_and_device() {
 #[tokio::test(flavor = "multi_thread")]
 async fn hello_names_are_sanitized_before_persisting() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Old name");
+    let (_device, token) = state.devices.create("Old name");
     let addr = spawn_server(state.clone()).await;
 
     // A hostile hello.name: control characters, padding and 100 chars.
@@ -890,7 +889,7 @@ async fn token_connect_delivers_full_snapshot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn hello_rename_lands_in_welcome_and_registry() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Old name");
+    let (_device, token) = state.devices.create("Old name");
     let addr = spawn_server(state.clone()).await;
 
     // hello.name renames the paired device; the welcome of THIS connection
