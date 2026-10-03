@@ -114,9 +114,19 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     val series: StateFlow<Map<String, List<Double>>> = _series
 
     /** Decoded tile/board images by asset hash (content-addressed, so the
-     *  map is safe across reconnects to any server). */
+     *  map is safe across reconnects to any server). Bounded by an
+     *  estimated byte budget (MOB-07): older entries evict as new boards
+     *  bring their own assets in. */
     private val _bitmaps = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
     val bitmaps: StateFlow<Map<String, ImageBitmap>> = _bitmaps
+
+    private val bitmapLru = BoundedLru<String, ImageBitmap>(BITMAP_BUDGET_BYTES) {
+        it.width.toLong() * it.height * 4L
+    }.apply {
+        // an evicted hash may fetch again if its tile reappears on
+        // screen later (the LaunchedEffect in BoardScreen re-requests)
+        onEvict = { assetFetches.remove(it) }
+    }
 
     /** Hashes fetched, in flight, or failed this process (main thread
      *  only). Failures retry ASSET_RETRIES times with backoff; forgetPairing
@@ -322,9 +332,13 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Kick off a fetch for [hash]. Reads [ServerConfig.token], so nothing
      *  loads before the device is authenticated. Failures back off and
-     *  retry a few times - e.g. an asset fetched during a server restart. */
-    fun ensureAsset(hash: String, attempt: Int = 0) {
-        if (_bitmaps.value.containsKey(hash) || !assetFetches.add(hash)) return
+     *  retry a few times - e.g. an asset fetched during a server restart.
+     *  [maxDim] is the decode target: tiles render ~150px (512 is plenty
+     *  even for a 2x2 tile), board backgrounds render full-screen and
+     *  decode larger (MOB-07) - a background sampled at the old tile cap
+     *  upscaled to the whole display read as visibly soft. */
+    fun ensureAsset(hash: String, maxDim: Int = ASSET_TILE_DIM, attempt: Int = 0) {
+        if (bitmapLru.contains(hash) || !assetFetches.add(hash)) return
         val cfg = _config.value
         val token = cfg.token ?: return
         scope.launch {
@@ -335,15 +349,15 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                         if (!resp.isSuccessful) return@use null
                         // one read: OkHttp streams cannot be consumed twice
                         val bytes = resp.body?.byteStream()?.readBytes() ?: return@use null
-                        // a tile renders ~150px; decode with a power-of-two
-                        // sample so a future full-res photo cannot eat the
-                        // heap of a 1 GB tablet
+                        // decode with a power-of-two sample at the purpose's
+                        // target size, so a future full-res photo cannot eat
+                        // the heap of a 1 GB tablet
                         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
                         val sampled = BitmapFactory.Options().apply {
                             inSampleSize = maxOf(
-                                bounds.outWidth / ASSET_MAX_DIM,
-                                bounds.outHeight / ASSET_MAX_DIM,
+                                bounds.outWidth / maxDim,
+                                bounds.outHeight / maxDim,
                                 1,
                             )
                         }
@@ -352,11 +366,12 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                 }.getOrNull()
             }
             if (bitmap != null) {
-                _bitmaps.value = _bitmaps.value + (hash to bitmap.asImageBitmap())
+                bitmapLru.put(hash, bitmap.asImageBitmap())
+                _bitmaps.value = bitmapLru.snapshot()
             } else if (attempt < ASSET_RETRIES) {
                 delay(30_000L * (attempt + 1))
                 assetFetches.remove(hash)
-                ensureAsset(hash, attempt + 1)
+                ensureAsset(hash, maxDim, attempt + 1)
             }
         }
     }
@@ -482,6 +497,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         _values.value = emptyMap()
         _series.value = emptyMap()
         _channelMeta.value = emptyMap()
+        bitmapLru.clear()
         _bitmaps.value = emptyMap()
         assetFetches.clear()
     }
@@ -760,9 +776,18 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         /** Shutdown-overlay probe cadence; see the init loop. */
         private const val PROBE_SECONDS = 30L
 
-        /** Decode cap for tile images: tiles render around 150px, so a
-         *  512px sample is plenty even on a 2x2-tile widget. */
-        private const val ASSET_MAX_DIM = 512
+        /** Decode targets (MOB-07): tiles render around 150px, so a
+         *  512px sample is plenty even on a 2x2-tile widget; board
+         *  backgrounds render full-screen, so they decode at ~screen
+         *  width instead of the tile cap (sampling to 512 and
+         *  upscaling blurred every background). */
+        const val ASSET_TILE_DIM = 512
+        const val ASSET_BG_DIM = 1280
+
+        /** Bitmap cache budget: an ARGB-estimated byte cap big enough
+         *  for a boardful of tile images plus a couple of backgrounds,
+         *  small enough to be safe on the deck's 1 GB (MOB-07). */
+        const val BITMAP_BUDGET_BYTES = 32L * 1024 * 1024
 
         /** Shared by reconnects and asset fetches - see V2Client.http. */
         private val sharedHttp = OkHttpClient.Builder()

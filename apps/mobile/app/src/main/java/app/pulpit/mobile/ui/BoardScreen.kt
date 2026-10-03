@@ -285,9 +285,12 @@ private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
     val positions = remember(board.id) { mutableStateMapOf<Long, Boolean>() }
 
     // a board image wins over the color (like the original client); the
-    // color shows through while the asset loads
+    // color shows through while the asset loads. Backgrounds decode at
+    // ~screen width (MOB-07), not the 512px tile cap
     val bgAsset = board.background?.hash
-    LaunchedEffect(bgAsset) { bgAsset?.let { vm.ensureAsset(it) } }
+    LaunchedEffect(bgAsset) {
+        bgAsset?.let { vm.ensureAsset(it, maxDim = PulpitViewModel.ASSET_BG_DIM) }
+    }
     val bgBitmap by remember(bitmaps, bgAsset) {
         derivedStateOf { bgAsset?.let { bitmaps.value[it] } }
     }
