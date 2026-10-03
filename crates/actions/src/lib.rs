@@ -71,6 +71,9 @@ pub fn parse_key_name(raw: &str) -> Option<KeyName> {
         "down" => KeyName::Down,
         "left" => KeyName::Left,
         "right" => KeyName::Right,
+        // "+" cannot appear in a hotkey string (it is the separator),
+        // so the plus key gets its own name
+        "plus" => KeyName::Char('+'),
         other => {
             if let Some(rest) = other.strip_prefix('f') {
                 if let Ok(n) = rest.parse::<u8>() {
@@ -189,6 +192,47 @@ pub fn run_command(
     cmd: &Command,
     is_tap_start: bool,
 ) -> Result<()> {
+    let mut steps = BuiltinSteps;
+    run_command_dispatched(input, sink, cmd, is_tap_start, &mut steps)
+}
+
+/// Multiaction step dispatcher. Built-in commands go through
+/// [`run_command`] directly; a host with native/extension dispatchers
+/// (see `crates/backend`) implements this trait so every multiaction
+/// step runs through the same chain as a top-level tile press instead
+/// of only the built-in kinds.
+pub trait StepDispatch {
+    fn dispatch_step(
+        &mut self,
+        input: &mut dyn Input,
+        sink: &mut dyn EventSink,
+        cmd: &Command,
+    ) -> Result<()>;
+}
+
+/// Default dispatcher: built-ins only, the historical multiaction
+/// behavior for callers without a native chain.
+struct BuiltinSteps;
+impl StepDispatch for BuiltinSteps {
+    fn dispatch_step(
+        &mut self,
+        input: &mut dyn Input,
+        sink: &mut dyn EventSink,
+        cmd: &Command,
+    ) -> Result<()> {
+        run_command(input, sink, cmd, false)
+    }
+}
+
+/// Like [`run_command`], but multiaction steps are dispatched through
+/// `dispatch` instead of the built-in-only fallback.
+pub fn run_command_dispatched(
+    input: &mut dyn Input,
+    sink: &mut dyn EventSink,
+    cmd: &Command,
+    is_tap_start: bool,
+    dispatch: &mut dyn StepDispatch,
+) -> Result<()> {
     // Sliders are driven by exec_slider, not exec_shortcut.
     if cmd.mode == "slider" {
         return run_slider_command(input, cmd, 0.0);
@@ -227,7 +271,7 @@ pub fn run_command(
             tracing::warn!(kind = k, "command type not implemented yet");
             Ok(())
         }
-        "multiaction" => run_multiaction(input, sink, cmd),
+        "multiaction" => run_multiaction(input, sink, cmd, dispatch),
         "advance-key" => run_advance_key(input, cmd),
         "type" => {
             let text = cmd.command.as_deref().unwrap_or_default();
@@ -295,7 +339,26 @@ fn parse_board_id(command: Option<&str>) -> Option<i64> {
         .or_else(|| command.and_then(|s| s.trim().parse().ok()))
 }
 
-fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Command) -> Result<()> {
+/// Upper bound for `delay` steps (multiaction, advance-key): the input
+/// mutex is held while a macro sleeps, so one junk value must not stall
+/// every later action for minutes.
+const MAX_DELAY_MS: u64 = 60_000;
+
+fn capped_delay(ms: u64) -> u64 {
+    if ms > MAX_DELAY_MS {
+        tracing::warn!(requested = ms, cap = MAX_DELAY_MS, "delay step capped");
+        MAX_DELAY_MS
+    } else {
+        ms
+    }
+}
+
+fn run_multiaction(
+    input: &mut dyn Input,
+    sink: &mut dyn EventSink,
+    cmd: &Command,
+    dispatch: &mut dyn StepDispatch,
+) -> Result<()> {
     let raw = cmd.command.as_deref().unwrap_or("[]");
     let steps: Vec<Value> = serde_json::from_str(raw)
         .map_err(|e| ActionError::BadPayload("multiaction".into(), e.to_string()))?;
@@ -323,7 +386,7 @@ fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Comman
                     .as_deref()
                     .and_then(|s| s.trim().parse().ok())
                     .unwrap_or(0);
-                input.sleep(ms)?;
+                input.sleep(capped_delay(ms))?;
             }
             "board" => {
                 if let Some(id) = parse_board_id(step_cmd.command.as_deref()) {
@@ -339,7 +402,7 @@ fn run_multiaction(input: &mut dyn Input, sink: &mut dyn EventSink, cmd: &Comman
                     input.key_up(&keys)?;
                 }
             }
-            _ => run_command(input, sink, &step_cmd, false)?,
+            _ => dispatch.dispatch_step(input, sink, &step_cmd)?,
         }
     }
     Ok(())
@@ -368,7 +431,7 @@ fn run_advance_key(input: &mut dyn Input, cmd: &Command) -> Result<()> {
             }
             "delay" => {
                 let ms = value.as_u64().unwrap_or(0);
-                input.sleep(ms)?;
+                input.sleep(capped_delay(ms))?;
             }
             "type" => {
                 input.text(value.as_str().unwrap_or_default())?;
@@ -416,6 +479,31 @@ fn run_vol(input: &mut dyn Input, cmd: &Command) -> Result<()> {
     input.media(media)
 }
 
+/// Split an `open` options string into argv tokens: whitespace
+/// separated, with double-quoted runs kept together as one token
+/// (quotes stripped). No escape handling - the editor offers no way to
+/// type a literal quote.
+fn split_args(raw: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in raw.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
 fn run_open_file(input: &mut dyn Input, cmd: &Command) -> Result<()> {
     let path = cmd.command.as_deref().unwrap_or_default();
     if path.is_empty() {
@@ -423,7 +511,7 @@ fn run_open_file(input: &mut dyn Input, cmd: &Command) -> Result<()> {
     }
     match &cmd.options {
         Some(opts) if !opts.trim().is_empty() => {
-            let args: Vec<String> = opts.split_whitespace().map(str::to_string).collect();
+            let args = split_args(opts);
             input.spawn(path, &args)
         }
         _ => input.open_url(path),
@@ -432,7 +520,18 @@ fn run_open_file(input: &mut dyn Input, cmd: &Command) -> Result<()> {
 
 /// Parse `"CTRL + SHIFT + K"` into modifier+key lists (original hotkey format).
 pub fn parse_hotkey(raw: &str) -> Vec<KeyName> {
-    raw.split('+').filter_map(parse_key_name).collect()
+    if raw.trim() == "+" {
+        return vec![KeyName::Char('+')];
+    }
+    raw.split('+')
+        .filter_map(|part| {
+            let name = parse_key_name(part);
+            if name.is_none() {
+                tracing::warn!(part = part.trim(), "unknown key name in hotkey - skipped");
+            }
+            name
+        })
+        .collect()
 }
 
 /// Real OS backend.
@@ -447,44 +546,62 @@ impl EnigoInput {
         Ok(EnigoInput { enigo })
     }
 
-    fn enigo_key(name: &KeyName) -> enigo::Key {
+    fn enigo_key(name: &KeyName) -> Result<enigo::Key> {
         use enigo::Key;
         match name {
-            KeyName::Control => Key::Control,
-            KeyName::Meta => Key::Meta,
-            KeyName::Alt => Key::Alt,
-            KeyName::Shift => Key::Shift,
-            KeyName::Return => Key::Return,
-            KeyName::Tab => Key::Tab,
-            KeyName::Escape => Key::Escape,
-            KeyName::Space => Key::Space,
-            KeyName::Backspace => Key::Backspace,
-            KeyName::Delete => Key::Delete,
-            KeyName::Insert => Key::Insert,
-            KeyName::Home => Key::Home,
-            KeyName::End => Key::End,
-            KeyName::PageUp => Key::PageUp,
-            KeyName::PageDown => Key::PageDown,
-            KeyName::Up => Key::UpArrow,
-            KeyName::Down => Key::DownArrow,
-            KeyName::Left => Key::LeftArrow,
-            KeyName::Right => Key::RightArrow,
+            KeyName::Control => Ok(Key::Control),
+            KeyName::Meta => Ok(Key::Meta),
+            KeyName::Alt => Ok(Key::Alt),
+            KeyName::Shift => Ok(Key::Shift),
+            KeyName::Return => Ok(Key::Return),
+            KeyName::Tab => Ok(Key::Tab),
+            KeyName::Escape => Ok(Key::Escape),
+            KeyName::Space => Ok(Key::Space),
+            KeyName::Backspace => Ok(Key::Backspace),
+            KeyName::Delete => Ok(Key::Delete),
+            KeyName::Insert => Ok(Key::Insert),
+            KeyName::Home => Ok(Key::Home),
+            KeyName::End => Ok(Key::End),
+            KeyName::PageUp => Ok(Key::PageUp),
+            KeyName::PageDown => Ok(Key::PageDown),
+            KeyName::Up => Ok(Key::UpArrow),
+            KeyName::Down => Ok(Key::DownArrow),
+            KeyName::Left => Ok(Key::LeftArrow),
+            KeyName::Right => Ok(Key::RightArrow),
             KeyName::Function(n) => match n {
-                1 => Key::F1,
-                2 => Key::F2,
-                3 => Key::F3,
-                4 => Key::F4,
-                5 => Key::F5,
-                6 => Key::F6,
-                7 => Key::F7,
-                8 => Key::F8,
-                9 => Key::F9,
-                10 => Key::F10,
-                11 => Key::F11,
-                12 => Key::F12,
-                _ => Key::F12,
+                1 => Ok(Key::F1),
+                2 => Ok(Key::F2),
+                3 => Ok(Key::F3),
+                4 => Ok(Key::F4),
+                5 => Ok(Key::F5),
+                6 => Ok(Key::F6),
+                7 => Ok(Key::F7),
+                8 => Ok(Key::F8),
+                9 => Ok(Key::F9),
+                10 => Ok(Key::F10),
+                11 => Ok(Key::F11),
+                12 => Ok(Key::F12),
+                13 => Ok(Key::F13),
+                14 => Ok(Key::F14),
+                15 => Ok(Key::F15),
+                16 => Ok(Key::F16),
+                17 => Ok(Key::F17),
+                18 => Ok(Key::F18),
+                19 => Ok(Key::F19),
+                20 => Ok(Key::F20),
+                21 => Ok(Key::F21),
+                22 => Ok(Key::F22),
+                23 => Ok(Key::F23),
+                24 => Ok(Key::F24),
+                // parse_key_name only accepts F1-F24; anything else is a
+                // programmatic KeyName misuse and must not inject a wrong
+                // key (F13-F24 used to fall back to F12 here).
+                other => Err(ActionError::BadPayload(
+                    "key".into(),
+                    format!("F{other} is outside the supported F1-F24 range"),
+                )),
             },
-            KeyName::Char(c) => Key::Unicode(*c),
+            KeyName::Char(c) => Ok(Key::Unicode(*c)),
         }
     }
 }
@@ -492,8 +609,9 @@ impl EnigoInput {
 impl Input for EnigoInput {
     fn key_down(&mut self, keys: &[KeyName]) -> Result<()> {
         for k in keys {
+            let key = Self::enigo_key(k)?;
             self.enigo
-                .key(Self::enigo_key(k), enigo::Direction::Press)
+                .key(key, enigo::Direction::Press)
                 .map_err(|e| ActionError::Input(e.to_string()))?;
         }
         Ok(())
@@ -501,8 +619,9 @@ impl Input for EnigoInput {
 
     fn key_up(&mut self, keys: &[KeyName]) -> Result<()> {
         for k in keys {
+            let key = Self::enigo_key(k)?;
             self.enigo
-                .key(Self::enigo_key(k), enigo::Direction::Release)
+                .key(key, enigo::Direction::Release)
                 .map_err(|e| ActionError::Input(e.to_string()))?;
         }
         Ok(())
@@ -703,6 +822,34 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_parsing_plus_key_and_unknown_names() {
+        // "+" is the separator, so the plus key needs its own name
+        assert_eq!(parse_hotkey("plus"), vec![Char('+')]);
+        assert_eq!(parse_hotkey("+"), vec![Char('+')]);
+        assert_eq!(parse_hotkey("CTRL+plus"), vec![Control, Char('+')]);
+        // unknown names are skipped (with a warning), not silently
+        assert_eq!(parse_hotkey("CTRL+bogus+P"), vec![Control, Char('p')]);
+    }
+
+    #[test]
+    fn f_keys_one_to_twenty_four_map_to_distinct_keys() {
+        let mut seen = std::collections::HashSet::new();
+        for n in 1..=24u8 {
+            assert!(
+                seen.insert(EnigoInput::enigo_key(&Function(n)).unwrap()),
+                "F{n} collided with an earlier key"
+            );
+        }
+        assert_eq!(seen.len(), 24);
+    }
+
+    #[test]
+    fn f_keys_outside_the_range_are_an_error() {
+        assert!(EnigoInput::enigo_key(&Function(0)).is_err());
+        assert!(EnigoInput::enigo_key(&Function(25)).is_err());
+    }
+
+    #[test]
     fn key_press_and_release_semantics() {
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
@@ -746,6 +893,27 @@ mod tests {
     }
 
     #[test]
+    fn multiaction_and_advance_key_delays_are_capped() {
+        // the input mutex is held while a macro sleeps; one junk delay
+        // must not stall every later action
+        let mut input = MockInput::default();
+        let mut sink = MockSink::default();
+        let c = cmd(
+            "multiaction",
+            Some(r#"[{"type":"delay","command":"999999"}]"#),
+        );
+        run_command(&mut input, &mut sink, &c, false).unwrap();
+        assert_eq!(input.effects, vec![Effect::Sleep(MAX_DELAY_MS)]);
+
+        let adv = cmd(
+            "advance-key",
+            Some(r#"[{"action":"delay","value":999999}]"#),
+        );
+        run_command(&mut input, &mut sink, &adv, false).unwrap();
+        assert_eq!(input.effects[1], Effect::Sleep(MAX_DELAY_MS));
+    }
+
+    #[test]
     fn multiaction_with_delay_board_and_key() {
         let mut input = MockInput::default();
         let mut sink = MockSink::default();
@@ -770,6 +938,68 @@ mod tests {
             .effects
             .contains(&Effect::OpenUrl("https://example.com".into())));
         assert_eq!(sink.boards, vec![7]);
+    }
+
+    /// Host dispatcher: claims everything it is asked to run.
+    #[derive(Default)]
+    struct ClaimingDispatch {
+        claimed: Vec<String>,
+    }
+    impl StepDispatch for ClaimingDispatch {
+        fn dispatch_step(
+            &mut self,
+            _input: &mut dyn Input,
+            _sink: &mut dyn EventSink,
+            cmd: &Command,
+        ) -> Result<()> {
+            self.claimed.push(cmd.kind.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn multiaction_steps_go_through_the_host_dispatcher() {
+        let mut input = MockInput::default();
+        let mut sink = MockSink::default();
+        let c = cmd(
+            "multiaction",
+            Some(
+                r#"[
+                {"type":"key","command":"ENTER"},
+                {"type":"board","command":"{\"id\":7}"},
+                {"type":"delay","command":"100"},
+                {"type":"speaker-device","command":"{}"}
+            ]"#,
+            ),
+        );
+        let mut dispatch = ClaimingDispatch::default();
+        run_command_dispatched(&mut input, &mut sink, &c, false, &mut dispatch).unwrap();
+        // only the non-special step is handed to the host dispatcher
+        assert_eq!(dispatch.claimed, vec!["speaker-device".to_string()]);
+        // the delay/board/key special cases keep running locally
+        assert_eq!(sink.boards, vec![7]);
+        assert!(input.effects.contains(&Effect::KeyDown(vec![Return])));
+        assert!(input.effects.contains(&Effect::Sleep(100)));
+    }
+
+    #[test]
+    fn open_options_keep_quoted_arguments_together() {
+        let mut input = MockInput::default();
+        let mut sink = MockSink::default();
+        let c = Command::from_row(
+            "app",
+            Some("C:\\Program Files\\tool.exe"),
+            Some("--msg \"hello world\""),
+            "button",
+        );
+        run_command(&mut input, &mut sink, &c, false).unwrap();
+        assert_eq!(
+            input.effects,
+            vec![Effect::Spawn(
+                "C:\\Program Files\\tool.exe".into(),
+                vec!["--msg".to_string(), "hello world".to_string()],
+            )]
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ use pulpit_vm::VoicemeeterState;
 /// per tap.
 pub struct SqlBackend {
     db: Mutex<Db>,
-    input: Mutex<Option<EnigoInput>>,
+    input: Mutex<Option<Box<dyn pulpit_actions::Input + Send>>>,
     /// Original Deckboard extensions; action types the builtin dispatcher
     /// does not know are handed to whichever extension declared them.
     extensions: Option<std::sync::Arc<ExtManager>>,
@@ -336,20 +336,17 @@ impl Backend for SqlBackend {
         // The tablet client sends exec_shortcut on BOTH phases, so the
         // native dispatcher must honor the same filter as run_command or
         // toggles flip twice per tap and volume steps twice.
-        if !is_tap_start
-            && (self.exec_extension(&cmd, None)
-                || self.exec_sysinfo(&cmd)
-                || self.exec_aidev(&cmd)
-                || self.exec_callurl(&cmd)
-                || self.exec_voicemeeter(&cmd, None)
-                || self.exec_discord(&cmd, sink)
-                || self.exec_speaker(&cmd, sink)
-                || self.exec_play(&cmd))
-        {
+        if !is_tap_start && self.exec_native(&cmd, sink) {
             return;
         }
         self.with_input(|input| {
-            let _ = pulpit_actions::run_command(input, sink, &cmd, is_tap_start);
+            let _ = pulpit_actions::run_command_dispatched(
+                input,
+                sink,
+                &cmd,
+                is_tap_start,
+                &mut NativeSteps { backend: self },
+            );
         });
     }
 
@@ -376,6 +373,33 @@ impl Backend for SqlBackend {
 }
 
 impl SqlBackend {
+    /// The native/extension dispatch chain, shared by top-level tile
+    /// presses and multiaction steps: extension, sysinfo, aidev,
+    /// callurl, voicemeeter, discord, speaker, play. Returns true when
+    /// one of them claimed the command (the builtin dispatcher is
+    /// skipped, mirroring the original `runCommand` default case).
+    fn exec_native(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
+        self.exec_extension(cmd, None)
+            || self.exec_sysinfo(cmd)
+            || self.exec_aidev(cmd)
+            || self.exec_callurl(cmd)
+            || self.exec_voicemeeter(cmd, None)
+            || self.exec_discord(cmd, sink)
+            || self.exec_speaker(cmd, sink)
+            || self.exec_play(cmd)
+    }
+
+    /// Full local tap for desktop touch mode and the editor's "Run now":
+    /// the same press-start/press-end sequence a tablet tap produces, so
+    /// `key` tiles press AND release. Every other kind ignores the start
+    /// phase (see [`Backend::exec`]) and still fires exactly once.
+    pub fn exec_tap(&self, button: ButtonRow, sink: &mut dyn EventSink) {
+        self.exec(button.clone(), true, sink);
+        // hold duration matches EnigoInput::key_tap's synthesized tap
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        self.exec(button, false, sink);
+    }
+
     /// Run the action through the extension host if one declared it.
     /// Returns true when handled (the builtin dispatcher is skipped,
     /// mirroring the original `runCommand` default case). Slider taps pass
@@ -667,20 +691,42 @@ impl SqlBackend {
         Ok(fresh)
     }
 
-    fn with_input(&self, f: impl FnOnce(&mut EnigoInput)) {
+    fn with_input(&self, f: impl FnOnce(&mut dyn pulpit_actions::Input)) {
         let mut guard = self.input.lock().unwrap();
         if guard.is_none() {
             match EnigoInput::new() {
-                Ok(i) => *guard = Some(i),
+                Ok(i) => *guard = Some(Box::new(i)),
                 Err(e) => {
                     tracing::error!("input backend init failed: {e}");
                     return;
                 }
             }
         }
-        if let Some(input) = guard.as_mut() {
+        if let Some(input) = guard.as_deref_mut() {
             f(input);
         }
+    }
+}
+
+/// Multiaction step dispatcher: every step goes through the same
+/// native/extension chain as a top-level tile press ([`SqlBackend::exec_native`]),
+/// then falls back to the builtin dispatcher. Nested multiactions keep
+/// the chain too.
+struct NativeSteps<'a> {
+    backend: &'a SqlBackend,
+}
+
+impl pulpit_actions::StepDispatch for NativeSteps<'_> {
+    fn dispatch_step(
+        &mut self,
+        input: &mut dyn pulpit_actions::Input,
+        sink: &mut dyn pulpit_actions::EventSink,
+        cmd: &pulpit_actions::Command,
+    ) -> pulpit_actions::Result<()> {
+        if self.backend.exec_native(cmd, sink) {
+            return Ok(());
+        }
+        pulpit_actions::run_command_dispatched(input, sink, cmd, false, self)
     }
 }
 
@@ -690,6 +736,226 @@ mod tests {
 
     fn test_backend() -> SqlBackend {
         SqlBackend::new(Db::open_or_create(std::path::Path::new(":memory:")).unwrap())
+    }
+
+    // ---- test seams --------------------------------------------------------
+    // Mirror of crates/actions' MockInput (Effect recording) and a fake
+    // Speaker, both shared through Arc so tests can read what exec drove
+    // after the fact (the real objects live inside the backend's locks).
+
+    #[derive(Clone, Default)]
+    struct SharedRecInput(std::sync::Arc<Mutex<Vec<pulpit_actions::Effect>>>);
+    impl SharedRecInput {
+        fn effects(&self) -> Vec<pulpit_actions::Effect> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+    impl pulpit_actions::Input for SharedRecInput {
+        fn key_down(&mut self, keys: &[pulpit_actions::KeyName]) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::KeyDown(keys.to_vec()));
+            Ok(())
+        }
+        fn key_up(&mut self, keys: &[pulpit_actions::KeyName]) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::KeyUp(keys.to_vec()));
+            Ok(())
+        }
+        fn key_tap(&mut self, keys: &[pulpit_actions::KeyName]) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::KeyTap(keys.to_vec()));
+            Ok(())
+        }
+        fn text(&mut self, text: &str) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::Text(text.into()));
+            Ok(())
+        }
+        fn mouse_move(&mut self, x: i32, y: i32) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::MouseMove(x, y));
+            Ok(())
+        }
+        fn mouse_click(&mut self, left: bool) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::MouseClick(left));
+            Ok(())
+        }
+        fn media(&mut self, key: pulpit_actions::MediaKey) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::Media(key));
+            Ok(())
+        }
+        fn open_url(&mut self, url: &str) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::OpenUrl(url.into()));
+            Ok(())
+        }
+        fn spawn(&mut self, path: &str, args: &[String]) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::Spawn(path.into(), args.to_vec()));
+            Ok(())
+        }
+        fn sleep(&mut self, ms: u64) -> pulpit_actions::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(pulpit_actions::Effect::Sleep(ms));
+            Ok(())
+        }
+        fn paste_text(&mut self, text: &str) -> pulpit_actions::Result<()> {
+            self.text(text)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedFakeSpeaker(std::sync::Arc<Mutex<Vec<String>>>);
+    impl pulpit_os::Speaker for SharedFakeSpeaker {
+        fn volume(&mut self) -> pulpit_os::Result<f32> {
+            Ok(50.0)
+        }
+        fn muted(&mut self) -> pulpit_os::Result<bool> {
+            Ok(false)
+        }
+        fn set_volume(&mut self, _percent: f32) -> pulpit_os::Result<()> {
+            Ok(())
+        }
+        fn devices(&mut self) -> pulpit_os::Result<Vec<pulpit_os::AudioDevice>> {
+            Ok(Vec::new())
+        }
+        fn active_device(&mut self) -> pulpit_os::Result<String> {
+            Err(pulpit_os::OsError::Unsupported("fake"))
+        }
+        fn set_active_device(&mut self, id: &str) -> pulpit_os::Result<()> {
+            self.0.lock().unwrap().push(id.to_string());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecSink {
+        boards: Vec<i64>,
+        app_values: Vec<(String, String)>,
+        third_party: Vec<(String, String)>,
+    }
+    impl pulpit_actions::EventSink for RecSink {
+        fn change_board(&mut self, board_id: i64) {
+            self.boards.push(board_id);
+        }
+        fn app_value(&mut self, key: &str, value: &str) {
+            self.app_values.push((key.into(), value.into()));
+        }
+        fn third_party_value(&mut self, key: &str, value: &str) {
+            self.third_party.push((key.into(), value.into()));
+        }
+    }
+
+    fn button_row(kind: &str, command: Option<&str>) -> ButtonRow {
+        ButtonRow {
+            kind: kind.to_string(),
+            command: command.map(str::to_string),
+            mode: "button".to_string(),
+            ..ButtonRow::default()
+        }
+    }
+
+    fn inject(backend: &SqlBackend, input: SharedRecInput, speaker: SharedFakeSpeaker) {
+        *backend.input.lock().unwrap() = Some(Box::new(input));
+        *backend.speaker.lock().unwrap() = Some(Box::new(speaker));
+    }
+
+    #[test]
+    fn multiaction_steps_run_native_and_builtin_dispatchers() {
+        let backend = test_backend();
+        let input = SharedRecInput::default();
+        let speaker = SharedFakeSpeaker::default();
+        inject(&backend, input.clone(), speaker.clone());
+
+        let row = button_row(
+            "multiaction",
+            Some(
+                r#"[
+                    {"type":"key","command":"ENTER"},
+                    {"type":"speaker-device","command":"{\"speaker\":\"fake-endpoint\"}"},
+                    {"type":"delay","command":"25"}
+                ]"#,
+            ),
+        );
+        let mut sink = RecSink::default();
+        backend.exec(row, false, &mut sink);
+
+        assert_eq!(
+            speaker.0.lock().unwrap().clone(),
+            vec!["fake-endpoint".to_string()],
+            "native speaker steps must run inside a multiaction"
+        );
+        assert_eq!(
+            sink.third_party,
+            vec![("speaker-device".to_string(), "fake-endpoint".to_string())]
+        );
+        assert_eq!(
+            input.effects(),
+            vec![
+                pulpit_actions::Effect::KeyDown(vec![pulpit_actions::KeyName::Return]),
+                pulpit_actions::Effect::Sleep(150),
+                pulpit_actions::Effect::KeyUp(vec![pulpit_actions::KeyName::Return]),
+                pulpit_actions::Effect::Sleep(25),
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_tap_presses_and_releases_keys_and_fires_other_kinds_once() {
+        let backend = test_backend();
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+
+        // key tile: the tap sequence must press AND release, like a
+        // tablet tap (press-start drives key_down, release drives key_up)
+        let key = button_row("key", Some("CTRL+SHIFT+P"));
+        backend.exec_tap(key, &mut RecSink::default());
+        let combo = vec![
+            pulpit_actions::KeyName::Control,
+            pulpit_actions::KeyName::Shift,
+            pulpit_actions::KeyName::Char('p'),
+        ];
+        assert_eq!(
+            input.effects(),
+            vec![
+                pulpit_actions::Effect::KeyDown(combo.clone()),
+                pulpit_actions::Effect::KeyUp(combo),
+            ]
+        );
+
+        // every other kind fires exactly once: the press-start phase is
+        // a no-op for them, so a url tile must not open twice
+        input.0.lock().unwrap().clear();
+        let url = button_row("url", Some("https://example.com"));
+        backend.exec_tap(url, &mut RecSink::default());
+        assert_eq!(
+            input.effects(),
+            vec![pulpit_actions::Effect::OpenUrl(
+                "https://example.com".into()
+            )]
+        );
     }
 
     /// A boardjson entry shaped like the original app writes it: `type`
