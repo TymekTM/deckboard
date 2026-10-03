@@ -21,4 +21,9 @@ web_package: string | null,
  * Content hash of the tile's image asset (button image, photo,
  * video), served from `/assets/<hash>`.
  */
-asset_hash: string | null, };
+asset_hash: string | null, 
+/**
+ * Active-state image (legacy `img2`); shown instead of `asset_hash`
+ * while the tile's channel reports its active value.
+ */
+asset_hash2: string | null, };

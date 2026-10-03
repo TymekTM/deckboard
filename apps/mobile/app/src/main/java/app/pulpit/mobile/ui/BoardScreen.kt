@@ -371,7 +371,11 @@ private fun TileCell(
     val image by remember(bitmaps, t.assetHash) {
         derivedStateOf { t.assetHash?.let { bitmaps.value[it] } }
     }
+    val image2 by remember(bitmaps, t.assetHash2) {
+        derivedStateOf { t.assetHash2?.let { bitmaps.value[it] } }
+    }
     t.assetHash?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
+    t.assetHash2?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
     val active = when {
         watchChannel != null -> isActiveValue(live)
         else -> positions[t.id] ?: false
@@ -387,6 +391,7 @@ private fun TileCell(
         items = TileItems(listItems(t, live)),
         status = statusData(t, live),
         image = image,
+        image2 = image2,
         onPressStart = { vm.pressStart(boardId, t) },
         onPressEnd = { vm.pressEnd(boardId, t) },
         onSlider = { v -> vm.slider(boardId, t, v) },

@@ -116,6 +116,19 @@ fn boards_sync() {
     let slider = &board.tiles[1];
     assert_eq!(slider.manifest.kind, WidgetKind::Slider);
     assert_eq!(slider.manifest.interactions, vec![Interaction::Slide]);
+    // style parity fields (012 C5): border/icon/title colors travel as
+    // optional pairs; state 2 falls back to state 1 per field client-side
+    let style = button.manifest.style.as_ref().unwrap();
+    assert_eq!(style.border_color.as_deref(), Some("#101010"));
+    assert_eq!(style.border_color2.as_deref(), Some("#f0f0f0"));
+    assert_eq!(style.icon_color.as_deref(), Some("#ffe0e0"));
+    assert_eq!(style.icon_color2.as_deref(), Some("#1db954"));
+    assert_eq!(style.title_color.as_deref(), Some("#ffcc00"));
+    assert_eq!(style.title_color2.as_deref(), Some("#00ffcc"));
+    assert_eq!(style.color2.as_deref(), Some("#ED4245"));
+    assert_eq!(style.icon2.as_deref(), Some("\u{f028}"));
+    let hash2 = button.manifest.asset_hash2.as_deref().expect("img2 hash");
+    assert_eq!(hash2.len(), 64);
 }
 
 #[test]

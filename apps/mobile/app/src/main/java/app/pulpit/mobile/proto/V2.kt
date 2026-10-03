@@ -158,6 +158,8 @@ data class Tile(
     val style: Style? = null,
     @SerialName("web_package") val webPackage: String? = null,
     @SerialName("asset_hash") val assetHash: String? = null,
+    /** Active-state image (legacy `img2`); see docs/protocol-v2.md §4. */
+    @SerialName("asset_hash2") val assetHash2: String? = null,
 ) {
     fun interacts(kind: String): Boolean = interactions.contains(kind)
 
@@ -186,6 +188,15 @@ data class Style(
     @SerialName("icon_family") val iconFamily: String? = null,
     val title: String? = null,
     val shape: String? = null,
+    // Style parity fields (012 C5): optional, so payloads from servers
+    // that predate them keep the client defaults (white title/glyph,
+    // no border). Absent state-2 fields fall back to state 1 per field.
+    @SerialName("border_color") val borderColor: String? = null,
+    @SerialName("border_color2") val borderColor2: String? = null,
+    @SerialName("icon_color") val iconColor: String? = null,
+    @SerialName("icon_color2") val iconColor2: String? = null,
+    @SerialName("title_color") val titleColor: String? = null,
+    @SerialName("title_color2") val titleColor2: String? = null,
 )
 
 @Serializable

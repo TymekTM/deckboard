@@ -79,14 +79,14 @@ function tileBorder() {
 function tileTitlePos() {
   return pick("title_position", "title_position2") ?? 0;
 }
+// State-2 fallback rule (docs/protocol-v2.md §4): while active, each
+// state-2 field falls back to its state-1 counterpart per field - the
+// same rule the v2/Android clients apply to the optional style fields.
 function tileTitleColor() {
-  // color2 only participates when it is set, like the original title style
-  return props.tile.title_color2 && activeState.value ? props.tile.title_color2 : props.tile.title_color;
+  return pick("title_color", "title_color2");
 }
 function tileTitleBox() {
-  return props.tile.title_box_color2 && activeState.value
-    ? props.tile.title_box_color2
-    : props.tile.title_box_color;
+  return pick("title_box_color", "title_box_color2");
 }
 
 // ---- live-value tiles (custom-value / graph / board), like the stock client
