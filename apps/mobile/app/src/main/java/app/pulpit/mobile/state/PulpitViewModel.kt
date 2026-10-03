@@ -36,10 +36,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 data class ServerConfig(
     val host: String,
@@ -184,7 +182,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         if (_pairRequest.value != null) return
         scope.launch {
             try {
-                val created = createPairRequest(sharedHttp, host, port, deviceName)
+                val created = createPairRequest(V2Client.httpCalls, host, port, deviceName)
                 _pairRequest.value = PairRequestUi(host, port, created.code, deviceName)
                 pollPairDecision(host, port, created.request_id, created.expires_in_secs)
             } catch (e: Exception) {
@@ -208,7 +206,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         while (System.currentTimeMillis() < deadline) {
             delay(2000)
             val status = try {
-                pairRequestStatus(sharedHttp, host, port, id)
+                pairRequestStatus(V2Client.httpCalls, host, port, id)
             } catch (_: Exception) {
                 continue
             }
@@ -345,7 +343,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             val bitmap = withContext(Dispatchers.IO) {
                 runCatching {
                     val url = "http://${cfg.host}:${cfg.port}/assets/$hash?token=$token"
-                    sharedHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                    V2Client.httpCalls.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                         if (!resp.isSuccessful) return@use null
                         val body = resp.body ?: return@use null
                         // MOB-12: bail on an asset too big to be a tile
@@ -802,10 +800,5 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
          *  hundred KB; anything past this is not a decode candidate but
          *  a heap spike (MOB-12). */
         const val ASSET_MAX_BYTES = 10L * 1024 * 1024
-
-        /** Shared by reconnects and asset fetches - see V2Client.http. */
-        private val sharedHttp = OkHttpClient.Builder()
-            .connectTimeout(6, TimeUnit.SECONDS)
-            .build()
     }
 }
