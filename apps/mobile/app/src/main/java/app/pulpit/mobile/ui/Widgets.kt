@@ -321,29 +321,6 @@ private const val MAX_DRAWN_POINTS = 40
 internal fun sparkY(v: Double, min: Double, span: Double): Double =
     0.95 - ((v - min) / span) * 0.90
 
-/** Drag events fire hundreds of times per gesture and every slide send is
- *  a websocket round-trip the server executes - ship at most one value
- *  per [throttleMs], plus the final one on release ([push] with
- *  `force = true`). One instance per tile, remembered alongside it.
- *  The desktop's touch mode sends at most ~7/s (SLIDER_SEND_INTERVAL =
- *  150 in TileCell.vue); 120 ms puts the deck in the same order
- *  without feeling laggy (round 4, MOB-11 - this used to be 30 ms,
- *  5x the desktop's rate of Wi-Fi wakeups and server execs). */
-class SlideThrottle(private val throttleMs: Long = SLIDE_THROTTLE_MS) {
-    private var lastSentAt = 0L
-
-    fun push(value: Float, force: Boolean = false, send: (Float) -> Unit) {
-        val now = System.currentTimeMillis()
-        if (force || now - lastSentAt >= throttleMs) {
-            lastSentAt = now
-            send(value)
-        }
-    }
-}
-
-/** Slide send cadence shared by sliders and knobs; see [SlideThrottle]. */
-const val SLIDE_THROTTLE_MS = 120L
-
 /** Bucket-average [history] down to at most [max] points (keeps shape,
  *  drops jitter). A no-op when the window already fits. */
 internal fun downsample(history: List<Double>, max: Int): List<Double> {
@@ -370,14 +347,13 @@ fun KnobTile(
     onSlider: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // null until somebody drags; the channel's live value positions the
-    // dial then (see SliderTile in Tile.kt for the full rationale)
-    var dragValue by remember(tile.id) { mutableStateOf<Float?>(null) }
-    val liveSlide by rememberUpdatedState(liveValue?.coerceIn(0.0, 1.0)?.toFloat())
-    val value = dragValue ?: liveSlide ?: 0.5f
-    val slide = remember(tile.id) { SlideThrottle() }
+    // one drag protocol with the slider template (MOB-13): see
+    // SlideDragController for the live-echo and convergence policy
+    val slide = remember(tile.id) { SlideDragController() }
     // see ButtonTile (Tile.kt): the drag block outlives a live tile edit
+    val live by rememberUpdatedState(liveValue)
     val sendSlide by rememberUpdatedState(onSlider)
+    val value = slide.current(liveValue)
     val arcColor = tile.style?.color2?.let { hex(it, titleColor) } ?: titleColor
 
     Box(
@@ -396,25 +372,23 @@ fun KnobTile(
                         val radius = max(1.0, kotlin.math.hypot(pos.x.toDouble(), pos.y.toDouble()))
                         val ring = radius.coerceAtMost(size.width / 2.0)
                         val dead = ring * 0.25
-                        val cur = dragValue ?: liveSlide ?: 0.5f
+                        val cur = slide.current(live)
                         val raw = ((angle - 135.0 + 360.0) % 360.0) / 270.0
                         val clamped = raw.coerceIn(0.0, 1.0).toFloat()
                         val scaled = if (radius < dead) cur else clamped
                         if (scaled != cur) {
-                            dragValue = scaled
-                            slide.push(scaled, send = sendSlide)
+                            slide.move(scaled, send = sendSlide)
                         }
                     },
                     onDragEnd = {
                         // converge: the last sampled value always reaches
                         // the server, throttling only smooths the path
-                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
+                        slide.end(live, send = sendSlide)
                     },
                     onDragCancel = {
                         // a cancelled drag still commits its last sampled
                         // position (like the desktop), then follows live
-                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
-                        dragValue = null
+                        slide.cancel(live, send = sendSlide)
                     },
                 )
             },

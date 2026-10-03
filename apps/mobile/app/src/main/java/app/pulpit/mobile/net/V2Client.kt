@@ -370,6 +370,16 @@ class V2Client(
             // docs/protocol-v2.md §7 - no app frames).
             .pingInterval(KEEPALIVE_SECONDS, TimeUnit.SECONDS)
             .build()
+
+        /** Plain-HTTP client for pairing and asset fetches (MOB-13):
+         *  the same pool and dispatcher threads as [http] - a second
+         *  OkHttpClient singleton used to keep its own on a 1 GB device -
+         *  with the websocket-unfriendly settings replaced by a finite
+         *  read timeout. */
+        val httpCalls: OkHttpClient = http.newBuilder()
+            .readTimeout(30, TimeUnit.SECONDS)
+            .pingInterval(0, TimeUnit.MILLISECONDS)
+            .build()
         const val CLIENT = "pulpit-mobile"
 
         /** M5 capability negotiation: what this client renders/accepts,

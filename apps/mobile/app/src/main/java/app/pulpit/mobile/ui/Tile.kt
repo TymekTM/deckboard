@@ -450,16 +450,13 @@ private fun SliderTile(
     liveValue: Double?,
     onSlider: (Float) -> Unit,
 ) {
-    // null until somebody drags: the channel's live value drives the fill
-    // then (the desktop's touch mode mirrors the same way). A completed
-    // drag keeps its position - the face must not flicker back while the
-    // echo patch travels - a cancelled one hands control back to live.
-    var dragValue by remember(tile.id) { mutableStateOf<Float?>(null) }
-    val liveSlide by rememberUpdatedState(liveValue?.coerceIn(0.0, 1.0)?.toFloat())
-    val value = dragValue ?: liveSlide ?: 0.5f
-    val slide = remember(tile.id) { SlideThrottle() }
-    // see ButtonTile: the drag block outlives a live tile edit
+    // one drag protocol with the knob template (MOB-13): see
+    // SlideDragController for the live-echo and convergence policy
+    val slide = remember(tile.id) { SlideDragController() }
+    // see ButtonTile above: the drag block outlives a live tile edit
+    val live by rememberUpdatedState(liveValue)
     val sendSlide by rememberUpdatedState(onSlider)
+    val value = slide.current(liveValue)
     val fill = tile.style?.color2?.let { hex(it, baseColor.copy(alpha = 0.6f)) }
         ?: baseColor.copy(alpha = 0.55f)
 
@@ -469,26 +466,21 @@ private fun SliderTile(
             .pointerInput(tile.id) {
                 detectDragGestures(
                     onDragStart = { offset ->
-                        val start = (1f - offset.y / size.height).coerceIn(0f, 1f)
-                        dragValue = start
-                        slide.push(start, force = true, send = sendSlide)
+                        slide.start((1f - offset.y / size.height).coerceIn(0f, 1f), sendSlide)
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        val next = (1f - change.position.y / size.height).coerceIn(0f, 1f)
-                        dragValue = next
-                        slide.push(next, send = sendSlide)
+                        slide.move((1f - change.position.y / size.height).coerceIn(0f, 1f), sendSlide)
                     },
                     onDragEnd = {
                         // converge: the last sampled value always reaches
                         // the server, throttling only smooths the path
-                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
+                        slide.end(live, sendSlide)
                     },
                     onDragCancel = {
                         // a cancelled drag still commits its last sampled
                         // position (like the desktop), then follows live
-                        slide.push(dragValue ?: liveSlide ?: 0.5f, force = true, send = sendSlide)
-                        dragValue = null
+                        slide.cancel(live, sendSlide)
                     },
                 )
             },
