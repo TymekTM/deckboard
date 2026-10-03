@@ -54,14 +54,11 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("pulpit", Context.MODE_PRIVATE)
 
-    private val _config = MutableStateFlow(
-        ServerConfig(
-            host = prefs.getString("host", "") ?: "",
-            port = prefs.getInt("port", 8500),
-            name = prefs.getString("name", "") ?: "",
-            token = prefs.getString("token", null),
-        ),
-    )
+    /** Keystore-backed cipher for the token at rest (ADR-008); the pure
+     *  decisions it feeds live in TokenVault (unit-tested). */
+    private val tokenCipher = KeystoreTokenCipher()
+
+    private val _config = MutableStateFlow(loadConfig())
     val config: StateFlow<ServerConfig> = _config
 
     private val _connState = MutableStateFlow<ConnState>(ConnState.Disconnected)
@@ -211,12 +208,65 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Prefs → [ServerConfig]. The stored token is either an `enc1:`
+     *  envelope (decrypted) or a legacy plaintext from before ADR-008
+     *  (kept, then re-encrypted on this load); anything unreadable reads
+     *  as unpaired - the device re-pairs, nothing crashes. Keystore work
+     *  happens only on a token read/write, once per launch at most.
+     *  allowBackup=false keeps the file out of cloud backups, and a
+     *  backup would be useless anyway: the AndroidKeyStore key is
+     *  non-exportable and bound to this device+user, so restored
+     *  ciphertext could never be decrypted elsewhere - a restored
+     *  install simply re-pairs. */
+    private fun loadConfig(): ServerConfig {
+        val load = planTokenLoad(prefs.getString("token", null)) { iv, data ->
+            tokenCipher.decrypt(iv, data)
+        }
+        if (load.rewrite) {
+            if (load.token == null) {
+                Log.i(TAG, "stored pairing token unreadable - the device must pair again")
+            } else {
+                Log.i(TAG, "migrating plaintext pairing token to keystore encryption")
+            }
+            storeToken(load.token)
+        }
+        return ServerConfig(
+            host = prefs.getString("host", "") ?: "",
+            port = prefs.getInt("port", 8500),
+            name = prefs.getString("name", "") ?: "",
+            token = load.token,
+        )
+    }
+
+    /** The only place the token reaches disk: encrypted, or removed.
+     *  When encryption fails (broken keystore) nothing is persisted -
+     *  plaintext at rest is what ADR-008 forbids - and the caller's
+     *  in-memory token keeps the current session alive; the device
+     *  re-pairs after a restart. Never logs token material. */
+    private fun storeToken(token: String?) {
+        val editor = prefs.edit()
+        val envelope = token?.let { t ->
+            tokenCipher.encrypt(t)?.let { (iv, data) -> encodeEnvelope(iv, data) }
+        }
+        if (token != null && envelope == null) {
+            // encryption failed (unpair with a null token is the normal
+            // path): the reason is worth a line, the token never is.
+            Log.w(TAG, "token vault: encrypt failed - token not persisted, re-pair after restart")
+        }
+        if (envelope == null) {
+            editor.remove("token")
+        } else {
+            editor.putString("token", envelope)
+        }
+        editor.apply()
+    }
+
     fun saveConfig(cfg: ServerConfig) {
+        storeToken(cfg.token)
         prefs.edit()
             .putString("host", cfg.host)
             .putInt("port", cfg.port)
             .putString("name", cfg.name)
-            .putString("token", cfg.token)
             .apply()
         _config.value = cfg
     }
