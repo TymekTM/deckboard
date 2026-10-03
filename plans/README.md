@@ -17,13 +17,13 @@ when done.
 | 003 | Frontend: per-tile rendering + hidden gating | P1 | M | - | DONE (commits `4545a11`..`a055327`; TileCell extraction + hidden buffer + stable identity + pointercancel/plugin-fs) |
 | 004 | Quiet idle loops (COM chain, emit gating, change detection) | P2 | M | - | DONE (commit `f74fd6a`; aidev dedupe step dropped with plan 001; review follow-up: change-gates now advance only after the WebView emit succeeded, so a hidden window never loses its last speaker update) |
 | 005 | v2: bounded outbound queues + silence watchdog | P2 | M | - | DONE (commit `cf06cf5`; the non-reading-WS-client integration scenario was impractical to drive - the two hub unit tests `overflowing_queue_closes_the_session` and `reap_silent_drops_stale_and_keeps_fresh_sessions` are the acceptance bar, per the plan's own fallback clause) |
-| 006 | mobile: confine PulpitViewModel state to the main thread | P1 | S | - | TODO |
-| 007 | mobile: terminal auth failures stop the reconnect loop | P1 | S | 006 | TODO |
-| 008 | mobile: close the link in background, release the screen after 3 min offline | P1 | M | 006, 007 | TODO |
-| 009 | mobile: fresh gesture callbacks after live edits + `key(t.id)` | P2 | S | - | TODO |
-| 010 | mobile: recompose only tiles whose channel changed | P3 | M | 009 | TODO |
-| 011 | docs: AGENTS.md - Android client speaks v2 | P3 | S | - | TODO |
-| 012 | Correctness/security audit findings (packages A-E, findings list with fix sketches) | P1 | L | E1 before C5; package D overlaps 006/007/009 - see the file | TODO (per-item status table inside the file) |
+| 006 | mobile: confine PulpitViewModel state to the main thread | P1 | S | - | DONE (`5e60318` + `29bbb78`, lane L4; SupervisorJob + Dispatchers.Main.immediate, asset set main-thread-only, forgetPairing clears assetFetches) |
+| 007 | mobile: terminal auth failures stop the reconnect loop | P1 | S | 006 | DONE (`df824e3`, lane L4; ConnState.Failed(retryable), 401 -> terminal, fatal codes terminal before the close callback) |
+| 008 | mobile: close the link in background, release the screen after 3 min offline | P1 | M | 006, 007 | DONE (`069a62a` + `33addfc`, lane L4; socket closed on background, LINK_STANDBY_MS = 3 min per owner decision, pure LinkPolicy unit-tested) |
+| 009 | mobile: fresh gesture callbacks after live edits + `key(t.id)` | P2 | S | - | DONE (`fc68f51` + `0b101c0`/`7334f25`, lane L4; rememberUpdatedState everywhere, grid keyed by tile id) |
+| 010 | mobile: recompose only tiles whose channel changed | P3 | M | 009 | DONE (`29bbb78`, lane L4; State holders + per-tile TileCell + derivedStateOf) |
+| 011 | docs: AGENTS.md - Android client speaks v2 | P3 | S | - | DONE (lane L6, see E3; mobile naming itself landed with L4 `796cada`) |
+| 012 | Correctness/security audit findings (packages A-E, findings list with fix sketches) | P1 | L | E1 before C5; package D overlaps 006/007/009 - see the file | IN PROGRESS (A1-A9 done, B mostly done, C1-C4 done, D done, E1/E2/E3 done; per-item status table inside the file; Wave 2: C5 style parity) |
 
 Plans 006-011 come from the second audit (see "Round 2: mobile battery
 and bugs" at the end of this file). Order: 006 → 007 → 008 (the battery
