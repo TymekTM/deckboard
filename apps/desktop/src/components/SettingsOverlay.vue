@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 
 const props = defineProps({
@@ -29,6 +30,10 @@ const pairingOffer = ref(null); // {code, expires_in_secs, addresses}
 const pairingBusy = ref(false);
 const pairingLeft = ref(0);
 let pairingTimer = null;
+
+// trusted v2 devices (the backend's devices.json, minus token material)
+const devices = ref([]);
+const devicesBusy = ref(false);
 
 const version = computed(() => props.status.version || "0.1.1");
 
@@ -81,6 +86,42 @@ const pairingClock = computed(() => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 });
 
+async function refreshDevices() {
+  try {
+    devices.value = await api.listDevices();
+  } catch {
+    // v2 stack unavailable: show none rather than stale rows
+    devices.value = [];
+  }
+}
+
+async function revokeDevice(device) {
+  const ok = await ask(
+    `Cofnąć zaufanie urządzeniu "${device.name}"? ` +
+      "Jego token przestaje działać, a połączenie zostanie natychmiast zamknięte.",
+    { title: "Cofnij zaufanie", kind: "warning" },
+  );
+  if (!ok) return;
+  devicesBusy.value = true;
+  try {
+    await api.revokeDevice(device.id);
+  } catch (e) {
+    console.error("revoke device", e);
+  } finally {
+    devicesBusy.value = false;
+    refreshDevices();
+  }
+}
+
+function lastSeenLabel(unixSecs) {
+  if (!unixSecs) return "nigdy";
+  const diff = Math.max(0, Date.now() / 1000 - unixSecs);
+  if (diff < 90) return "teraz";
+  if (diff < 3600) return `${Math.floor(diff / 60)} min temu`;
+  if (diff < 48 * 3600) return `${Math.floor(diff / 3600)} godz. temu`;
+  return new Date(unixSecs * 1000).toLocaleDateString();
+}
+
 async function saveHotkey() {
   const combo = hotkeyDraft.value.trim();
   try {
@@ -132,6 +173,7 @@ onMounted(async () => {
   }
   autostart.value = await api.getAutostart().catch(() => false);
   refreshLan();
+  refreshDevices();
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
@@ -352,6 +394,46 @@ onUnmounted(() => {
                 <div class="code mono tnum">{{ pairingOffer.code }}</div>
                 <p class="note">Wpisz kod w nowym kliencie razem z adresem. Wygasa za {{ pairingClock }}.</p>
                 <button class="act" :disabled="pairingBusy" @click="generatePairing">Nowy kod</button>
+              </template>
+            </div>
+          </article>
+
+          <article class="tile" :class="[tileCls('devices'), { dead: !status.dbOk }]">
+            <button
+              class="hit"
+              :tabindex="focused === 'devices' && status.dbOk ? -1 : 0"
+              aria-label="Rozwiń: Zaufane urządzenia"
+              @click="focused = 'devices'"
+            ></button>
+            <header class="tile-head">
+              <h3>Zaufane urządzenia</h3>
+              <span v-if="status.dbOk" class="chip" :class="devices.length ? 'ok' : ''">
+                {{ devices.length ? `zaufane: ${devices.length}` : "brak" }}
+              </span>
+              <span v-else class="chip bad">serwer wył.</span>
+            </header>
+            <p class="sum">
+              Tablety z zapisanym tokenem. Nowe urządzenie pyta o zaufanie przy pierwszym połączeniu.
+            </p>
+            <div v-show="focused === 'devices' && status.dbOk" class="detail">
+              <p v-if="!devices.length" class="note">
+                Żadne urządzenie nie ma jeszcze zaufania — wygeneruj kod parowania powyżej.
+              </p>
+              <template v-else>
+                <ul class="devices">
+                  <li v-for="d in devices" :key="d.id" class="device">
+                    <span class="device-name">{{ d.name }}</span>
+                    <span class="device-seen">widziany: {{ lastSeenLabel(d.last_seen) }}</span>
+                    <button class="act danger" :disabled="devicesBusy" @click="revokeDevice(d)">
+                      <i class="fas fa-user-slash" aria-hidden="true"></i> Cofnij zaufanie
+                    </button>
+                  </li>
+                </ul>
+                <p class="note">
+                  Cofnięcie usuwa token urządzenia i zamyka jego połączenie. Wróci tylko przez
+                  nowe parowanie. Pytanie o zaufanie pozostawione bez odpowiedzi wygasa razem
+                  z kodem parowania i odrzuca tablet.
+                </p>
               </template>
             </div>
           </article>
@@ -598,6 +680,8 @@ onUnmounted(() => {
   padding: 9px 14px;
 }
 .act.primary:hover { background: var(--accent-2); }
+.act.danger { color: var(--bad-ink); }
+.act.danger:hover { background: rgba(231, 76, 60, 0.18); }
 
 .err { font-size: 12px; color: var(--bad-ink); margin: 8px 0 0; overflow-wrap: anywhere; }
 
@@ -615,6 +699,32 @@ onUnmounted(() => {
 .note code { padding: 1px 5px; border-radius: 4px; background: var(--tile-2); font-size: 11.5px; }
 
 .pair { display: flex; gap: 14px; align-items: flex-start; }
+
+.devices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.device {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: var(--tile-2);
+}
+.device-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-seen { flex: none; font-size: 11.5px; color: var(--ink-3); }
 .qr {
   flex: none;
   width: 108px;
