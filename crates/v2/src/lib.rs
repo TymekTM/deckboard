@@ -4,7 +4,7 @@
 //! `pulpit-legacy` - this crate only adds.
 
 mod assets;
-mod boards;
+pub mod boards;
 mod devices;
 mod hub;
 mod service;
