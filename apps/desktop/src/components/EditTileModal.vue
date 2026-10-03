@@ -228,9 +228,16 @@ function applyFields() {
     if (f.kind === "number") {
       if (raw !== "" && raw !== null && !Number.isNaN(Number(raw))) {
         obj[f.key] = Number(raw);
+      } else if (fieldVisible(f) && (raw === "" || raw === null)) {
+        // a cleared visible field drops its key; skipping it would keep
+        // the value pre-seeded from the old command, so the tile kept
+        // targeting the old scene/value while the input looked empty
+        delete obj[f.key];
       }
     } else if (raw !== "") {
       obj[f.key] = raw;
+    } else if (fieldVisible(f)) {
+      delete obj[f.key];
     }
   }
   form.command = JSON.stringify(obj);
@@ -410,6 +417,10 @@ function toggleProp(key) {
     pickImage("img");
     return;
   }
+  // fixed-mode catalog entries (speaker-volume slider, ai-* status/graph)
+  // lock the Tile Mode row: save() forces the catalog mode back, so the
+  // popover would offer choices that can never take effect (DESK-11)
+  if (key === "mode" && catalogEntry.value?.mode) return;
   openProp.value = openProp.value === key ? null : key;
 }
 function closeProps() {
