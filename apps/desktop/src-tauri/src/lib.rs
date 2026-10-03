@@ -1950,23 +1950,59 @@ async fn exec_button(
     use pulpit_actions::EventSink;
 
     let backend = state.backend()?;
+    // Value pushes from a desktop-originated exec fan out to every
+    // client lane exactly like a tablet-originated exec (CORE-04): the
+    // v2 engine, the legacy APP_CUSTOM_VALUE / THIRD_PARTY_APP
+    // broadcasts and the WebView.
+    let feed = DesktopFeed {
+        app: app.clone(),
+        engine: state.v2.as_ref().map(|v2| v2.engine.clone()),
+        hub: state
+            .hub
+            .clone()
+            .ok_or_else(|| "database unavailable".to_string())?,
+    };
     let Some(button) = backend.get_button(id) else {
         return Ok(());
     };
-    struct UiSink(AppHandle);
-    impl EventSink for UiSink {
-        fn change_board(&mut self, board_id: i64) {
-            let _ = self.0.emit("change-board", board_id);
-        }
-        fn app_value(&mut self, _key: &str, _value: &str) {}
-    }
+    // The sink runs on the blocking pool next to the exec, so it defers
+    // pushes through a channel; the drain below runs back on the async
+    // worker (the same shape the legacy dispatcher uses).
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<(pulpit_host::StatusApp, String, String)>();
     let _ = tauri::async_runtime::spawn_blocking(move || {
-        let mut sink = UiSink(app.clone());
+        struct UiSink(
+            AppHandle,
+            tokio::sync::mpsc::UnboundedSender<(pulpit_host::StatusApp, String, String)>,
+        );
+        impl EventSink for UiSink {
+            fn change_board(&mut self, board_id: i64) {
+                let _ = self.0.emit("change-board", board_id);
+            }
+            fn app_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::CustomValue,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+            fn third_party_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::ThirdParty,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+        }
+        let mut sink = UiSink(app, tx);
         // full tap sequence (press-start + release): a lone release-phase
         // exec never presses `key` tiles (A1)
         backend.exec_tap(button, &mut sink);
     })
     .await;
+    while let Ok((app_kind, key, value)) = rx.try_recv() {
+        pulpit_host::push_values(&feed, app_kind, &serde_json::json!({ key: value })).await;
+    }
     Ok(())
 }
 
