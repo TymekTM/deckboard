@@ -347,8 +347,17 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                     val url = "http://${cfg.host}:${cfg.port}/assets/$hash?token=$token"
                     sharedHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                         if (!resp.isSuccessful) return@use null
+                        val body = resp.body ?: return@use null
+                        // MOB-12: bail on an asset too big to be a tile
+                        // image or background - the sampled decode was
+                        // always capped, the read was not, and a multi-MB
+                        // body buffered whole into the heap of a 1 GB
+                        // tablet. A lying or absent Content-Length is
+                        // caught by the capped stream read itself.
+                        if (body.contentLength() > ASSET_MAX_BYTES) return@use null
                         // one read: OkHttp streams cannot be consumed twice
-                        val bytes = resp.body?.byteStream()?.readBytes() ?: return@use null
+                        val bytes = readAtMost(body.byteStream(), ASSET_MAX_BYTES.toInt())
+                            ?: return@use null
                         // decode with a power-of-two sample at the purpose's
                         // target size, so a future full-res photo cannot eat
                         // the heap of a 1 GB tablet
@@ -788,6 +797,11 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
          *  for a boardful of tile images plus a couple of backgrounds,
          *  small enough to be safe on the deck's 1 GB (MOB-07). */
         const val BITMAP_BUDGET_BYTES = 32L * 1024 * 1024
+
+        /** Asset response cap: tile images and backgrounds are a few
+         *  hundred KB; anything past this is not a decode candidate but
+         *  a heap spike (MOB-12). */
+        const val ASSET_MAX_BYTES = 10L * 1024 * 1024
 
         /** Shared by reconnects and asset fetches - see V2Client.http. */
         private val sharedHttp = OkHttpClient.Builder()
