@@ -16,6 +16,12 @@ pub const PAIR_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ234567";
 pub const PAIR_CODE_LEN: usize = 8;
 pub const PAIR_CODE_TTL: Duration = Duration::from_secs(300);
 
+/// Wrong pairing codes within one TTL window that burn every
+/// outstanding code. Codes are 8 chars from a 31-char alphabet - short
+/// enough that unlimited free guesses would eventually hit, so after
+/// this many misses the operator mints a fresh one instead.
+const MAX_FAILED_PAIR_ATTEMPTS: usize = 5;
+
 /// Marker + sha-256 of a device token, as stored in `devices.json`
 /// (`sha256:<hex>`). Only digests are persisted: the file is as
 /// sensitive as the tokens themselves otherwise, and every verify
@@ -214,10 +220,14 @@ pub enum PairError {
 }
 
 /// In-memory pool of live one-time codes. Codes burn on use, valid or not:
-/// a second connection attempt with the same code always fails.
+/// a second connection attempt with the same code always fails. A burst
+/// of wrong codes (a guessing client) burns every outstanding code.
 #[derive(Default)]
 pub struct Pairing {
     codes: std::sync::Mutex<HashMap<String, Instant>>,
+    /// Wrong-code attempts inside the TTL window (the failed-attempt
+    /// budget's sliding window).
+    failures: std::sync::Mutex<Vec<Instant>>,
 }
 
 impl Pairing {
@@ -256,14 +266,40 @@ impl Pairing {
         // concurrent consumes could both pass the check and both mint
         // devices off a single one-time code.
         let mut codes = self.codes.lock().expect("pairing poisoned");
-        match codes.get(code) {
+        let outcome = match codes.get(code) {
             None => Err(PairError::Invalid),
             Some(created) if created.elapsed() >= PAIR_CODE_TTL => Err(PairError::Expired),
-            Some(_) => {
+            Some(_) => Ok(()),
+        };
+        match outcome {
+            Ok(()) => {
                 codes.remove(code);
                 Ok(())
             }
+            Err(PairError::Invalid) => {
+                // A wrong code is a guess at an 8-char secret: budget
+                // them, and past the budget invalidate everything
+                // outstanding (the operator re-mints).
+                drop(codes);
+                if self.record_failed_attempt() {
+                    self.codes.lock().expect("pairing poisoned").clear();
+                    tracing::warn!(
+                        attempts = MAX_FAILED_PAIR_ATTEMPTS,
+                        "too many wrong pairing codes - outstanding codes invalidated"
+                    );
+                }
+                Err(PairError::Invalid)
+            }
+            Err(PairError::Expired) => Err(PairError::Expired),
         }
+    }
+
+    /// Records one wrong-code attempt; `true` when the budget is spent.
+    fn record_failed_attempt(&self) -> bool {
+        let mut failures = self.failures.lock().expect("pairing poisoned");
+        failures.push(Instant::now());
+        failures.retain(|at| at.elapsed() < PAIR_CODE_TTL);
+        failures.len() >= MAX_FAILED_PAIR_ATTEMPTS
     }
 }
 
@@ -280,6 +316,27 @@ mod tests {
         assert_eq!(pairing.consume(&code), Ok(()));
         assert_eq!(pairing.consume(&code), Err(PairError::Invalid));
         assert_eq!(pairing.consume("NOPE2345"), Err(PairError::Invalid));
+    }
+
+    #[test]
+    fn wrong_codes_burn_every_outstanding_code() {
+        let pairing = Pairing::new();
+        let a = pairing.new_code();
+        let b = pairing.new_code();
+        // one under the budget: outstanding codes survive
+        for _ in 0..MAX_FAILED_PAIR_ATTEMPTS - 1 {
+            assert_eq!(pairing.consume("WRONGCOD"), Err(PairError::Invalid));
+        }
+        assert_eq!(pairing.peek(&a), Ok(()));
+        // the budget's last attempt invalidates everything outstanding
+        assert_eq!(pairing.consume("WRONGCOD"), Err(PairError::Invalid));
+        assert_eq!(pairing.peek(&a), Err(PairError::Invalid));
+        assert_eq!(pairing.peek(&b), Err(PairError::Invalid));
+        // minting still works; the operator relays a fresh code
+        let c = pairing.new_code();
+        assert_eq!(pairing.peek(&c), Ok(()));
+        // and a valid consume still succeeds after the burn
+        assert_eq!(pairing.consume(&c), Ok(()));
     }
 
     #[test]
