@@ -1022,7 +1022,7 @@ fn read_image_data(path: String) -> Result<String, String> {
     };
     // take() bounds the read itself: a file that grows between the length
     // check and the read still cannot pull more than cap+1 bytes in
-    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
     use std::io::Read as _;
     let mut bytes = Vec::new();
     file.take(IMAGE_READ_CAP_BYTES + 1)
@@ -1204,26 +1204,21 @@ mod tests {
 
     #[test]
     fn read_image_data_rejects_files_over_the_cap() {
-        let path = std::env::temp_dir().join(format!(
-            "pulpit-image-cap-{}.png",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("pulpit-image-cap-{}.png", std::process::id()));
         let file = std::fs::File::create(&path).expect("create temp file");
         // set_len extends without writing, so the test stays cheap
         file.set_len(IMAGE_READ_CAP_BYTES + 1).expect("extend");
         drop(file);
-        let err =
-            read_image_data(path.to_string_lossy().into_owned()).expect_err("must refuse");
+        let err = read_image_data(path.to_string_lossy().into_owned()).expect_err("must refuse");
         assert!(err.contains("10 MiB"), "unexpected error: {err}");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn read_image_data_encodes_a_small_image_as_a_data_url() {
-        let path = std::env::temp_dir().join(format!(
-            "pulpit-image-small-{}.png",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("pulpit-image-small-{}.png", std::process::id()));
         std::fs::write(&path, b"not-really-png-bytes").expect("write temp file");
         let url = read_image_data(path.to_string_lossy().into_owned()).expect("must read");
         assert!(url.starts_with("data:image/png;base64,"), "got: {url}");
