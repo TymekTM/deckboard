@@ -209,8 +209,8 @@ async fn run_session(
                 let name = sanitize_device_name(hello.name.as_deref())
                     .unwrap_or_else(|| "Device".to_string());
                 tracing::warn!(session = session.id, name = %name, "pairing auto-accepted (no UI yet)");
-                let device = state.devices.create(&name);
-                issued_token = Some(device.token.clone());
+                let (device, token) = state.devices.create(&name);
+                issued_token = Some(token);
                 device
             }
             Err(PairError::Expired) => {
@@ -637,7 +637,10 @@ mod tests {
             sanitize_device_name(Some("  Tablet salon \n")),
             Some("Tablet salon".into())
         );
-        assert_eq!(sanitize_device_name(Some("a\u{0}b\u{7}c")), Some("abc".into()));
+        assert_eq!(
+            sanitize_device_name(Some("a\u{0}b\u{7}c")),
+            Some("abc".into())
+        );
         assert_eq!(sanitize_device_name(Some(" \u{1}\t ")), None);
         assert_eq!(sanitize_device_name(Some("")), None);
         assert_eq!(sanitize_device_name(None), None);

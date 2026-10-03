@@ -16,6 +16,25 @@ pub const PAIR_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ234567";
 pub const PAIR_CODE_LEN: usize = 8;
 pub const PAIR_CODE_TTL: Duration = Duration::from_secs(300);
 
+/// Marker + sha-256 of a device token, as stored in `devices.json`
+/// (`sha256:<hex>`). Only digests are persisted: the file is as
+/// sensitive as the tokens themselves otherwise, and every verify
+/// already compares digests. The prefix keeps a stored digest
+/// distinguishable from a legacy plaintext token (both are hex-shaped)
+/// so migration is one-way and idempotent.
+const DIGEST_PREFIX: &str = "sha256:";
+
+fn token_digest(token: &str) -> String {
+    format!("{DIGEST_PREFIX}{:x}", Sha256::digest(token.as_bytes()))
+}
+
+fn is_digest(stored: &str) -> bool {
+    let Some(hex) = stored.strip_prefix(DIGEST_PREFIX) else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 pub fn unix_now() -> u64 {
     crate::unix_millis() / 1000
 }
@@ -42,7 +61,8 @@ pub struct DeviceStore {
 
 impl DeviceStore {
     /// Missing file = no paired devices yet; unreadable file = refuse to
-    /// start rather than silently wiping the registry.
+    /// start rather than silently wiping the registry. Legacy files with
+    /// plaintext tokens migrate to digests on load (one-way, persisted).
     pub fn load(path: PathBuf) -> std::io::Result<DeviceStore> {
         let entries = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
@@ -50,22 +70,46 @@ impl DeviceStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e),
         };
-        Ok(DeviceStore {
+        let store = DeviceStore {
             path,
             entries: std::sync::Mutex::new(entries),
             last_touch_save: std::sync::Mutex::new(None),
-        })
+        };
+        store.migrate_plaintext_tokens();
+        Ok(store)
+    }
+
+    /// Replaces any legacy plaintext token with its digest and persists.
+    /// `sha256:`-prefixed values pass through untouched, so this is safe
+    /// to run on every load.
+    fn migrate_plaintext_tokens(&self) {
+        let mut entries = self.entries.lock().expect("device store poisoned");
+        let mut migrated = 0;
+        for entry in entries.iter_mut() {
+            if !is_digest(&entry.token) {
+                entry.token = token_digest(&entry.token);
+                migrated += 1;
+            }
+        }
+        if migrated > 0 {
+            tracing::info!(
+                migrated,
+                "devices.json: plaintext tokens migrated to digests"
+            );
+            drop(entries);
+            self.save();
+        }
     }
 
     /// Token -> device, or `None` for unknown tokens. Comparison runs on
     /// sha-256 digests so the match leaks nothing about the token itself.
     pub fn verify(&self, token: &str) -> Option<DeviceEntry> {
-        let wanted = Sha256::digest(token);
+        let wanted = token_digest(token);
         self.entries
             .lock()
             .expect("device store poisoned")
             .iter()
-            .find(|d| Sha256::digest(d.token.as_bytes()) == wanted)
+            .find(|d| d.token == wanted)
             .cloned()
     }
 
@@ -106,11 +150,15 @@ impl DeviceStore {
     }
 
     /// Creates a device with a fresh random id + token (pairing step 4).
-    pub fn create(&self, name: &str) -> DeviceEntry {
+    /// Only the token's digest is stored; the plaintext travels exactly
+    /// once, in this return value, on its way to the new device's
+    /// `welcome`.
+    pub fn create(&self, name: &str) -> (DeviceEntry, String) {
+        let plaintext = hex_encode(&random_bytes(32));
         let entry = DeviceEntry {
             id: hex_encode(&random_bytes(16)),
             name: name.to_string(),
-            token: hex_encode(&random_bytes(32)),
+            token: token_digest(&plaintext),
             created: unix_now(),
             last_seen: unix_now(),
         };
@@ -119,7 +167,7 @@ impl DeviceStore {
             .expect("device store poisoned")
             .push(entry.clone());
         self.save();
-        entry
+        (entry, plaintext)
     }
 
     pub fn revoke(&self, id: &str) -> bool {
@@ -139,14 +187,11 @@ impl DeviceStore {
     }
 
     fn save(&self) {
-        let entries = self.entries.lock().expect("device store poisoned");
-        let tmp = self.path.with_extension("json.tmp");
-        let write = std::fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(&*entries).unwrap_or_default(),
-        )
-        .and_then(|_| std::fs::rename(&tmp, &self.path));
-        if let Err(e) = write {
+        let bytes = {
+            let entries = self.entries.lock().expect("device store poisoned");
+            serde_json::to_vec_pretty(&*entries).unwrap_or_default()
+        };
+        if let Err(e) = pulpit_db::write_atomic(&self.path, &bytes) {
             tracing::warn!(path = %self.path.display(), error = %e, "cannot persist devices.json");
         }
     }
@@ -243,14 +288,45 @@ mod tests {
         let path = dir.path().join("devices.json");
         let store = DeviceStore::load(path.clone()).unwrap();
         assert!(store.verify("nope").is_none());
-        let device = store.create("Tablet salon");
+        let (device, plaintext) = store.create("Tablet salon");
         assert_eq!(device.name, "Tablet salon");
-        assert_eq!(store.verify(&device.token).unwrap().id, device.id);
+        // only the digest is stored; the plaintext verifies against it
+        assert!(is_digest(&device.token));
+        assert_eq!(store.verify(&plaintext).unwrap().id, device.id);
+
+        // The file holds the digest, never the plaintext token.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("sha256:"));
+        assert!(!on_disk.contains(&plaintext));
 
         // A second store instance over the same file sees the device.
         let reopened = DeviceStore::load(path).unwrap();
-        assert_eq!(reopened.verify(&device.token).unwrap().id, device.id);
+        assert_eq!(reopened.verify(&plaintext).unwrap().id, device.id);
         assert!(reopened.revoke(&device.id));
-        assert!(reopened.verify(&device.token).is_none());
+        assert!(reopened.verify(&plaintext).is_none());
+    }
+
+    #[test]
+    fn legacy_plaintext_tokens_migrate_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        // an obvious fake token, plaintext like the pre-digest format
+        let legacy_token = "f4k3-legacy-plaintext-token-000000000000";
+        let file = format!(
+            r#"[{{"id":"aa","name":"Old tablet","token":"{legacy_token}","created":1,"last_seen":2}}]"#
+        );
+        std::fs::write(&path, file).unwrap();
+
+        let store = DeviceStore::load(path.clone()).unwrap();
+        // the legacy token still verifies after migration
+        assert_eq!(store.verify(legacy_token).unwrap().id, "aa");
+        assert!(is_digest(&store.list()[0].token));
+
+        // migration is persisted and idempotent across reloads
+        let reopened = DeviceStore::load(path.clone()).unwrap();
+        assert_eq!(reopened.verify(legacy_token).unwrap().id, "aa");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains(legacy_token));
+        assert!(on_disk.contains("sha256:"));
     }
 }
