@@ -265,16 +265,15 @@ fn openrouter_row(key: &str) -> ProviderRow {
     }
 }
 
-/// Anthropic Admin usage report: `GET /v1/organization/usage/report`
-/// summed as tokens for the current day (the report exposes no spend
-/// limit, so the row shows consumption without a percentage). The day
-/// boundary follows the `local_midnight` config like the token tiles.
+/// Anthropic Admin usage report: `GET /v1/organizations/usage_report/messages`
+/// (needs an *admin* API key, not a regular `sk-ant-` key) summed as
+/// tokens for the current day (the report exposes no spend limit, so the
+/// row shows consumption without a percentage). The day boundary follows
+/// the `local_midnight` config like the token tiles. Bounds travel as
+/// RFC-3339 strings - epoch ints are not accepted on this endpoint.
 fn anthropic_row(key: &str, boundary: crate::local_usage::DayBoundary) -> ProviderRow {
     let now = crate::unix_now();
-    let start = boundary.day_start(now);
-    let url = format!(
-        "https://api.anthropic.com/v1/organization/usage/report?start_time={start}&end_time={now}"
-    );
+    let url = anthropic_usage_url(boundary.day_start(now), now);
     let headers = [
         ("x-api-key", key.to_string()),
         ("anthropic-version", "2023-06-01".to_string()),
@@ -291,16 +290,54 @@ fn anthropic_row(key: &str, boundary: crate::local_usage::DayBoundary) -> Provid
                     percent: None,
                     reset_at: None,
                 },
-                _ => error_row("Anthropic API", "no totals in response"),
+                _ => error_row("Anthropic API", "no usage in response"),
             }
         }
         Err(e) => error_row("Anthropic API", &e),
     }
 }
 
-/// The report's `totals` is either a flat token object or a per-model
-/// array; either way the row only needs the day's grand total.
+/// Messages usage report URL for one day: RFC-3339 UTC bounds (Z form, so
+/// nothing needs percent-encoding) and a daily bucket.
+fn anthropic_usage_url(day_start: i64, now: i64) -> String {
+    format!(
+        "https://api.anthropic.com/v1/organizations/usage_report/messages?\
+         starting_at={}&ending_at={}&bucket_width=1d",
+        rfc3339_utc(day_start),
+        rfc3339_utc(now),
+    )
+}
+
+/// Epoch seconds -> RFC-3339 UTC ("2026-10-03T12:00:00Z"); absurd inputs
+/// fall back to the epoch instead of panicking (release is panic=abort).
+fn rfc3339_utc(epoch: i64) -> String {
+    chrono::DateTime::from_timestamp(epoch, 0)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Day grand total from a messages usage report: the documented shape is
+/// `data[]` time buckets, each carrying `results[]` rows (one per model /
+/// group). Summed as input (uncached + cache read + cache creation) plus
+/// output tokens, matching what the local transcript sums count. A
+/// legacy flat `totals` object or per-model array is still accepted.
 fn anthropic_totals(v: &serde_json::Value) -> Option<u64> {
+    if let Some(data) = v.get("data").and_then(|d| d.as_array()) {
+        let mut total: u64 = 0;
+        let mut seen = false;
+        for bucket in data {
+            let Some(rows) = bucket.get("results").and_then(|r| r.as_array()) else {
+                continue;
+            };
+            for row in rows {
+                total = total.saturating_add(anthropic_row_tokens(row));
+                seen = true;
+            }
+        }
+        if seen {
+            return Some(total);
+        }
+    }
     let totals = v.get("totals")?;
     let fields = [
         "input_tokens",
@@ -326,6 +363,30 @@ fn anthropic_totals(v: &serde_json::Value) -> Option<u64> {
             })
             .sum(),
     )
+}
+
+/// Token sum of one `results[]` row of the messages report: uncached
+/// input + output + cache read + cache creation (5m and 1h entries).
+fn anthropic_row_tokens(row: &serde_json::Value) -> u64 {
+    let field = |name: &str| row.get(name).and_then(|x| x.as_u64()).unwrap_or(0);
+    let cache_creation = row
+        .get("cache_creation")
+        .and_then(|c| c.as_object())
+        .map(|c| {
+            c.get("ephemeral_5m_input_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0)
+                .saturating_add(
+                    c.get("ephemeral_1h_input_tokens")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0),
+                )
+        })
+        .unwrap_or(0);
+    field("uncached_input_tokens")
+        .saturating_add(field("output_tokens"))
+        .saturating_add(field("cache_read_input_tokens"))
+        .saturating_add(cache_creation)
 }
 
 /// Config-declared endpoint: GET `url`, read `used_path` / `limit_path`
@@ -1287,6 +1348,56 @@ mod tests {
         assert_eq!(usage.five, Some(9.0));
         assert_eq!(usage.week, None);
         assert_eq!(usage.five_reset, None);
+    }
+
+    #[test]
+    fn anthropic_usage_report_sums_result_buckets() {
+        // fixture shaped like the documented messages usage report:
+        // data[] time buckets, each with per-model results[] rows
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"data":[
+                {"starting_at":"2026-10-03T00:00:00Z","ending_at":"2026-10-04T00:00:00Z",
+                 "results":[
+                    {"model":"claude-opus-5","uncached_input_tokens":1500,"output_tokens":500,
+                     "cache_read_input_tokens":200,
+                     "cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":5}},
+                    {"model":"claude-haiku-4","uncached_input_tokens":100,"output_tokens":40,
+                     "cache_read_input_tokens":0,
+                     "cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}
+                 ]}]}"#,
+        )
+        .unwrap();
+        // input (incl. cache read + creation) plus output, like the local sums
+        assert_eq!(anthropic_totals(&v), Some(1500 + 500 + 200 + 10 + 5 + 100 + 40));
+
+        // a bucket without results contributes nothing; a report with no
+        // rows at all leaves the lane empty
+        assert_eq!(
+            anthropic_totals(&serde_json::json!({"data":[{"results":[]},{},]})),
+            None
+        );
+
+        // the older flat-totals shape keeps parsing
+        let legacy: serde_json::Value = serde_json::from_str(
+            r#"{"totals":{"input_tokens":10,"output_tokens":20,"cache_creation_input_tokens":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(anthropic_totals(&legacy), Some(35));
+    }
+
+    #[test]
+    fn anthropic_usage_url_uses_rfc3339_bounds_and_a_daily_bucket() {
+        let url = anthropic_usage_url(0, 3600);
+        assert!(
+            url.starts_with(
+                "https://api.anthropic.com/v1/organizations/usage_report/messages?"
+            ),
+            "{url}"
+        );
+        // RFC-3339 strings, not epoch ints; Z form so nothing needs escaping
+        assert!(url.contains("starting_at=1970-01-01T00:00:00Z"), "{url}");
+        assert!(url.contains("ending_at=1970-01-01T01:00:00Z"), "{url}");
+        assert!(url.ends_with("bucket_width=1d"), "{url}");
     }
 
     #[test]

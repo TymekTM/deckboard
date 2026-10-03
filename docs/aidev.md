@@ -39,7 +39,10 @@ prompt (SDK sessions, wrapper content).
 OpenRouter (`OPENROUTER_API_KEY`), the Anthropic admin report
 (`ANTHROPIC_API_KEY`) and arbitrary config-declared endpoints remain
 opt-in extra lanes. The old OpenAI Costs lane is gone - consumer keys are
-not accepted there and Codex usage is subscription-based.
+not accepted there and Codex usage is subscription-based. The Anthropic
+lane reads `/v1/organizations/usage_report/messages`, which requires an
+*admin* API key - a regular inference key answers 404 and the row shows
+the error.
 
 ## Plan-limit bars
 
