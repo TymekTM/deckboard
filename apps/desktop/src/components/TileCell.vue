@@ -241,6 +241,18 @@ const boardTileTitle = computed(() => {
   return "";
 });
 
+// Brief screen-reader label: the tile's title, else the target board's
+// name (board tiles switch boards without a title), else the catalog or
+// extension label for the tile's type.
+const tileAriaLabel = computed(() => {
+  if (props.tile.title) return props.tile.title;
+  if (props.tile.type === "board") {
+    const name = props.boardNames?.[cmd.value.id];
+    if (name) return name;
+  }
+  return metaOf(props.tile).label || String(props.tile.type).replace(/-/g, " ");
+});
+
 function onTap() {
   if (props.tile.type === "ai-tokens-hour" && graphData.value?.rows?.length) {
     // the hour tile's tap flips between the shared sparkline and the
@@ -261,6 +273,8 @@ const SLIDER_SEND_INTERVAL = 150;
 const SLIDER_DOUBLE_TAP_MS = 350;
 // pointer travel below this counts as a tap, not a drag
 const SLIDER_TAP_SLOP = 6;
+// keyboard step for touch-mode sliders, as a fraction of the full range
+const SLIDER_KEY_STEP = 0.05;
 
 const sliderVal = ref(null);
 // end time of the last tap on this slider (a pointer interaction that
@@ -325,6 +339,38 @@ function startSlider(event) {
   window.addEventListener("pointerup", onUp);
   window.addEventListener("pointercancel", onUp);
 }
+
+// Keyboard operability (012 lower-priority): tiles are tab stops and
+// Enter/Space activates with the pointer's semantics - touch mode runs the
+// tile (the same path a tap takes), edit mode opens the editor (the
+// double-click equivalent; a plain click has no action in edit mode).
+// exec_button is a one-shot full tap, so activation fires once per
+// physical press (auto-repeat guard); holding the key cannot hold the
+// injected key down - the same trade-off a touch tap already has.
+function onTileKeydown(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (event.key === "Enter" || event.key === " ") {
+    if (event.repeat) return;
+    // Space would scroll the board scroll container otherwise
+    event.preventDefault();
+    if (props.touch) onTap();
+    else emit("open");
+    return;
+  }
+  // touch-mode sliders: arrow keys step the fader like a drag would; the
+  // grid's arrow navigator must not move focus instead (stopPropagation)
+  const step = {
+    ArrowUp: SLIDER_KEY_STEP,
+    ArrowDown: -SLIDER_KEY_STEP,
+    ArrowRight: SLIDER_KEY_STEP,
+    ArrowLeft: -SLIDER_KEY_STEP,
+  }[event.key];
+  if (!props.touch || props.tile.mode !== "slider" || step === undefined) return;
+  event.preventDefault();
+  event.stopPropagation();
+  sliderVal.value = Math.min(1, Math.max(0, sliderValue() + step));
+  emit("slider", sliderVal.value);
+}
 </script>
 
 <template>
@@ -339,10 +385,15 @@ function startSlider(event) {
         borderColor: tileBorder(),
         borderRadius: tileShape(),
       }"
+      role="button"
+      tabindex="0"
+      :aria-label="tileAriaLabel"
+      :aria-pressed="tile.mode === 'toggle' ? activeState : undefined"
       @dblclick="!touch && emit('open')"
       @contextmenu.prevent="emit('ctx', $event)"
       @pointerdown="emit('down', $event)"
       @click.stop="onTap"
+      @keydown="onTileKeydown"
     >
       <img
         v-if="activeState && tile.img2"
@@ -519,6 +570,13 @@ function startSlider(event) {
   transition: filter 120ms ease-out, box-shadow 120ms ease-out;
 }
 .tile:hover { filter: brightness(1.08); box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3); }
+/* keyboard focus (012 lower-priority): shown for keyboard focus only, so
+   mouse clicks and touch taps stay outline-free; inset because the tile
+   clips its own overflow */
+.tile:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.95);
+  outline-offset: -4px;
+}
 .tile.dragging {
   opacity: 0.8;
   cursor: grabbing;

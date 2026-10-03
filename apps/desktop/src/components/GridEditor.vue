@@ -154,6 +154,54 @@ function onTileTap(tile) {
   emit("tile-exec", tile);
 }
 
+// Arrow keys move focus to the nearest tile in the pressed direction
+// (keyboard operability, 012 lower-priority); Enter/Space activation lives
+// in TileCell. Candidates are compared by cell-center distance so
+// multi-cell tiles navigate sensibly, and tiles straight ahead win over
+// diagonal ones.
+const ARROW_DIRS = {
+  ArrowUp: [0, -1],
+  ArrowDown: [0, 1],
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+};
+const gridEl = ref(null);
+
+function onGridKeydown(event) {
+  const dir = ARROW_DIRS[event.key];
+  if (!dir) return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  const slot = event.target.closest?.(".tile-slot");
+  if (!slot || slot.dataset.tileId === undefined) return;
+  const current = props.board.buttons.find(
+    (t) => t.id !== null && String(t.id) === slot.dataset.tileId
+  );
+  if (!current) return;
+  const [dx, dy] = dir;
+  const cx = current.x + current.w / 2;
+  const cy = current.y + current.h / 2;
+  let best = null;
+  let bestScore = Infinity;
+  for (const t of props.board.buttons) {
+    if (t.id === null || t.id === current.id) continue;
+    const tx = t.x + t.w / 2 - cx;
+    const ty = t.y + t.h / 2 - cy;
+    if (dx && tx * dx <= 0) continue; // not in the pressed direction
+    if (dy && ty * dy <= 0) continue;
+    const along = dx ? Math.abs(tx) : Math.abs(ty);
+    const across = dx ? Math.abs(ty) : Math.abs(tx);
+    const score = along + across * 2;
+    if (score < bestScore) {
+      bestScore = score;
+      best = t;
+    }
+  }
+  if (!best) return;
+  // keep the scroll container still; focus() scrolls the target into view
+  event.preventDefault();
+  gridEl.value?.querySelector(`[data-tile-id="${best.id}"] .tile`)?.focus();
+}
+
 // right-click (long-press on touch devices) over a tile: touch mode keeps
 // the old "open settings" behavior, edit mode opens the custom menu
 function onTileContext(tile, event) {
@@ -202,11 +250,13 @@ function onGridClick(event) {
 <template>
   <div class="board-scroll">
     <div
+      ref="gridEl"
       class="board-grid"
       :class="{ touch }"
       :style="gridStyle"
       @click="onGridClick"
       @contextmenu.prevent="onGridContext"
+      @keydown="onGridKeydown"
     >
       <template v-if="!touch">
         <div
@@ -230,6 +280,7 @@ function onGridClick(event) {
         :key="tile.id ?? `fill-${tile.x}-${tile.y}`"
         class="tile-slot"
         :style="tileStyle(tile)"
+        :data-tile-id="tile.id"
         :tile="tile"
         :touch="touch"
         :type-meta="typeMeta"

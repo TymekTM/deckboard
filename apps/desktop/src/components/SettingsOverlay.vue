@@ -16,6 +16,7 @@ const focused = ref("launch");
 
 const autostart = ref(false);
 const autostartBusy = ref(false);
+const autostartError = ref("");
 
 const hotkey = ref("Ctrl+Alt+D");
 const hotkeyDraft = ref("");
@@ -29,6 +30,7 @@ const lanLoading = ref(false);
 const pairingOffer = ref(null); // {code, expires_in_secs, addresses}
 const pairingBusy = ref(false);
 const pairingLeft = ref(0);
+const pairingError = ref("");
 let pairingTimer = null;
 
 // trusted v2 devices (the backend's devices.json, minus token material)
@@ -45,6 +47,7 @@ const portBusy = ref(false);
 
 // in-app revoke confirmation (replaces the native dialog popup)
 const confirmRevoke = ref(null); // device awaiting confirmation
+const revokeError = ref("");
 const cancelBtn = ref(null);
 
 // M8 sideload: adb device list + keep-data APK install
@@ -135,6 +138,7 @@ function stopPairingClock() {
 
 async function generatePairing() {
   pairingBusy.value = true;
+  pairingError.value = "";
   try {
     pairingOffer.value = await api.createPairingCode();
     pairingLeft.value = pairingOffer.value.expires_in_secs;
@@ -148,7 +152,9 @@ async function generatePairing() {
       }
     }, 1000);
   } catch (e) {
-    console.error("pairing code", e);
+    pairingError.value = e
+      ? String(e)
+      : "Nie udało się wygenerować kodu parowania.";
   } finally {
     pairingBusy.value = false;
   }
@@ -175,6 +181,7 @@ watch(focused, (tile) => {
 });
 
 function revokeDevice(device) {
+  revokeError.value = "";
   confirmRevoke.value = device;
 }
 
@@ -182,15 +189,18 @@ async function doRevoke() {
   const device = confirmRevoke.value;
   if (!device) return;
   devicesBusy.value = true;
+  revokeError.value = "";
   try {
     await api.revokeDevice(device.id);
   } catch (e) {
-    console.error("revoke device", e);
+    // keep the popup open with the reason; the device list is stale anyway
+    revokeError.value = e ? String(e) : "Nie udało się odwołać urządzenia.";
+    return;
   } finally {
     devicesBusy.value = false;
-    confirmRevoke.value = null;
-    refreshDevices();
   }
+  confirmRevoke.value = null;
+  refreshDevices();
 }
 
 // focus lands on Cancel so a reflexive Enter cannot fire the destructive
@@ -245,12 +255,15 @@ async function saveHotkey() {
 
 async function toggleAutostart() {
   autostartBusy.value = true;
+  autostartError.value = "";
   const next = !autostart.value;
   autostart.value = next;
   try {
     await api.setAutostart(next);
-  } catch {
+  } catch (e) {
+    // flip back and say why - a silent revert leaves the user guessing
     autostart.value = !next;
+    autostartError.value = e ? String(e) : "Nie udało się zapisać autostartu.";
   } finally {
     autostartBusy.value = false;
   }
@@ -338,6 +351,7 @@ onUnmounted(() => {
                   @click="toggleAutostart"
                 ><span class="knob"></span></button>
               </div>
+              <p v-if="autostartError" class="err">{{ autostartError }}</p>
               <div class="ctl">
                 <div class="ctl-text">
                   <span class="ctl-name">Zamykanie do zasobnika</span>
@@ -541,6 +555,7 @@ onUnmounted(() => {
                 <p class="note">Wpisz kod w nowym kliencie razem z adresem. Wygasa za {{ pairingClock }}.</p>
                 <button class="act" :disabled="pairingBusy" @click="generatePairing">Nowy kod</button>
               </template>
+              <p v-if="pairingError" class="err">{{ pairingError }}</p>
             </div>
           </article>
 
@@ -619,6 +634,7 @@ onUnmounted(() => {
           Token urządzenia zostanie usunięty, a jego połączenie zamknięte natychmiast.
           Tablet wróci tylko przez nowe parowanie.
         </p>
+        <p v-if="revokeError" class="err">{{ revokeError }}</p>
         <div class="confirm-actions">
           <button ref="cancelBtn" class="act" @click="confirmRevoke = null">Anuluj</button>
           <button class="act danger-solid" :disabled="devicesBusy" @click="doRevoke">
