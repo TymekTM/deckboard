@@ -238,7 +238,7 @@ fn fmt_age(secs: i64) -> String {
     }
 }
 
-/// ---- session sources ---------------------------------------------------------
+// ---- session sources ---------------------------------------------------------
 
 /// ZCode conversations from the SQLite journal, read-only alongside the
 /// running CLI (WAL allows that). `parent_id IS NULL` keeps main
@@ -386,7 +386,7 @@ fn freshest_transcript(project_dir: &Path) -> Option<(i64, PathBuf)> {
             continue;
         }
         if let Some(ts) = mtime(&path) {
-            if best.as_ref().map_or(true, |(b, _)| ts > *b) {
+            if best.as_ref().is_none_or(|(b, _)| ts > *b) {
                 best = Some((ts, path));
             }
         }
@@ -440,7 +440,7 @@ fn transcript_head_info(path: &Path) -> (Option<String>, Option<String>) {
     (cwd, prompt)
 }
 
-/// ---- helpers -----------------------------------------------------------------
+// ---- helpers -----------------------------------------------------------------
 
 fn basename(path: &str) -> String {
     path.rsplit(['\\', '/'])

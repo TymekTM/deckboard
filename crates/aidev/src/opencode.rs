@@ -81,7 +81,7 @@ where
     read
 }
 
-/// ---- token usage ------------------------------------------------------------
+// ---- token usage ------------------------------------------------------------
 
 /// Incremental usage reader: message rows are immutable, so a high-water
 /// mark over `time_created` feeds only new rows into the sample list.

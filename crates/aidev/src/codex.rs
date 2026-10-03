@@ -160,7 +160,7 @@ pub fn limits(sessions_dir: &Path, now: i64) -> Option<Limits> {
             continue;
         }
         if let Some((ts, limits)) = tail_rate_limits(&path) {
-            if best.as_ref().map_or(true, |(b, _)| ts > *b) {
+            if best.as_ref().is_none_or(|(b, _)| ts > *b) {
                 best = Some((ts, limits));
             }
         }
@@ -210,7 +210,7 @@ fn tail_rate_limits(path: &Path) -> Option<(i64, Limits)> {
             continue;
         };
         let ts = crate::local_usage::parse_iso_rfc3339(ts_text).unwrap_or(0);
-        if newest.as_ref().map_or(true, |(b, _)| ts > *b) {
+        if newest.as_ref().is_none_or(|(b, _)| ts > *b) {
             newest = Some((ts, limits));
         }
         break; // scanning backwards, the first hit is the file's latest
@@ -245,7 +245,7 @@ fn parse_limits(rl: &serde_json::Value) -> Option<Limits> {
     })
 }
 
-/// ---- helpers ----------------------------------------------------------------
+// ---- helpers ----------------------------------------------------------------
 
 fn collect_jsonl(dir: &Path, depth: u8, out: &mut Vec<std::path::PathBuf>) {
     if depth > 4 {

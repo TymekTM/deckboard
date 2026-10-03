@@ -54,7 +54,6 @@ fn next_push(events: &mut tokio::sync::mpsc::UnboundedReceiver<pulpit_ext::ExtEv
                     .and_then(serde_json::Value::as_u64)
                     .expect("calls key") as u32;
             }
-            Ok(_) => continue,
             Err(_) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20))
             }

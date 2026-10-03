@@ -316,7 +316,7 @@ fn tokens_from(
     )
 }
 
-/// ---- time helpers (no chrono: the shapes here are fixed enough) --------------
+// ---- time helpers (no chrono: the shapes here are fixed enough) --------------
 
 /// Parse `2026-09-22T12:17:09.815Z` / `...+02:00` into Unix seconds.
 pub(crate) fn parse_iso_rfc3339(text: &str) -> Option<i64> {
