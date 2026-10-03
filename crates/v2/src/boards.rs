@@ -83,6 +83,13 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
         .as_deref()
         .filter(|img| !img.is_empty())
         .and_then(|img| assets.import_data_url(img));
+    // Dual-state img2: rare in existing DBs, but the editor can set it
+    // and the desktop preview honors it, so carry it the same way.
+    let asset_hash2 = row
+        .img2
+        .as_deref()
+        .filter(|img| !img.is_empty())
+        .and_then(|img| assets.import_data_url(img));
     let mut params: Value = row
         .options
         .as_deref()
@@ -105,9 +112,8 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
             interactions,
             style: Some(style(row, &legacy)),
             web_package: None,
-            // Dual-state `img2` is empty in every known DB; if it ever
-            // matters, extend the manifest instead of guessing.
             asset_hash,
+            asset_hash2,
         },
     }
 }
@@ -233,6 +239,15 @@ fn style(row: &ButtonRow, legacy: &Value) -> Style {
         // Legacy shape column is an int (0 = default); pass non-defaults
         // through so the client can render them.
         shape: (row.shape != 0).then(|| row.shape.to_string()),
+        // The editor edits these against the DB columns; legacy tablets
+        // read the same values out of the mapper payload (parity oracle:
+        // crates/v2/tests/parity.rs).
+        border_color: non_empty(row.border_color.as_deref()),
+        border_color2: non_empty(row.border_color2.as_deref()),
+        icon_color: non_empty(row.icon_color.as_deref()),
+        icon_color2: non_empty(row.icon_color2.as_deref()),
+        title_color: non_empty(row.title_color.as_deref()),
+        title_color2: non_empty(row.title_color2.as_deref()),
     }
 }
 

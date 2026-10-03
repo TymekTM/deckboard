@@ -148,7 +148,11 @@ Boards are data. One board:
                "kind": "button", "params": {},
                "state": { "channel": "ext.speaker-muted", "shape": "scalar" },
                "interactions": ["tap"],
-               "style": { "color": "#F5AB35", "icon": "\uf026", "title": "Mute" } } ] }
+               "style": { "color": "#F5AB35", "color2": "#ED4245",
+                          "icon": "\uf026", "icon2": "\uf028", "icon_family": "fas",
+                          "title": "Mute", "title_color": "#ffcc00",
+                          "border_color": "#101010", "icon_color": "#ffe0e0" },
+               "asset_hash": "<sha-256 hex>", "asset_hash2": "<sha-256 hex>" } ] }
 ```
 
 - Placement is on the 96px cell grid (`x`,`y`,`w`,`h`, integers), tiles may
@@ -160,12 +164,26 @@ Boards are data. One board:
   photo, video). Legacy `img`/`img2` data URLs are converted to store
   entries on the fly when the server builds a sync; tiles whose image
   cannot be converted simply omit it.
+- `asset_hash2`: content hash of the active-state image (legacy `img2`),
+  shown instead of `asset_hash` while the tile's channel reports its
+  active value. Optional; absent means the tile has no second image.
 - `style`: `color`/`color2`/`icon`/`icon2`/`icon_family` (`fas`|`fab`,
   resolved glyph fonts)/`title`/`shape` - all optional, resolved
   server-side the same way the legacy mapper resolves them (DB value →
   type default → fallback). `color2`/`icon2` are the active-state pair:
   the client swaps to them while the tile's channel reports its active
   value (e.g. `"ON"`).
+- Style parity fields (added 2026-10, 012 C5): `border_color`,
+  `icon_color`, `title_color` and their `*_color2` active-state pairs.
+  All optional; a client that does not know them keeps its defaults
+  (no border, white glyph/title).
+- **State-2 fallback rule (one rule for every field)**: while the tile
+  is in its active state, each state-2 field (`color2`, `icon2`,
+  `border_color2`, `icon_color2`, `title_color2`, `asset_hash2`, ...)
+  falls back to its state-1 counterpart **per field** when absent -
+  `active ? (field2 || field1) : field1`. A fully absent state-2 set
+  leaves the tile visually unchanged between states; a partially set
+  one changes only the fields that are set.
 - `interactions` lists the gestures the tile accepts (section 6).
 
 ### boards.sync (server → client, full snapshot)
@@ -327,6 +345,11 @@ disconnect and retries as usual.
   dropped, unknown enum values degrade (`WidgetKind::Other`,
   `StateShape::Other`).
 - `PROTOCOL_VERSION` bumps only for breaking envelope changes.
+- Change log: 2026-10 (012 C5) added the optional style parity fields
+  `border_color`/`icon_color`/`title_color` (+ `*_color2` pairs) to
+  `style` and `asset_hash2` to the tile manifest. Purely additive: old
+  servers never send them and old clients drop unknown keys, so `v`
+  stays 2.
 - Wire compatibility is pinned by golden fixtures
   (`crates/proto/tests/fixtures/*.json`): Rust round-trips them and the
   Kotlin unit test parses the same files. Both must stay green.
