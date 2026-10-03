@@ -1,5 +1,6 @@
 <script setup>
-import { reactive } from "vue";
+import { computed, reactive } from "vue";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 
 const props = defineProps({
@@ -14,6 +15,15 @@ const form = reactive({
   height: props.board?.height ?? 4,
   background: props.board?.background ?? "#437072",
 });
+
+// Overlay click only closes when nothing was edited (012 A9); the same
+// ask()-confirmation the board context menu uses guards Clear/Delete.
+const initialSnapshot = JSON.stringify({ ...form });
+const dirty = computed(() => JSON.stringify({ ...form }) !== initialSnapshot);
+
+function overlayClose() {
+  if (!dirty.value) emit("close");
+}
 
 async function save() {
   if (props.mode === "create") {
@@ -37,18 +47,28 @@ async function save() {
 }
 
 async function clearBoard() {
+  const ok = await ask(`Clear every tile from "${props.board.name}"?`, {
+    title: "Clear board",
+    kind: "warning",
+  });
+  if (!ok) return;
   await api.clearBoard(props.board.id);
   emit("saved");
 }
 
 async function deleteBoard() {
+  const ok = await ask(`Delete board "${props.board.name}"?`, {
+    title: "Delete board",
+    kind: "warning",
+  });
+  if (!ok) return;
   await api.deleteBoard(props.board.id);
   emit("saved");
 }
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
+  <div class="overlay" @click.self="overlayClose">
     <div class="modal">
       <div class="modal-head" :style="{ '--canvas-head': form.background }">
         {{ mode === "create" ? "New board" : "Edit board" }}

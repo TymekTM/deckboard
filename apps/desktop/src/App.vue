@@ -397,6 +397,13 @@ async function tileEdited(button) {
 }
 
 async function tileDeleted(tile) {
+  // single confirmation for both entry points: the context menu and the
+  // edit dialog's Delete button (012 A9)
+  const ok = await ask(`Delete tile "${tile.title || tile.type}"?`, {
+    title: "Delete tile",
+    kind: "warning",
+  });
+  if (!ok) return;
   await api.deleteButton(tile.id, tile.board_id);
   editingTile.value = null;
   await loadBoards();
