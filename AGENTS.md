@@ -32,6 +32,18 @@ Passing one surface is not completion. A change that edits only the layer
 where the bug was found is suspect by default: check what the other two
 surfaces do with the same field before assuming they need nothing.
 
+## Building the desktop app
+
+A distributable `pulpit-desktop.exe` must come from `npx tauri build`
+(--no-bundle for the raw exe) run in `apps/desktop`. A plain
+`cargo build --release -p pulpit-desktop` compiles fine but bakes the
+dev frontend URL (`http://localhost:5173`) as the active page - the
+window opens with `ERR_CONNECTION_REFUSED` because nothing serves the
+dev server. The string is present in every binary either way, so greping
+the exe for it proves nothing; verify by running it. Side-by-side
+profiling runs opt out of the single-instance guard with
+`PULPIT_NO_SINGLE_INSTANCE=1` (plus `PULPIT_PORT` and `PULPIT_DB`).
+
 ## Carry fields through both wire builders
 
 New or changed tile fields must reach BOTH wire builders: the legacy
