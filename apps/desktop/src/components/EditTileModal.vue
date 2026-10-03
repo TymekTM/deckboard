@@ -1,7 +1,7 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { CATALOG } from "../catalog";
+import { CATALOG, parsePlanWindows, setPlanWindows } from "../catalog";
 import { api } from "../api";
 import SelectField from "./SelectField.vue";
 import ActionPicker from "./ActionPicker.vue";
@@ -55,25 +55,15 @@ const form = reactive(
 
 // AI plan tile: which usage windows render, stored in the options column
 // as "windows:5h,week" (no token = both). Applies only to ai-plan-limits.
+// The token parses through the shared catalog helper (DESK-10) - the
+// status tile filters rows with the same function.
 const isPlanTile = computed(() => form.type === "ai-plan-limits");
-const planWindows = computed(() => {
-  const match = String(form.options || "").match(/(?:^|;)windows:([^;]*)/);
-  const want = match
-    ? match[1].split(",").map((s) => s.trim())
-    : ["5h", "week"];
-  return { five: want.includes("5h"), week: want.includes("week") };
-});
+const planWindows = computed(() => parsePlanWindows(form.options));
 function setPlanWindow(key, event) {
-  const next = { ...planWindows.value, [key]: event.target.checked };
-  const parts = [];
-  if (next.five) parts.push("5h");
-  if (next.week) parts.push("week");
-  const rest = String(form.options || "")
-    .replace(/(^|;)windows:[^;]*/g, "")
-    .replace(/^;+|;+$/g, "")
-    .replace(/;;+/g, ";");
-  const token = `windows:${parts.join(",")}`;
-  form.options = rest ? `${rest};${token}` : token;
+  form.options = setPlanWindows(form.options, {
+    ...planWindows.value,
+    [key]: event.target.checked,
+  });
 }
 
 // ---- action catalog (static groups + live extension inputs) ----------------
@@ -228,9 +218,16 @@ function applyFields() {
     if (f.kind === "number") {
       if (raw !== "" && raw !== null && !Number.isNaN(Number(raw))) {
         obj[f.key] = Number(raw);
+      } else if (fieldVisible(f) && (raw === "" || raw === null)) {
+        // a cleared visible field drops its key; skipping it would keep
+        // the value pre-seeded from the old command, so the tile kept
+        // targeting the old scene/value while the input looked empty
+        delete obj[f.key];
       }
     } else if (raw !== "") {
       obj[f.key] = raw;
+    } else if (fieldVisible(f)) {
+      delete obj[f.key];
     }
   }
   form.command = JSON.stringify(obj);
@@ -328,6 +325,9 @@ function stepTypeMeta(type) {
 // ---- image -----------------------------------------------------------------
 
 const imageError = ref("");
+// img/img2 never enter the dirty snapshot below (they are multi-MB base64
+// strings); pickImage is their only writer, so it flips this flag instead
+const imagesDirty = ref(false);
 async function pickImage(field) {
   const path = await open({
     multiple: false,
@@ -335,7 +335,9 @@ async function pickImage(field) {
   });
   if (!path) return;
   try {
-    form[field] = await api.readImageData(path);
+    const data = await api.readImageData(path);
+    if (data !== form[field]) imagesDirty.value = true;
+    form[field] = data;
   } catch (e) {
     imageError.value = String(e);
   }
@@ -355,16 +357,22 @@ function removeTile() {
 // an accidental click outside must not discard a configured tile. The
 // snapshot covers every writer: the form copy plus the command-mapping
 // reactives (fields, steps, boardId) that merge into form.command on save.
+// img/img2 are excluded - stringifying up to ~20 MB of base64 on every
+// keystroke stutters the dialog (DESK-04); those fields only change
+// through pickImage, which flips imagesDirty above.
 function formSnapshot() {
+  const plain = { ...form };
+  delete plain.img;
+  delete plain.img2;
   return JSON.stringify({
-    form: { ...form },
+    form: plain,
     fields: { ...fields },
     steps: steps.value,
     boardId: boardId.value,
   });
 }
 const initialSnapshot = formSnapshot();
-const dirty = computed(() => formSnapshot() !== initialSnapshot);
+const dirty = computed(() => formSnapshot() !== initialSnapshot || imagesDirty.value);
 
 function overlayClose() {
   if (!dirty.value) emit("close");
@@ -399,6 +407,10 @@ function toggleProp(key) {
     pickImage("img");
     return;
   }
+  // fixed-mode catalog entries (speaker-volume slider, ai-* status/graph)
+  // lock the Tile Mode row: save() forces the catalog mode back, so the
+  // popover would offer choices that can never take effect (DESK-11)
+  if (key === "mode" && catalogEntry.value?.mode) return;
   openProp.value = openProp.value === key ? null : key;
 }
 function closeProps() {

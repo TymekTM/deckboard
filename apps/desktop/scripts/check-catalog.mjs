@@ -4,10 +4,20 @@
 //   1. every dual-flagged entry (second-state styling editable) has a
 //      STATE_BINDINGS binding, so nobody ships a toggle tile without
 //      deciding what drives its second state;
-//   2. every `app` binding names the state key it reads (`key`) - a keyless
-//      app binding would truthiness-test the whole app state object and
-//      light every tile of that integration on any push (the OBS bug).
-import { CATALOG, STATE_BINDINGS } from "../src/catalog.js";
+//   2. no binding uses the `app` state lane - no host ever emits
+//      APP_OBS/APP_TWITCH/... events (integrations push per-key custom
+//      values instead), so an `app` binding can never see a value and
+//      would dead-code the tile's live state (DESK-09);
+//   3. binding keys point at real catalog entries (catches renames);
+//   4. the plan-windows options token round-trips through
+//      parsePlanWindows/setPlanWindows, the one shared by the edit
+//      dialog and the status tile's row filter (DESK-10).
+import {
+  CATALOG,
+  STATE_BINDINGS,
+  parsePlanWindows,
+  setPlanWindows,
+} from "../src/catalog.js";
 
 const failures = [];
 
@@ -18,9 +28,9 @@ for (const entry of dualEntries) {
     failures.push(`dual entry "${entry.value}" has no STATE_BINDINGS entry`);
     continue;
   }
-  if (binding.app && !binding.key && !binding.watch) {
+  if (binding.app) {
     failures.push(
-      `binding "${entry.value}" reads the whole "${binding.app}" state object; add the state key it should compare`,
+      `binding "${entry.value}" uses the dead app-state lane ("${binding.app}"); no APP_* emitter exists - use watch or an empty binding`,
     );
   }
 }
@@ -30,6 +40,42 @@ for (const type of Object.keys(STATE_BINDINGS)) {
   if (!CATALOG.some((c) => c.value === type) && !type.startsWith("vmod-")) {
     // vmod-* arrive as runtime extension inputs, not static catalog rows
     failures.push(`STATE_BINDINGS["${type}"] matches no catalog entry`);
+  }
+}
+
+// plan-windows token: what the dialog writes is what the tile parses
+for (const [options, want] of [
+  ["", { five: true, week: true }],
+  ["windows:5h,week", { five: true, week: true }],
+  ["windows:5h", { five: true, week: false }],
+  ["windows:week", { five: false, week: true }],
+  ["windows:", { five: false, week: false }],
+  ["windows: 5h , week ", { five: true, week: true }],
+  ["other:x;windows:week", { five: false, week: true }],
+  ["windows:not-a-window", { five: false, week: false }],
+]) {
+  const got = parsePlanWindows(options);
+  if (got.five !== want.five || got.week !== want.week) {
+    failures.push(
+      `parsePlanWindows(${JSON.stringify(options)}) -> {five: ${got.five}, week: ${got.week}}, want {five: ${want.five}, week: ${want.week}}`,
+    );
+  }
+}
+for (const windows of [
+  { five: true, week: true },
+  { five: true, week: false },
+  { five: false, week: true },
+  { five: false, week: false },
+]) {
+  const written = setPlanWindows("other:x", windows);
+  const back = parsePlanWindows(written);
+  if (back.five !== windows.five || back.week !== windows.week) {
+    failures.push(
+      `plan windows do not round-trip: ${JSON.stringify(windows)} -> ${written} -> {five: ${back.five}, week: ${back.week}}`,
+    );
+  }
+  if (!written.includes("other:x")) {
+    failures.push(`setPlanWindows dropped sibling tokens: ${written}`);
   }
 }
 

@@ -38,9 +38,10 @@ const VM_BUS_INDEX = [
 ].map((label, i) => ({ value: i, label }));
 
 // Voicemeeter gain fader range in dB; vm sliders map 0..1 onto it. Must
-// match pulpit_vm::GAIN_MIN / GAIN_MAX on the backend.
-export const VM_GAIN_MIN = -60;
-export const VM_GAIN_MAX = 12;
+// match pulpit_vm::GAIN_MIN / GAIN_MAX on the backend. Only the reset
+// position below leaves this file.
+const VM_GAIN_MIN = -60;
+const VM_GAIN_MAX = 12;
 // double-tap reset position: 0 dB unity gain on the fader
 export const VM_SLIDER_RESET = (0 - VM_GAIN_MIN) / (VM_GAIN_MAX - VM_GAIN_MIN);
 
@@ -416,45 +417,49 @@ export const CATALOG = [
   },
 ];
 
-// Fallback style/config for a tile type (static catalog only; extension
-// inputs are merged at runtime via list_known_inputs).
-export function findTypeMeta(type) {
-  return CATALOG.find((c) => c.value === type) || null;
-}
-
 // State bindings, ported from the original's buttonStyles + TOGGLE_BUTTONS
 // tables (crates/legacy/assets/buttonprops.json is the authoritative copy
 // of the toggle keys): which live value decides whether a tile shows its
 // second state. `watch` keys into customValues (APP_CUSTOM_VALUE pushes),
-// `app`/`key` into per-app state (APP_OBS etc.), optional `cmd` names the
-// command-JSON field compared against the pushed value (defaults to `key`).
+// optional `cmd` names the command-JSON field compared against the pushed
+// value (defaults to `key`).
+// The original's per-app state lane (APP_OBS/APP_TWITCH/APP_VMOD/...
+// events feeding `app`-scoped bindings) is deliberately gone: no host
+// ever emits those events - extensions, sysinfo, aidev and discord all
+// push per-key custom values, the `watch` style - so every `app` binding
+// evaluated against an empty map and its dual tiles only ever used the
+// session tap-flip (DESK-09). check-catalog.mjs rejects `app` bindings
+// so the lane does not sneak back without an emitter.
 // Every dual-flagged catalog entry MUST have a binding here - the empty
 // binding is a conscious "tap flip until the integration pushes state"
 // decision, and scripts/check-catalog.mjs enforces the pairing.
 export const STATE_BINDINGS = {
   "speaker-device": { watch: "speaker-device", key: "speaker" },
-  // OBS truthiness fix (012 C5): these used to read the whole app state
-  // object, so any push lit every OBS tile (Boolean({}) === true); they
-  // compare their own key now, like the original's toggle_key table.
-  "obs-studio-mode": { app: "obs", key: "studioMode" },
-  "obs-scene": { app: "obs", key: "activeScene", cmd: "scene" },
-  "obs-source": { app: "obs", key: "activeSources", cmd: "source" },
-  "obs-device-audio": { app: "obs", key: "activeDevices", cmd: "device" },
-  "obs-filter": { app: "obs", key: "activeFilters", cmd: "filter" },
-  "slobs-scene": { app: "slobs", key: "activeScene", cmd: "scene" },
-  "slobs-source": { app: "slobs", key: "activeSources", cmd: "source" },
-  "slobs-device-audio": { app: "slobs", key: "activeDevices", cmd: "device" },
-  "xsplit-scene": { app: "xsplit", key: "activeScene", cmd: "scene" },
-  "twitch-slow": { app: "twitch", key: "slow" },
-  "twitch-follow-only": { app: "twitch", key: "followerOnly" },
-  "twitch-subs-only": { app: "twitch", key: "subscriberOnly" },
-  "twitch-emote-only": { app: "twitch", key: "emoteOnly" },
-  "discord-voice-channel": { app: "discord", key: "channel" },
-  "discord-toggle-mute": { app: "discord", key: "mute" },
-  "discord-toggle-deaf": { app: "discord", key: "deaf" },
-  "vmod-voice": { app: "vmod", key: "voice" },
-  "vmod-hearmyself": { app: "vmod", key: "hearmyself" },
-  "vmod-voicechanger": { app: "vmod", key: "voicechanger" },
+  // obs/slobs/xsplit/twitch/discord integrations have no live push in
+  // Pulpit (the JS-app extensions that owned the app-state lane are
+  // gone; exec pushes at most a per-key custom value): their dual tiles
+  // fall back to the session tap flip, like the vm toggles below.
+  "obs-studio-mode": {},
+  "obs-scene": {},
+  "obs-source": {},
+  "obs-device-audio": {},
+  "obs-filter": {},
+  "slobs-scene": {},
+  "slobs-source": {},
+  "slobs-device-audio": {},
+  "xsplit-scene": {},
+  "twitch-slow": {},
+  "twitch-follow-only": {},
+  "twitch-subs-only": {},
+  "twitch-emote-only": {},
+  "discord-voice-channel": {},
+  "discord-toggle-mute": {},
+  "discord-toggle-deaf": {},
+  // vmod-* tiles arrive as runtime extension inputs, not catalog rows;
+  // same tap-flip decision
+  "vmod-voice": {},
+  "vmod-hearmyself": {},
+  "vmod-voicechanger": {},
   // Voicemeeter strip/bus parameter toggles have no live push yet
   // (pulpit_vm is fire-and-forget), so the tap flip decides until a
   // state source exists - an empty binding records that decision.
@@ -465,9 +470,13 @@ export const STATE_BINDINGS = {
 // null = the live state is unknown (nothing pushed yet), so the tile keeps
 // its current visual state; otherwise boolean. Mirrors the original
 // ToggleButton isActive(): boolean state wins, arrays/strings compare
-// against the command payload. `cmd` is the pre-parsed tile.command - the
-// caller owns the parse (once per command change, not per call).
-export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
+// against the command payload when the binding names a field. Bindings
+// without a comparison field mean the pushed value itself carries the
+// state and follow the mobile isActiveValue (MOB-10): "ON"/"1" light the
+// second state, "OFF"/"0"/"" and every other push read inactive.
+// `cmd` is the pre-parsed tile.command - the caller owns the parse (once
+// per command change, not per call).
+export function stateActive(tile, cmd, customValues, typeMeta) {
   const binding = STATE_BINDINGS[tile.type];
   let value;
   if (tile.type === "vol") {
@@ -475,9 +484,6 @@ export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
     value = customValues["speaker-muted"];
   } else if (binding?.watch) {
     value = customValues[binding.watch];
-  } else if (binding?.app) {
-    const state = appStates[binding.app];
-    value = binding.key ? state?.[binding.key] : state;
   } else if (typeMeta?.[tile.type]?.mode === "custom-value") {
     // extension tiles declared as custom-value follow their variable,
     // keyed by the action value (the original's toggle_key fallback)
@@ -486,13 +492,26 @@ export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
     return null;
   }
   // the command field to compare lives under `cmd` when the state key
-  // differs from it (obs-scene: activeScene vs command {scene: ...})
+  // differs from it (speaker-device: watched device id vs command
+  // {speaker: ...})
   const cmdValue = cmd[binding?.cmd || binding?.key];
   if (typeof value === "boolean") return value;
-  if (value == null || value === false || value === "") return null;
-  if (Array.isArray(value)) return value.includes(cmdValue);
-  if (typeof value === "string") return value === cmdValue;
-  return Boolean(value);
+  if (value == null) return null;
+  if (cmdValue !== undefined) {
+    // bound comparison: arrays/strings compare against the command
+    // payload, an emptied value reads unknown
+    if (value === false || value === "") return null;
+    if (Array.isArray(value)) return value.includes(cmdValue);
+    if (typeof value === "string") return value === cmdValue;
+    return Boolean(value);
+  }
+  // unbound (vol_mute, custom-value toggles): same push must light the
+  // tile on both surfaces, so mirror the mobile isActiveValue - only
+  // the strings "ON"/"1" count as active. Today's producers push
+  // booleans (speaker-muted) and ON/OFF strings (discord's
+  // _labelMuteDeaf); numbers/objects never represent toggle state.
+  if (typeof value === "string") return value === "ON" || value === "1";
+  return false;
 }
 
 // Grid geometry of the original editor: 96 px cell, 100 px row.
@@ -512,4 +531,44 @@ export function boardDim(value, fallback) {
   const n = Math.trunc(Number(value));
   if (!Number.isFinite(n)) return fallback;
   return Math.min(MAX_BOARD_DIM, Math.max(1, n));
+}
+
+// Clamp to inclusive bounds. Used to live as private copies in App.vue
+// and GridEditor.vue; one home here so the bounds logic cannot drift
+// (DESK-10).
+export function clamp(v, min, max) {
+  return Math.min(max, Math.max(min, v));
+}
+
+// ---- plan usage windows (ai-plan-limits tiles) ------------------------------
+
+// Which usage windows a plan tile renders, stored in its options column as
+// a "windows:5h,week" token (no token = both windows). The edit dialog
+// writes the token (checkbox rows) and the status tile reads it (row
+// filter), so both sides parse through this one function - the regex and
+// the want-list used to be duplicated in EditTileModal.vue and
+// TileCell.vue and could drift silently (DESK-10).
+export function parsePlanWindows(options) {
+  const match = String(options || "").match(/(?:^|;)windows:([^;]*)/);
+  const want = match
+    ? match[1].split(",").map((s) => s.trim()).filter(Boolean)
+    : null;
+  return {
+    five: !want || want.includes("5h"),
+    week: !want || want.includes("week"),
+  };
+}
+
+// Rewrite (or append) the windows token in an options string, preserving
+// any sibling tokens: "flag:x;windows:5h" + {week only} -> "flag:x;windows:week".
+export function setPlanWindows(options, windows) {
+  const rest = String(options || "")
+    .replace(/(^|;)windows:[^;]*/g, "")
+    .replace(/^;+|;+$/g, "")
+    .replace(/;;+/g, ";");
+  const parts = [];
+  if (windows.five) parts.push("5h");
+  if (windows.week) parts.push("week");
+  const token = `windows:${parts.join(",")}`;
+  return rest ? `${rest};${token}` : token;
 }
