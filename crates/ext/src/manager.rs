@@ -151,6 +151,9 @@ pub struct ExtManager {
     /// watching: zero clients means the pushed values go unseen, so
     /// ticking at full speed would be pure idle CPU.
     active_clients: Arc<AtomicUsize>,
+    /// How long a runtime spawn may take before the package is reported
+    /// failed (see [`JS_LOAD_TIMEOUT`]).
+    spawn_timeout: Duration,
 }
 
 /// When no clients are connected, timer ticks wait at least this long,
@@ -162,10 +165,25 @@ impl ExtManager {
     /// configs come from `settings.json` (same file the original desktop
     /// app writes: `{ "<package>": {...} }`). `skip` names packages
     /// replaced by native implementations - their JS never loads.
+    ///
+    /// A runtime spawn may take up to [`JS_LOAD_TIMEOUT`] before the
+    /// package is reported failed.
     pub fn load(
         dir: &std::path::Path,
         settings: &Value,
         skip: &[String],
+    ) -> (Arc<ExtManager>, tokio_mpsc::UnboundedReceiver<ExtEvent>) {
+        Self::load_with_spawn_timeout(dir, settings, skip, JS_LOAD_TIMEOUT)
+    }
+
+    /// [`load`][Self::load] with an explicit spawn timeout. The 30 s
+    /// production bound is impractical in tests, which use milliseconds
+    /// to prove the wedged-package paths.
+    pub fn load_with_spawn_timeout(
+        dir: &std::path::Path,
+        settings: &Value,
+        skip: &[String],
+        spawn_timeout: Duration,
     ) -> (Arc<ExtManager>, tokio_mpsc::UnboundedReceiver<ExtEvent>) {
         let (events_tx, events_rx) = tokio_mpsc::unbounded_channel();
         let entries: Vec<ExtEntry> = Vec::new();
@@ -181,6 +199,7 @@ impl ExtManager {
                     inputs: all_inputs,
                     events_tx,
                     active_clients,
+                    spawn_timeout,
                 }),
                 events_rx,
             );
@@ -253,7 +272,14 @@ impl ExtManager {
                     // metadata known; still need the live runtime (thread
                     // spawn, no JS on this thread)
                     tracing::info!(package = %package, "timer extension from metadata cache - loading runtime");
-                    match spawn_runtime(&path, &package, &configs, &events_tx, &active_clients) {
+                    match spawn_runtime(
+                        &path,
+                        &package,
+                        &configs,
+                        &events_tx,
+                        &active_clients,
+                        spawn_timeout,
+                    ) {
                         Ok(dispatch) => Plan::Resident {
                             meta,
                             dispatch: Some(dispatch),
@@ -402,6 +428,7 @@ impl ExtManager {
                 inputs: all_inputs,
                 events_tx,
                 active_clients: active_clients.clone(),
+                spawn_timeout,
             }),
             events_rx,
         )
@@ -443,7 +470,10 @@ impl ExtManager {
 
     /// Execute an action on whichever extension declared it. Blocks until
     /// the extension thread replies (it runs the JS synchronously). Lazy
-    /// extensions pay a one-time runtime spawn here.
+    /// extensions pay a one-time runtime spawn here. The residence lock is
+    /// never held across the blocking dispatch or the spawn: a wedged
+    /// extension stalls only its own action, not `summary` or another
+    /// package's promotion.
     pub fn execute(&self, action: &str, command: Option<&str>) -> Result<(), ManagerError> {
         let args: Value = match command {
             Some(c) if !c.trim().is_empty() => {
@@ -455,33 +485,72 @@ impl ExtManager {
             if !entry.actions.iter().any(|a| a == action) {
                 continue;
             }
-            let mut residence = entry.residence.lock().unwrap();
-            match &mut *residence {
-                Residence::Resident(dispatch) => {
-                    return self.dispatch_to(dispatch, action, args);
+            // snapshot what to do without holding the lock through the
+            // slow parts below
+            enum Snap {
+                Live(mpsc::Sender<ExtRequest>),
+                Lazy { path: PathBuf, configs: Value },
+                Failed(String),
+            }
+            let snap = {
+                let mut residence = entry.residence.lock().unwrap();
+                match &mut *residence {
+                    Residence::Resident(dispatch) => Snap::Live(dispatch.clone()),
+                    Residence::Lazy { path, configs } => Snap::Lazy {
+                        path: path.clone(),
+                        configs: configs.clone(),
+                    },
+                    Residence::Failed(error) => Snap::Failed(error.clone()),
                 }
-                Residence::Lazy { path, configs } => {
-                    tracing::info!(package = %entry.package, "first execute - spawning extension runtime");
-                    let dispatch = spawn_runtime(
-                        path,
-                        &entry.package,
-                        configs,
-                        &self.events_tx,
-                        &self.active_clients,
-                    )?;
-                    *residence = Residence::Resident(dispatch);
-                    let Residence::Resident(dispatch) = &*residence else {
-                        unreachable!("just assigned Resident")
-                    };
-                    return self.dispatch_to(dispatch, action, args);
-                }
-                Residence::Failed(error) => {
+            };
+            let dispatch = match snap {
+                Snap::Live(dispatch) => dispatch,
+                Snap::Failed(error) => {
                     return Err(ManagerError::Host(HostError::Other(format!(
                         "extension {} is disabled (load error: {})",
                         entry.package, error
                     ))));
                 }
-            }
+                Snap::Lazy { path, configs } => {
+                    tracing::info!(package = %entry.package, "first execute - spawning extension runtime");
+                    let dispatch = match spawn_runtime(
+                        &path,
+                        &entry.package,
+                        &configs,
+                        &self.events_tx,
+                        &self.active_clients,
+                        self.spawn_timeout,
+                    ) {
+                        Ok(dispatch) => dispatch,
+                        Err(e) => {
+                            // A failed spawn disables the package for the
+                            // rest of the session: the load already had
+                            // its timeout, so a later execute must fail
+                            // fast instead of spawning (and waiting)
+                            // again. A racing execute that promoted the
+                            // entry meanwhile keeps its live runtime.
+                            let mut residence = entry.residence.lock().unwrap();
+                            if matches!(&*residence, Residence::Lazy { .. }) {
+                                warn!(package = %entry.package, error = %e, "extension failed to load - disabled");
+                                *residence = Residence::Failed(e.to_string());
+                            }
+                            return Err(e.into());
+                        }
+                    };
+                    // a racing execute may have promoted the entry first;
+                    // whoever lost drops its extra channel and the loser
+                    // thread exits when its receiver disconnects
+                    let mut residence = entry.residence.lock().unwrap();
+                    match &mut *residence {
+                        Residence::Resident(existing) => existing.clone(),
+                        _ => {
+                            *residence = Residence::Resident(dispatch.clone());
+                            dispatch
+                        }
+                    }
+                }
+            };
+            return self.dispatch_to(&dispatch, action, args);
         }
         Err(ManagerError::Host(HostError::Other(format!(
             "no extension handles action '{action}'"
@@ -600,10 +669,12 @@ fn load_extension(
     events_tx: &tokio_mpsc::UnboundedSender<ExtEvent>,
     active_clients: &Arc<AtomicUsize>,
 ) -> Result<(ProbeMeta, Option<mpsc::Sender<ExtRequest>>), HostError> {
-    // extract to a temp dir before spawning (plain IO, thread-agnostic)
-    let source = crate::source::PackageSource::open(path, package.to_string())
-        .map_err(|e| HostError::Other(e.to_string()))?;
-    let root = source.root;
+    // extract to a temp dir before spawning (plain IO, thread-agnostic);
+    // the keep-guard rides into the thread so the extraction outlives
+    // the runtime reading from it
+    let (root, keep) = crate::source::PackageSource::open(path, package.to_string())
+        .map_err(|e| HostError::Other(e.to_string()))?
+        .into_root();
     let package = package.to_string();
     let configs = configs.clone();
     let events_tx = events_tx.clone();
@@ -616,22 +687,91 @@ fn load_extension(
     std::thread::Builder::new()
         .name(format!("ext-{package}"))
         .stack_size(64 * 1024 * 1024)
-        .spawn(move || match ExtRuntime::load(&root, &package, &configs) {
-            Ok(mut rt) => {
-                let has_timers = rt.has_timers();
-                let meta = ProbeMeta {
-                    name: rt.name.clone(),
-                    actions: rt.actions.clone(),
-                    inputs: rt.inputs.clone(),
-                    has_timers,
-                };
-                // drain setValue/interval events the load itself produced
-                for ev in rt.drain() {
-                    ExtManager::forward(&events_tx, ev);
+        .spawn(move || {
+            let _keep = keep;
+            match ExtRuntime::load(&root, &package, &configs) {
+                Ok(mut rt) => {
+                    let has_timers = rt.has_timers();
+                    let meta = ProbeMeta {
+                        name: rt.name.clone(),
+                        actions: rt.actions.clone(),
+                        inputs: rt.inputs.clone(),
+                        has_timers,
+                    };
+                    // drain setValue/interval events the load itself produced
+                    for ev in rt.drain() {
+                        ExtManager::forward(&events_tx, ev);
+                    }
+                    if has_timers {
+                        let (req_tx, req_rx) = mpsc::channel();
+                        if res_tx.send(Ok((meta, Some(req_tx.clone())))).is_ok() {
+                            runtime_loop(
+                                ExtSlot {
+                                    root,
+                                    package,
+                                    configs,
+                                    live: Some(rt),
+                                },
+                                req_rx,
+                                events_tx,
+                                active_clients,
+                            );
+                        }
+                    } else {
+                        let _ = res_tx.send(Ok((meta, None)));
+                        // runtime drops: freed JS pages stay committed in the
+                        // OS heap, which is exactly why lazy packages must not
+                        // be re-probed on every start (the metadata cache)
+                    }
                 }
-                if has_timers {
-                    let (req_tx, req_rx) = mpsc::channel();
-                    if res_tx.send(Ok((meta, Some(req_tx.clone())))).is_ok() {
+                Err(e) => {
+                    let _ = res_tx.send(Err(e));
+                }
+            }
+        })
+        .map_err(|e| HostError::Other(e.to_string()))?;
+
+    res_rx
+        .recv()
+        .map_err(|_| HostError::Other("extension thread died".into()))?
+}
+
+/// How long one extension's JS may take to load (probe at startup and
+/// lazy first-execute spawns). Beyond it the package is reported failed:
+/// a wedged extension must not stall startup or a tile tap forever.
+const JS_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Start a persistent runtime thread (cached timer extensions and lazy
+/// first-executes). Blocks until the runtime is ready, at most
+/// `load_timeout`: a package whose top-level JS never finishes loading
+/// errors instead of pinning the caller forever.
+fn spawn_runtime(
+    path: &Path,
+    package: &str,
+    configs: &Value,
+    events_tx: &tokio_mpsc::UnboundedSender<ExtEvent>,
+    active_clients: &Arc<AtomicUsize>,
+    load_timeout: Duration,
+) -> Result<mpsc::Sender<ExtRequest>, HostError> {
+    let (root, keep) = crate::source::PackageSource::open(path, package.to_string())
+        .map_err(|e| HostError::Other(e.to_string()))?
+        .into_root();
+    let package = package.to_string();
+    let configs = configs.clone();
+    let events_tx = events_tx.clone();
+    let active_clients = active_clients.clone();
+
+    let (req_tx, req_rx) = mpsc::channel::<ExtRequest>();
+    let (res_tx, res_rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(format!("ext-{package}"))
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            // the extraction must outlive this thread
+            let _keep = keep;
+            match ExtRuntime::load(&root, &package, &configs) {
+                Ok(rt) => {
+                    if res_tx.send(Ok(())).is_ok() {
                         runtime_loop(
                             ExtSlot {
                                 root,
@@ -644,71 +784,17 @@ fn load_extension(
                             active_clients,
                         );
                     }
-                } else {
-                    let _ = res_tx.send(Ok((meta, None)));
-                    // runtime drops: freed JS pages stay committed in the
-                    // OS heap, which is exactly why lazy packages must not
-                    // be re-probed on every start (the metadata cache)
                 }
-            }
-            Err(e) => {
-                let _ = res_tx.send(Err(e));
+                Err(e) => {
+                    let _ = res_tx.send(Err(e));
+                }
             }
         })
         .map_err(|e| HostError::Other(e.to_string()))?;
 
     res_rx
-        .recv()
-        .map_err(|_| HostError::Other("extension thread died".into()))?
-}
-
-/// Start a persistent runtime thread (cached timer extensions and lazy
-/// first-executes). Blocks until the runtime is ready.
-fn spawn_runtime(
-    path: &Path,
-    package: &str,
-    configs: &Value,
-    events_tx: &tokio_mpsc::UnboundedSender<ExtEvent>,
-    active_clients: &Arc<AtomicUsize>,
-) -> Result<mpsc::Sender<ExtRequest>, HostError> {
-    let source = crate::source::PackageSource::open(path, package.to_string())
-        .map_err(|e| HostError::Other(e.to_string()))?;
-    let root = source.root;
-    let package = package.to_string();
-    let configs = configs.clone();
-    let events_tx = events_tx.clone();
-    let active_clients = active_clients.clone();
-
-    let (req_tx, req_rx) = mpsc::channel::<ExtRequest>();
-    let (res_tx, res_rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name(format!("ext-{package}"))
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || match ExtRuntime::load(&root, &package, &configs) {
-            Ok(rt) => {
-                if res_tx.send(Ok(())).is_ok() {
-                    runtime_loop(
-                        ExtSlot {
-                            root,
-                            package,
-                            configs,
-                            live: Some(rt),
-                        },
-                        req_rx,
-                        events_tx,
-                        active_clients,
-                    );
-                }
-            }
-            Err(e) => {
-                let _ = res_tx.send(Err(e));
-            }
-        })
-        .map_err(|e| HostError::Other(e.to_string()))?;
-
-    res_rx
-        .recv()
-        .map_err(|_| HostError::Other("extension thread died".into()))??;
+        .recv_timeout(load_timeout)
+        .map_err(|_| HostError::Other("extension runtime did not start in time".into()))??;
     Ok(req_tx)
 }
 
@@ -792,27 +878,31 @@ fn runtime_loop(
     }
 }
 
-/// mtime-based source signature: covers asar edits and directory packages.
+/// mtime-based source signature: covers asar edits and directory
+/// packages. Sub-second granularity, so an edit inside the same
+/// wall-clock second still invalidates the metadata cache.
 fn source_signature(path: &Path) -> Option<u64> {
-    fn mtime_secs(p: &Path) -> Option<u64> {
+    fn mtime_nanos(p: &Path) -> Option<u64> {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
+            .map(|d| d.as_nanos() as u64)
     }
     if path.is_dir() {
-        let index = mtime_secs(&path.join("index.js")).unwrap_or(0);
-        let manifest = mtime_secs(&path.join("package.json")).unwrap_or(0);
+        let index = mtime_nanos(&path.join("index.js")).unwrap_or(0);
+        let manifest = mtime_nanos(&path.join("package.json")).unwrap_or(0);
         Some(index.max(manifest))
     } else {
-        mtime_secs(path)
+        mtime_nanos(path)
     }
 }
 
 /// On-disk store of `CachedMeta`, so after the first run the manager can
 /// classify packages without evaluating any JS. Best-effort: an unreadable
-/// or missing cache only costs a probe.
+/// or missing cache only costs a probe. Lives under `<cache>/pulpit/`
+/// (the app's own name; earlier builds wrote `pulpit-server`, which is
+/// simply ignored - one re-probe after upgrading).
 struct MetadataCache {
     path: Option<PathBuf>,
     entries: HashMap<String, CachedMeta>,
@@ -821,7 +911,7 @@ struct MetadataCache {
 
 impl MetadataCache {
     fn load() -> Self {
-        let path = dirs::cache_dir().map(|d| d.join("pulpit-server").join("extmeta.json"));
+        let path = dirs::cache_dir().map(|d| d.join("pulpit").join("extmeta.json"));
         let entries = path
             .as_deref()
             .and_then(|p| std::fs::read(p).ok())
@@ -859,11 +949,54 @@ impl MetadataCache {
         }
         match serde_json::to_vec_pretty(&self.entries.values().collect::<Vec<_>>()) {
             Ok(bytes) => {
-                if let Err(e) = std::fs::write(path, bytes) {
+                // atomic (tmp + rename via the shared A5 helper): a crash
+                // mid-flush keeps the previous cache instead of a torn one
+                if let Err(e) = pulpit_db::write_atomic(path, &bytes) {
                     tracing::debug!(error = %e, "could not write extension metadata cache");
                 }
             }
             Err(e) => tracing::debug!(error = %e, "could not serialize extension metadata cache"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin index.js's mtime inside one wall-clock second, then bump it by
+    /// 100 ms (still the same second): a seconds-granularity signature
+    /// cannot tell the two apart, so an edited package keeps its stale
+    /// cached metadata.
+    fn set_index_mtime(dir: &Path, offset: Duration) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(dir.join("index.js"))
+            .expect("open index.js");
+        let base = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(base)
+                .set_modified(base + offset),
+        )
+        .expect("set mtime");
+    }
+
+    #[test]
+    fn signatures_distinguish_edits_within_the_same_second() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
+        std::fs::write(dir.path().join("pkg/index.js"), "module.exports = 1").unwrap();
+
+        let pkg = dir.path().join("pkg");
+        set_index_mtime(&pkg, Duration::ZERO);
+        let first = source_signature(&pkg).expect("signature");
+        set_index_mtime(&pkg, Duration::from_millis(100));
+        let second = source_signature(&pkg).expect("signature");
+
+        assert_ne!(
+            first, second,
+            "an edit within the same wall-clock second must invalidate the cache"
+        );
     }
 }

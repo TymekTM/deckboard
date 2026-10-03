@@ -3690,6 +3690,7 @@ dependencies = [
  "boa_engine",
  "dirs 5.0.1",
  "open",
+ "pulpit-db",
  "serde",
  "serde_json",
  "tempfile",
