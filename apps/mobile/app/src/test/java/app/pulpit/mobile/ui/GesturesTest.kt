@@ -45,4 +45,48 @@ class GesturesTest {
         tracker.doubleTapped = true
         assertTrue(tracker.consumed)
     }
+
+    // ---- release decision (MOB-02) ----------------------------------
+
+    @Test
+    fun consumedGestureStillEndsAPressModeTile() {
+        // long-press fired on a key/hold tile: press-end must still be
+        // sent - only it stops the server's hold-repeat loop
+        assertEquals(
+            ReleaseDecision.Fire,
+            releaseDecision(consumed = true, released = true, declaresPressEnd = true, declaresPressPair = true),
+        )
+        // the finger may also have been stolen after the long press -
+        // the press-mode tile still owes its press-end
+        assertEquals(
+            ReleaseDecision.Fire,
+            releaseDecision(consumed = true, released = false, declaresPressEnd = true, declaresPressPair = true),
+        )
+    }
+
+    @Test
+    fun consumedGestureSuppressesThePlainTap() {
+        assertEquals(
+            ReleaseDecision.Cancel,
+            releaseDecision(consumed = true, released = true, declaresPressEnd = false, declaresPressPair = false),
+        )
+    }
+
+    @Test
+    fun plainReleaseRulesStayAsTheyWere() {
+        // clean release fires; a stolen touch cancels a plain tile...
+        assertEquals(
+            ReleaseDecision.Fire,
+            releaseDecision(consumed = false, released = true, declaresPressEnd = false, declaresPressPair = false),
+        )
+        assertEquals(
+            ReleaseDecision.Cancel,
+            releaseDecision(consumed = false, released = false, declaresPressEnd = false, declaresPressPair = false),
+        )
+        // ...but a press tile still ends a stolen touch (the D1 fix)
+        assertEquals(
+            ReleaseDecision.Fire,
+            releaseDecision(consumed = false, released = false, declaresPressEnd = true, declaresPressPair = true),
+        )
+    }
 }
