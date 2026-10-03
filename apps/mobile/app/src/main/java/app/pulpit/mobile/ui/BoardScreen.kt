@@ -312,6 +312,7 @@ private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
             val watchChannel = t.state?.channel
             val live = liveValues[watchChannel]
             t.assetHash?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
+            t.assetHash2?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
             val active = when {
                 watchChannel != null -> isActiveValue(live)
                 else -> positions[t.id] ?: false
@@ -332,6 +333,7 @@ private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
                     items = TileItems(listItems(t, live)),
                     status = statusData(t, live),
                     image = t.assetHash?.let { bitmaps[it] },
+                    image2 = t.assetHash2?.let { bitmaps[it] },
                     onPressStart = { vm.pressStart(board.id, t) },
                     onPressEnd = { vm.pressEnd(board.id, t) },
                     onSlider = { v -> vm.slider(board.id, t, v) },

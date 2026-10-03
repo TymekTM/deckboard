@@ -95,6 +95,7 @@ fun Tile(
     items: TileItems,
     status: StatusData? = null,
     image: ImageBitmap? = null,
+    image2: ImageBitmap? = null,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
     onSlider: (Float) -> Unit,
@@ -125,10 +126,20 @@ fun Tile(
         else -> (if (active) style?.icon2 ?: style?.icon else style?.icon).orEmpty()
     }
     val iconFamily = faFamily(style?.iconFamily)
-    val iconColor = Color.White
-    val titleColor = Color.White
+    // state 2 falls back to state 1 per field (docs/protocol-v2.md §4):
+    // an absent active-state value keeps the resting one instead of
+    // resetting to a built-in default
+    fun pick(first: String?, second: String?): String? =
+        if (active) second ?: first else first
+
+    val iconColor = hex(pick(style?.iconColor, style?.iconColor2), Color.White)
+    val titleColor = hex(pick(style?.titleColor, style?.titleColor2), Color.White)
+    val borderColor = pick(style?.borderColor, style?.borderColor2)
     val title = style?.title.orEmpty()
     val shape = shapeOf(style?.shape?.toIntOrNull() ?: 0, tileSize.value * 0.18f)
+    // the active-state image (img2) replaces the resting face while the
+    // tile reads its active value; absent falls back to the resting one
+    val face = if (active) image2 ?: image else image
 
     val template = templateFor(tile)
     val raised = template != "graph" && template != "clock"
@@ -193,7 +204,10 @@ fun Tile(
                 .offset(x = sink, y = sink)
                 .clip(shape)
                 .background(color)
-                .border(0.dp, Color.Transparent),
+                .border(
+                    if (borderColor != null) 2.dp else 0.dp,
+                    hex(borderColor, Color.Transparent),
+                ),
             contentAlignment = Alignment.Center,
         ) {
             if (scrim > 0f) {
@@ -217,7 +231,7 @@ fun Tile(
                     iconFamily = iconFamily,
                     iconColor = iconColor,
                     titleColor = titleColor,
-                    image = image,
+                    image = face,
                     iconOnly = discordKind != null,
                     liveText = if (template == "toggle" && discordKind == null) liveText else null,
                     onPressStart = {
