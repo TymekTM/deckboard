@@ -148,6 +148,11 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     /** Set while a pairing is in flight (no token yet). */
     private var pendingPairCode: String? = null
 
+    /** The decision-poll coroutine for the live pair request (MOB-16):
+     *  cancelPairRequest must be able to reach it, or "Przerwij" leaves
+     *  the loop polling the desktop every 2 s until the request TTL. */
+    private var pairPollJob: Job? = null
+
     /** Channels the server declared as series in the welcome catalog.
      *  Patches for these append to the chart window even when the
      *  connect-time snapshot carried no history yet (fresh server). */
@@ -180,7 +185,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
      *  server-side, so no second dialog). */
     fun startPairRequest(host: String, port: Int, deviceName: String) {
         if (_pairRequest.value != null) return
-        scope.launch {
+        pairPollJob = scope.launch {
             try {
                 val created = createPairRequest(V2Client.httpCalls, host, port, deviceName)
                 _pairRequest.value = PairRequestUi(host, port, created.code, deviceName)
@@ -196,58 +201,62 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Leaves the waiting state without touching the desktop (its dialog
-     *  still resolves on its own; the unanswered request expires). */
+     *  still resolves on its own; the unanswered request expires). The
+     *  poll job stops too (MOB-16) - no pointless radio wakeups until
+     *  the TTL, and a later startPairRequest gets a clean slate. */
     fun cancelPairRequest() {
+        pairPollJob?.cancel()
+        pairPollJob = null
         _pairRequest.value = null
     }
 
     private suspend fun pollPairDecision(host: String, port: Int, id: String, ttlSecs: Long) {
-        val deadline = System.currentTimeMillis() + (ttlSecs + 5) * 1000
-        while (System.currentTimeMillis() < deadline) {
-            delay(2000)
-            val status = try {
-                pairRequestStatus(V2Client.httpCalls, host, port, id)
-            } catch (_: Exception) {
-                continue
-            }
-            when (status) {
-                "approved" -> {
-                    val ui = _pairRequest.value
-                    _pairRequest.value = null
-                    if (ui != null) {
-                        withContext(Dispatchers.Main.immediate) {
-                            saveConfig(
-                                _config.value.copy(
-                                    host = ui.host,
-                                    port = ui.port,
-                                    name = ui.deviceName,
-                                ),
-                            )
-                            connectWithPairCode(ui.code)
-                        }
+        // the loop is extracted (pollPairDecisionLoop) so the exit rules
+        // are unit-tested: decision word, user cancel, or deadline
+        val decision = pollPairDecisionLoop(
+            deadlineMs = System.currentTimeMillis() + (ttlSecs + 5) * 1000,
+            now = { System.currentTimeMillis() },
+            sleep = { delay(2000) },
+            stillWaiting = { _pairRequest.value != null },
+            poll = { pairRequestStatus(V2Client.httpCalls, host, port, id) },
+        )
+        when (decision) {
+            "approved" -> {
+                val ui = _pairRequest.value
+                _pairRequest.value = null
+                if (ui != null) {
+                    withContext(Dispatchers.Main.immediate) {
+                        saveConfig(
+                            _config.value.copy(
+                                host = ui.host,
+                                port = ui.port,
+                                name = ui.deviceName,
+                            ),
+                        )
+                        connectWithPairCode(ui.code)
                     }
-                    return
-                }
-                "rejected" -> {
-                    _pairRequest.value = null
-                    _connState.value =
-                        ConnState.Failed("komputer odrzucił parowanie", retryable = false)
-                    return
-                }
-                "expired" -> {
-                    _pairRequest.value = null
-                    _connState.value = ConnState.Failed(
-                        "żądanie wygasło - uruchom parowanie ponownie",
-                        retryable = false,
-                    )
-                    return
                 }
             }
-        }
-        if (_pairRequest.value != null) {
-            _pairRequest.value = null
-            _connState.value =
-                ConnState.Failed("komputer nie odpowiedział w czasie", retryable = false)
+            "rejected" -> {
+                _pairRequest.value = null
+                _connState.value =
+                    ConnState.Failed("komputer odrzucił parowanie", retryable = false)
+            }
+            "expired" -> {
+                _pairRequest.value = null
+                _connState.value = ConnState.Failed(
+                    "żądanie wygasło - uruchom parowanie ponownie",
+                    retryable = false,
+                )
+            }
+            // null = the deadline passed with no decision (the stillWaiting
+            // cancel path leaves the state alone - cancelPairRequest or a
+            // newer request owns it)
+            null -> if (_pairRequest.value != null) {
+                _pairRequest.value = null
+                _connState.value =
+                    ConnState.Failed("komputer nie odpowiedział w czasie", retryable = false)
+            }
         }
     }
 
@@ -495,6 +504,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun forgetPairing() {
+        cancelPairRequest()
         saveConfig(_config.value.copy(token = null))
         stopKeepAlive()
         disconnect()
@@ -801,4 +811,33 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
          *  a heap spike (MOB-12). */
         const val ASSET_MAX_BYTES = 10L * 1024 * 1024
     }
+}
+
+/** The pair-decision poll loop, extracted for a unit test (MOB-16):
+ *  sleeps, then checks the request is still waiting (the user may have
+ *  pressed "Przerwij"), then asks the desktop. Transient poll errors
+ *  keep looping like they always did; the exit rules are the decision
+ *  word, [stillWaiting] turning false (null return), or the deadline.
+ *  Cancellation (cancelPairRequest cancels the job) propagates through
+ *  [sleep] and [poll] like any suspend call. */
+internal suspend fun pollPairDecisionLoop(
+    deadlineMs: Long,
+    now: () -> Long,
+    sleep: suspend () -> Unit,
+    stillWaiting: () -> Boolean,
+    poll: suspend () -> String,
+): String? {
+    while (now() < deadlineMs) {
+        sleep()
+        if (!stillWaiting()) return null
+        val status = try {
+            poll()
+        } catch (_: Exception) {
+            continue
+        }
+        when (status) {
+            "approved", "rejected", "expired" -> return status
+        }
+    }
+    return null
 }
