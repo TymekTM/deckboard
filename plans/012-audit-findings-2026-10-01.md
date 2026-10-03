@@ -566,9 +566,14 @@ reads + per-line continues (`4953a1e`), zai plaintext-http refusal
 (`eeb705e`), os PolicyConfig ABI (`ef35bed`), os set_active_device role
 loop (`5d1bfc3`) - DONE (lane L5). Voicemeeter parameter validation
 (`6ea6c4f`) and discord timeouts/frame-cap/redacted Debug (`d2dfc8f`) -
-DONE (lane L2b, merged). Actions lower-priority items - DONE, lane L2a
+DONE (lane L2b). Actions lower-priority items - DONE, lane L2a
 merged (delay caps 60s `90c8eb0`, plus-key hotkeys `4d63863`, quoted
-open options `2afbb69`, unknown-key-name warnings). Remaining
-lower-priority: os clipboard/capture/MCI, sysinfo push_loop, ext
-manager (uncommitted draft in the L2b worktree: residence-lock fix,
-spawn timeout, nanos mtime signature).
+open options `2afbb69`, unknown-key-name warnings). Ext-manager items -
+DONE, lane L2b leftovers merged (`25ce1e9` wedged extensions,
+`882bd82` atomic cache under pulpit/, `cd1ebcf` private extraction
+temp dirs, `9fd4170` ADR-012 stub). Desktop lower-priority - DONE
+(`a236f86` early listeners, touchBoardId reset, slider pointer
+capture, failure toasts). Server json! broadcasts - DONE (`c99520c`).
+Remaining lower-priority: os clipboard/capture/MCI, sysinfo push_loop,
+aidev local-midnight option, tiles keyboard-operable (deliberately
+skipped), catalog.js STATE_BINDINGS vitest (Wave 2).
