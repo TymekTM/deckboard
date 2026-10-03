@@ -1001,6 +1001,11 @@ fn set_autostart(app: AppHandle, enable: bool) -> Result<(), String> {
     }
 }
 
+/// Hard cap on images read into the WebView as data URLs (012 B3): the
+/// path comes from the frontend, so a giant file must not be base64'd
+/// into memory. 10 MiB is far above any sensible tile icon.
+const IMAGE_READ_CAP_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Read an image file and return it as a data URL for tile backgrounds and
 /// icons. Done in Rust so no filesystem plugin/scope is needed.
 #[tauri::command]
@@ -1015,7 +1020,19 @@ fn read_image_data(path: String) -> Result<String, String> {
         "svg" => "image/svg+xml",
         _ => return Err(format!("unsupported image type \".{ext}\"")),
     };
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    // take() bounds the read itself: a file that grows between the length
+    // check and the read still cannot pull more than cap+1 bytes in
+    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    file.take(IMAGE_READ_CAP_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > IMAGE_READ_CAP_BYTES {
+        return Err(format!(
+            "image \".{ext}\" is larger than 10 MiB - pick a smaller file"
+        ));
+    }
     Ok(format!(
         "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -1183,6 +1200,34 @@ mod tests {
             hotkey_plan("hand-edited junk", "Ctrl+Alt+P"),
             Ok(HotkeyPlan::Register)
         ));
+    }
+
+    #[test]
+    fn read_image_data_rejects_files_over_the_cap() {
+        let path = std::env::temp_dir().join(format!(
+            "pulpit-image-cap-{}.png",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("create temp file");
+        // set_len extends without writing, so the test stays cheap
+        file.set_len(IMAGE_READ_CAP_BYTES + 1).expect("extend");
+        drop(file);
+        let err =
+            read_image_data(path.to_string_lossy().into_owned()).expect_err("must refuse");
+        assert!(err.contains("10 MiB"), "unexpected error: {err}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_image_data_encodes_a_small_image_as_a_data_url() {
+        let path = std::env::temp_dir().join(format!(
+            "pulpit-image-small-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"not-really-png-bytes").expect("write temp file");
+        let url = read_image_data(path.to_string_lossy().into_owned()).expect("must read");
+        assert!(url.starts_with("data:image/png;base64,"), "got: {url}");
+        let _ = std::fs::remove_file(&path);
     }
 }
 
