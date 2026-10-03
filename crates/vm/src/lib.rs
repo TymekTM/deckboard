@@ -241,7 +241,18 @@ impl VoicemeeterState {
             remote.login()?;
             self.logged_in = true;
         }
-        f(remote)
+        match f(remote) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // Voicemeeter may have exited or restarted since the
+                // login: drop the cached session so the NEXT call starts
+                // with a fresh open + login instead of replaying a stale
+                // one forever.
+                self.logged_in = false;
+                self.remote = None;
+                Err(e)
+            }
+        }
     }
 
     /// Execute one `vm-*` action with the extension's argument shape
@@ -483,6 +494,23 @@ mod tests {
             .execute("vm-set-output", &json!({"device": "no-colon"}))
             .unwrap_err();
         assert!(matches!(err, VmError::BadPayload("device", _)));
+    }
+
+    #[test]
+    fn failed_calls_drop_the_cached_session() {
+        let mut vm = VoicemeeterState::new();
+        // Outcome depends on the machine: without a running Voicemeeter
+        // the restart errors - and the failed session must then be
+        // dropped so the NEXT call re-opens and re-logs-in instead of
+        // replaying a stale one forever. With a live Voicemeeter the
+        // restart succeeds and there is nothing to assert.
+        if vm.execute("vm-restart", &Value::Null).is_err() {
+            assert!(
+                vm.remote.is_none(),
+                "a failed call must drop the cached remote"
+            );
+            assert!(!vm.logged_in, "a failed call must clear the login flag");
+        }
     }
 
     #[test]

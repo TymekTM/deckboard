@@ -66,6 +66,7 @@ impl HttpState {
 }
 
 fn poll_all(config: &Config) -> Vec<ProviderRow> {
+    let boundary = config.day_boundary();
     let mut rows = Vec::new();
     let openrouter = resolve_key(config.providers.openrouter.as_ref(), "OPENROUTER_API_KEY");
     if let Some(key) = openrouter {
@@ -73,7 +74,7 @@ fn poll_all(config: &Config) -> Vec<ProviderRow> {
     }
     let anthropic = resolve_key(config.providers.anthropic.as_ref(), "ANTHROPIC_API_KEY");
     if let Some(key) = anthropic {
-        rows.push(anthropic_row(&key));
+        rows.push(anthropic_row(&key, boundary));
     }
     if let Some(zai) = config.providers.zai.as_ref() {
         let key = resolve_key(
@@ -221,11 +222,12 @@ fn openrouter_row(key: &str) -> ProviderRow {
 }
 
 /// Anthropic Admin usage report: `GET /v1/organization/usage/report`
-/// summed as tokens for the current UTC day (the report exposes no spend
-/// limit, so the row shows consumption without a percentage).
-fn anthropic_row(key: &str) -> ProviderRow {
+/// summed as tokens for the current day (the report exposes no spend
+/// limit, so the row shows consumption without a percentage). The day
+/// boundary follows the `local_midnight` config like the token tiles.
+fn anthropic_row(key: &str, boundary: crate::local_usage::DayBoundary) -> ProviderRow {
     let now = crate::unix_now();
-    let start = crate::local_usage::utc_day_start(now);
+    let start = boundary.day_start(now);
     let url = format!(
         "https://api.anthropic.com/v1/organization/usage/report?start_time={start}&end_time={now}"
     );

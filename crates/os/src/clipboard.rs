@@ -18,6 +18,19 @@ pub fn sequence_number() -> u32 {
     }
 }
 
+/// Length in UTF-16 units up to the first NUL, never scanning past
+/// `max_units` (the GlobalSize bound of the allocation). Split out from
+/// `get_text` so the bound is unit-testable without a live clipboard.
+#[cfg(windows)]
+fn nul_bounded_len(ptr: *const u16, max_units: usize) -> usize {
+    let mut len = 0usize;
+    // SAFETY: the caller guarantees `max_units` readable units at `ptr`
+    while len < max_units && unsafe { *ptr.add(len) } != 0 {
+        len += 1;
+    }
+    len
+}
+
 /// Current clipboard text, empty when the clipboard holds non-text data.
 pub fn get_text() -> Result<String> {
     #[cfg(windows)]
@@ -26,7 +39,7 @@ pub fn get_text() -> Result<String> {
         use windows::Win32::System::DataExchange::{
             CloseClipboard, GetClipboardData, OpenClipboard,
         };
-        use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+        use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
         unsafe {
             OpenClipboard(HWND::default())
                 .map_err(|e| OsError::Failed(format!("open clipboard: {e}")))?;
@@ -47,10 +60,11 @@ pub fn get_text() -> Result<String> {
                 if ptr.is_null() {
                     return Ok(String::new());
                 }
-                let mut len = 0usize;
-                while *ptr.add(len) != 0 {
-                    len += 1;
-                }
+                // The allocation size bounds the NUL scan: a producer that
+                // forgot the terminator (or a race against the writer)
+                // must not walk past the allocation reading wild memory.
+                let max_units = GlobalSize(HGLOBAL(handle.0)) / 2;
+                let len = nul_bounded_len(ptr, max_units);
                 let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
                 let _ = GlobalUnlock(HGLOBAL(handle.0));
                 Ok(text)
@@ -112,6 +126,18 @@ pub fn set_text(text: &str) -> Result<()> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nul_scan_never_passes_the_allocation_bound() {
+        let terminated: [u16; 4] = [0x68, 0x69, 0, 0x78]; // "hi" + NUL + junk
+        assert_eq!(nul_bounded_len(terminated.as_ptr(), 4), 2);
+        // no terminator inside the bound: stop AT the bound, do not run on
+        assert_eq!(nul_bounded_len(terminated.as_ptr(), 1), 1);
+        let unterminated: [u16; 2] = [0x61, 0x62];
+        assert_eq!(nul_bounded_len(unterminated.as_ptr(), 2), 2);
+        // zero-sized bound reads nothing at all
+        assert_eq!(nul_bounded_len(terminated.as_ptr(), 0), 0);
+    }
 
     #[test]
     #[ignore = "live: replaces the real clipboard, restoring it after"]

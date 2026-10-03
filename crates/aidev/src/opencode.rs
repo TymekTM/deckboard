@@ -139,10 +139,14 @@ impl Usage {
         }
     }
 
-    pub fn sums(&self, now: i64) -> crate::local_usage::Sums {
+    pub fn sums(
+        &self,
+        now: i64,
+        boundary: crate::local_usage::DayBoundary,
+    ) -> crate::local_usage::Sums {
         let mut sums = crate::local_usage::Sums::default();
-        let today_start = crate::local_usage::utc_day_start(now);
-        let week_start = crate::local_usage::utc_week_start(now);
+        let today_start = boundary.day_start(now);
+        let week_start = boundary.week_start(now);
         for s in &self.samples {
             if s.ts > now {
                 continue;
@@ -266,7 +270,7 @@ mod tests {
 
         let mut usage = Usage::new(8);
         usage.scan(&db, now);
-        let s = usage.sums(now);
+        let s = usage.sums(now, crate::local_usage::DayBoundary::Utc);
         assert_eq!(s.hour, 100 + 5 + 500);
         assert_eq!(s.five_hour, 100 + 5 + 500 + 200 + 5 + 900);
 
@@ -277,7 +281,10 @@ mod tests {
         )
         .unwrap();
         usage.scan(&db, now);
-        assert_eq!(usage.sums(now).hour, 100 + 5 + 500 + 70 + 5);
+        assert_eq!(
+            usage.sums(now, crate::local_usage::DayBoundary::Utc).hour,
+            100 + 5 + 500 + 70 + 5
+        );
 
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
