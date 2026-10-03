@@ -89,4 +89,22 @@ class GesturesTest {
             releaseDecision(consumed = false, released = false, declaresPressEnd = true, declaresPressPair = true),
         )
     }
+
+    @Test
+    fun doubleTapTilesNeverFireFromTheReleasePath() {
+        // MOB-03: a double-tap tile without the press pair takes its
+        // tap from onTap (deferred through the double-tap window), so
+        // the release path cancels even on a clean release - the old
+        // code fired tap #1 before onDoubleTap could mark the tracker
+        assertEquals(
+            ReleaseDecision.Cancel,
+            releaseDecision(
+                consumed = false,
+                released = true,
+                declaresPressEnd = false,
+                declaresPressPair = false,
+                tapSentFromOnTap = true,
+            ),
+        )
+    }
 }

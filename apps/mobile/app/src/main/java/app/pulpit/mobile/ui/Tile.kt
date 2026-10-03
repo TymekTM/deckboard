@@ -289,6 +289,14 @@ private fun ButtonTile(
     // declared swipes. The tracker suppresses the release tap once a
     // gesture spoke, so one touch fires exactly one interaction.
     val tracker = remember(tile.id) { GestureTracker() }
+    // MOB-03: a tile that declares double-tap without the press pair
+    // takes its tap from detectTapGestures' onTap - the detector
+    // suppresses the first tap when a second lands inside the window,
+    // which the release path cannot do (tryAwaitRelease returns before
+    // onDoubleTap can mark the tracker). Press-mode tiles keep the
+    // release path: their release sends press-end, never a tap.
+    val tapFromDetector = tile.interacts(V2.INT_DOUBLE_TAP) &&
+        !tile.interacts(V2.INT_PRESS_END)
     val wantsSwipe =
         tile.interacts(V2.INT_SWIPE_LEFT) || tile.interacts(V2.INT_SWIPE_RIGHT)
     // icon-only faces (discord voice toggles): the color and the glyph
@@ -346,6 +354,14 @@ private fun ButtonTile(
                             tracker.doubleTapped = true
                             onGestureLatest(V2.INT_DOUBLE_TAP)
                         }
+                    } else {
+                        null
+                    },
+                    // only registered for the MOB-03 tiles above; when
+                    // onDoubleTap is registered Compose defers the first
+                    // tap through the double-tap window for us
+                    onTap = if (tapFromDetector) {
+                        { pressEnd() }
                     } else {
                         null
                     },
