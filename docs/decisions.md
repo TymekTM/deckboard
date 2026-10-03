@@ -79,12 +79,21 @@ not tunnel it through the internet. Protocol v2 authenticates at the
 WebSocket upgrade: pairing mints a one-time code (8 chars, 5 min, loopback
 `POST /v2/pair`, QR `pulpit://host:port?pair=<code>`); the tablet
 connects with it, sends `hello`, and the desktop shows a "trust this
-device?" prompt (M1 headless: auto-accept with a warning log; the prompt
+devices?" prompt (M1 headless: auto-accept with a warning log; the prompt
 ships with the desktop UI). Trusting creates a per-device entry in
-`~/pulpitApp/devices.json` (`{id, name, token, created, last_seen}`);
-every later connect uses `?token=...`. Revoking a device = deleting its
-entry, so a leaked token never widens beyond one tablet. The tablet keeps
-its token in EncryptedSharedPreferences.
+`~/pulpitApp/devices.json` (`{id, name, token, created, last_seen}`),
+where `token` persists only as a `sha256:` digest - the raw token never
+hits the server's disk. Every later connect uses `?token=...`. Revoking
+a device = deleting its entry, so a leaked token never widens beyond one
+tablet. Pairing codes are one-time. The tablet stores its token
+keystore-encrypted at rest: AES-256-GCM under a non-exportable
+AndroidKeyStore key, framed as an `enc1:` envelope (fresh random IV
+alongside the ciphertext) in the usual prefs file - a small hand-rolled
+cipher wrapper instead of EncryptedSharedPreferences, which would add a
+dependency (and is deprecated) for what ~40 lines of `javax.crypto` do.
+A plaintext token from an older install is re-encrypted on first load,
+and a token that cannot be decrypted (key lost, ciphertext tampered)
+reads as unpaired: the device pairs again rather than crash.
 
 ## ADR-009: Structured logging from day one
 
