@@ -3652,6 +3652,7 @@ dependencies = [
  "pulpit-ext",
  "pulpit-legacy",
  "pulpit-os",
+ "pulpit-spotify",
  "pulpit-sysinfo",
  "pulpit-vm",
  "serde",

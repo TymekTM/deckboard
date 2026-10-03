@@ -15,6 +15,7 @@ pulpit-legacy = { path = "../legacy" }
 pulpit-ext = { path = "../ext" }
 pulpit-vm = { path = "../vm" }
 pulpit-discord = { path = "../discord" }
+pulpit-spotify = { path = "../spotify" }
 pulpit-os = { path = "../os" }
 pulpit-sysinfo = { path = "../sysinfo" }
 pulpit-aidev = { path = "../aidev" }
