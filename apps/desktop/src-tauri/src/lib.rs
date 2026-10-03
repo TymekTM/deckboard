@@ -1962,12 +1962,6 @@ async fn exec_button(
             .clone()
             .ok_or_else(|| "database unavailable".to_string())?,
     };
-    let Some(button) = backend.get_button(id) else {
-        return Ok(());
-    };
-    // The sink runs on the blocking pool next to the exec, so it defers
-    // pushes through a channel; the drain below runs back on the async
-    // worker (the same shape the legacy dispatcher uses).
     let (tx, mut rx) =
         tokio::sync::mpsc::unbounded_channel::<(pulpit_host::StatusApp, String, String)>();
     let _ = tauri::async_runtime::spawn_blocking(move || {
@@ -1994,6 +1988,12 @@ async fn exec_button(
                 ));
             }
         }
+        // per-tap lookup, inside the blocking closure and image-less
+        // (CORE-02): exec never reads img/img2, and a tap must not
+        // materialize multi-MB base64 columns on an async worker
+        let Some(button) = backend.get_button_meta(id) else {
+            return;
+        };
         let mut sink = UiSink(app, tx);
         // full tap sequence (press-start + release): a lone release-phase
         // exec never presses `key` tiles (A1)
@@ -2012,10 +2012,15 @@ async fn exec_button(
 #[tauri::command]
 async fn exec_slider(state: State<'_, DesktopState>, id: i64, value: f64) -> Result<(), String> {
     let backend = state.backend()?;
-    let Some(button) = backend.get_button(id) else {
-        return Ok(());
-    };
-    let _ = tauri::async_runtime::spawn_blocking(move || backend.slider(button, value)).await;
+    // same per-event meta read as exec_button (CORE-02); the lookup
+    // rides the blocking closure because slides fire per pointer event
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        let Some(button) = backend.get_button_meta(id) else {
+            return;
+        };
+        backend.slider(button, value);
+    })
+    .await;
     Ok(())
 }
 

@@ -271,10 +271,13 @@ fn arg_id(arg: &serde_json::Value) -> Option<i64> {
 }
 
 /// SQLite tile lookup off the async workers; a panic in the read logs
-/// instead of vanishing into a swallowed JoinError.
+/// instead of vanishing into a swallowed JoinError. Uses the image-less
+/// [`Backend::get_button_meta`] row (CORE-02): exec dispatch never reads
+/// `img`/`img2`, and every tap/slide must not materialize multi-MB
+/// base64 columns.
 async fn get_button_blocking(state: &Arc<AppState>, id: i64) -> Option<pulpit_db::ButtonRow> {
     let backend = state.backend.clone();
-    match tokio::task::spawn_blocking(move || backend.get_button(id)).await {
+    match tokio::task::spawn_blocking(move || backend.get_button_meta(id)).await {
         Ok(button) => button,
         Err(e) => {
             tracing::error!(id, error = %e, "button lookup panicked");
