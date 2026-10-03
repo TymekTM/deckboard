@@ -271,16 +271,26 @@ async fn main() -> anyhow::Result<()> {
                             "speaker-volume": level,
                             "speaker-muted": muted,
                         }));
-                        let payload = format!(
-                            r#"{{"app":"APP_CUSTOM_VALUE","data":{{"speaker-volume":{level},"speaker-muted":{muted}}}}}"#
-                        );
+                        // built via json!: the device name and the floats
+                        // are escaped/serialized, not format!-ed into the
+                        // JSON text by hand
+                        let payload = serde_json::json!({
+                            "app": "APP_CUSTOM_VALUE",
+                            "data": {
+                                "speaker-volume": level,
+                                "speaker-muted": muted,
+                            },
+                        })
+                        .to_string();
                         hub.broadcast("app_status_update", Some(&payload)).await;
                     }
                     if let Some(device) = device {
                         feed(serde_json::json!({ "speaker-device": device }));
-                        let payload = format!(
-                            r#"{{"app":"THIRD_PARTY_APP","data":{{"speaker-device":"{device}"}}}}"#
-                        );
+                        let payload = serde_json::json!({
+                            "app": "THIRD_PARTY_APP",
+                            "data": { "speaker-device": device },
+                        })
+                        .to_string();
                         hub.broadcast("app_status_update", Some(&payload)).await;
                     }
                 }
