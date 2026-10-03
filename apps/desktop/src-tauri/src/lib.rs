@@ -647,6 +647,12 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         tracing::warn!("stored hotkey unusable ({e}) - falling back to {DEFAULT_HOTKEY}");
         if register_touch_mode_hotkey(&app, DEFAULT_HOTKEY).is_ok() {
             hotkey = DEFAULT_HOTKEY.to_string();
+        } else {
+            // nothing is registered: record that as an empty combo so a
+            // later save of the same string re-registers instead of
+            // no-op-ing (hotkey_plan treats an unparseable old as Register)
+            tracing::error!("default hotkey also unusable - no hotkey registered");
+            hotkey = String::new();
         }
     }
 
@@ -1198,6 +1204,13 @@ mod tests {
         // a stored combo that no longer parses must not block a change
         assert!(matches!(
             hotkey_plan("hand-edited junk", "Ctrl+Alt+P"),
+            Ok(HotkeyPlan::Register)
+        ));
+        // startup's both-combos-taken state records "" (nothing
+        // registered); saving any combo - even the same string - must
+        // register rather than no-op
+        assert!(matches!(
+            hotkey_plan("", "Ctrl+Alt+D"),
             Ok(HotkeyPlan::Register)
         ));
     }

@@ -30,8 +30,8 @@ async function save() {
   // clamp dimensions to the backend's integer bounds (012 C4): the
   // number input's min/max only steer the spinner, they do not validate
   // pasted or typed values
-  const width = boardDim(form.width);
-  const height = boardDim(form.height);
+  const width = boardDim(form.width, props.board?.width ?? 6);
+  const height = boardDim(form.height, props.board?.height ?? 4);
   if (props.mode === "create") {
     await api.createBoard(form.name || "New board", form.background, width, height);
     emit("saved");
