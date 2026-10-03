@@ -413,6 +413,79 @@ async fn browser_requests_are_rejected_on_the_sockets() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn malformed_packets_do_not_kill_the_session() {
+    let (addr, backend) = spawn_server().await;
+
+    // polling handshake: open packet + the queued connect packet
+    let (_, open) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
+    let sid: String = {
+        let open_json: serde_json::Value = serde_json::from_str(&open[1..]).unwrap();
+        open_json["sid"].as_str().unwrap().into()
+    };
+    let (_, packets) = http(
+        addr,
+        "GET",
+        &format!("/socket.io/?EIO=3&transport=polling&t=2&sid={sid}"),
+        None,
+    );
+    assert_eq!(packets, "40");
+
+    // Abuse the POST channel with every malformed shape: unknown engine
+    // packet types, sio packets without a payload, non-JSON event
+    // bodies, unparseable ids, bare record separators. Every POST must
+    // answer 200 and the session must survive all of them.
+    for body in [
+        "9",
+        "4",
+        "42",
+        "42[not-json",
+        "42[\"exec_shortcut\",{\"id\":\"NaN\"}]",
+        "\u{1e}",
+        "\u{1e}2\u{1e}42[bad\u{1e}",
+    ] {
+        let (status, _) = http(
+            addr,
+            "POST",
+            &format!("/socket.io/?EIO=3&transport=polling&t=3&sid={sid}"),
+            Some(body),
+        );
+        assert_eq!(status, 200, "malformed body must not 5xx: {body:?}");
+    }
+
+    // The session is still alive and answering: engine ping -> pong.
+    let (status, _) = http(
+        addr,
+        "POST",
+        &format!("/socket.io/?EIO=3&transport=polling&t=4&sid={sid}"),
+        Some("2"),
+    );
+    assert_eq!(status, 200);
+    let (_, packets) = http(
+        addr,
+        "GET",
+        &format!("/socket.io/?EIO=3&transport=polling&t=5&sid={sid}"),
+        None,
+    );
+    // polling batches queued packets with record separators: every
+    // delivered packet must be a pong (one came from the ping smuggled
+    // inside the malformed batch above)
+    assert!(
+        packets.split('\u{1e}').all(|p| p == "3"),
+        "session must answer pings with pongs, got: {packets:?}"
+    );
+
+    // And a real event still executes after the abuse.
+    let (status, _) = http(
+        addr,
+        "POST",
+        &format!("/socket.io/?EIO=3&transport=polling&t=6&sid={sid}"),
+        Some(r#"42["exec_shortcut",{"id":10,"isTapStart":false}]"#),
+    );
+    assert_eq!(status, 200);
+    wait_for_execs(&backend, &[(10, false)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn key_tiles_release_when_the_socket_drops() {
     let (addr, backend) = spawn_server().await;
     let url =

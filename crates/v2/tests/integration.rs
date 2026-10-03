@@ -160,6 +160,14 @@ fn test_state(
     backend: MockBackend,
     tune: impl FnOnce(&mut V2Config),
 ) -> (Arc<V2State>, tempfile::TempDir) {
+    test_state_with_pairing(backend, Arc::new(Pairing::new()), tune)
+}
+
+fn test_state_with_pairing(
+    backend: MockBackend,
+    pairing: Arc<Pairing>,
+    tune: impl FnOnce(&mut V2Config),
+) -> (Arc<V2State>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut config = V2Config {
         patch_interval: Duration::from_millis(20),
@@ -172,7 +180,7 @@ fn test_state(
         hub: Arc::new(V2Hub::new()),
         backend: Arc::new(backend),
         devices: Arc::new(DeviceStore::load(dir.path().join("devices.json")).unwrap()),
-        pairing: Arc::new(Pairing::new()),
+        pairing,
         assets: Arc::new(AssetStore::open(dir.path().join("assets")).unwrap()),
         engine: Arc::new(StateEngine::new(120)),
         generation: Generation::starting_at(1),
@@ -183,13 +191,17 @@ fn test_state(
 }
 
 async fn spawn_server(state: Arc<V2State>) -> SocketAddr {
+    spawn_server_on(state, "127.0.0.1:0").await
+}
+
+async fn spawn_server_on(state: Arc<V2State>, bind: &str) -> SocketAddr {
     tokio::spawn(pulpit_v2::run_flusher(
         state.engine.clone(),
         state.hub.clone(),
         state.config.patch_interval,
     ));
     let app = pulpit_v2::router(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind(bind).await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(
@@ -382,6 +394,154 @@ async fn browser_requests_are_rejected_on_the_sockets() {
     )
     .await;
     assert_eq!(status, 403, "rebound Host must be rejected");
+
+    // No Origin header at all: the native tablet client's normal shape.
+    let mut request = (&format!("ws://{addr}/v2/ws?token={}", token))
+        .into_client_request()
+        .unwrap();
+    assert!(
+        !request.headers().contains_key("Origin"),
+        "test setup: this upgrade must be Origin-less"
+    );
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(result.is_ok(), "Origin-less native requests must work");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_route_refuses_non_loopback_callers() {
+    // Derive a non-loopback local address the way the OS would route
+    // it (UDP connect picks the source interface; no packet is sent).
+    // Hosts without an external route cannot exercise this guard -
+    // skip rather than flake there.
+    let probe = (|| -> Option<std::net::UdpSocket> {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        s.connect("8.8.8.8:80").ok()?;
+        Some(s)
+    })();
+    let probe = match probe {
+        Some(s) => s,
+        None => {
+            eprintln!("skipping: no external route to derive a LAN address");
+            return;
+        }
+    };
+    let lan_ip = probe.local_addr().unwrap().ip();
+    if lan_ip.is_loopback() {
+        eprintln!("skipping: no non-loopback address on this host");
+        return;
+    }
+
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let lan_addr = spawn_server_on(state.clone(), &format!("{lan_ip}:0")).await;
+    let loopback_addr = spawn_server_on(state, "127.0.0.1:0").await;
+
+    let (status, _, _) = http_post_json(lan_addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 403, "pairing must be mintable from loopback only");
+    let (status, _, _) = http_post_json(loopback_addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 200, "loopback callers still mint");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expired_code_gets_pair_expired_over_the_socket() {
+    let (state, _dir) = test_state_with_pairing(
+        sample_backend(),
+        Arc::new(Pairing::with_ttl(Duration::from_millis(40))),
+        |_| {},
+    );
+    let addr = spawn_server(state).await;
+
+    let (status, _, body) = http_post_json(addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 200);
+    let code = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h1",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0"}),
+        ),
+    )
+    .await;
+    let err = next_frame(&mut ws).await;
+    assert_eq!(err.ack.as_deref(), Some("h1"));
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(
+        payload.code,
+        error_code::PAIR_EXPIRED,
+        "an expired code must be told apart from an unknown one"
+    );
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "socket must close after pair-expired");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn silent_hello_times_out_and_closes() {
+    let (state, _dir) = test_state(sample_backend(), |cfg| {
+        cfg.hello_timeout = Duration::from_millis(150);
+    });
+    let (_device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+
+    // Valid token, but the client never speaks: the hello window ends
+    // the session with the typed error instead of parking forever.
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={token}")).await;
+    let err = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let frame = next_frame(&mut ws).await;
+            if frame.kind == TYPE_ERROR {
+                break frame;
+            }
+        }
+    })
+    .await
+    .expect("hello timeout error within the window");
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(payload.code, error_code::BAD_FRAME);
+    assert_eq!(payload.message.as_deref(), Some("hello timeout"));
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "socket must close after the hello timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_and_revoked_tokens_are_refused_at_the_upgrade() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let (device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+
+    // Unknown token: HTTP 401, no upgrade.
+    let bogus =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/v2/ws?token=not-a-token")).await;
+    assert!(bogus.is_err(), "unknown token must not upgrade");
+
+    // A real token works, then revocation must close that door.
+    let ok = tokio_tungstenite::connect_async(format!("ws://{addr}/v2/ws?token={token}")).await;
+    assert!(ok.is_ok(), "valid token upgrades");
+    assert!(state.devices.revoke(&device.id));
+    let revoked =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/v2/ws?token={token}")).await;
+    assert!(revoked.is_err(), "revoked device's token must not upgrade");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -747,7 +907,7 @@ async fn hello_rename_lands_in_welcome_and_registry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn state_changes_flow_as_patches() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -772,7 +932,7 @@ async fn state_changes_flow_as_patches() {
 async fn interaction_acks_execs_and_reports_unknown_tiles() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -829,7 +989,7 @@ async fn interaction_acks_execs_and_reports_unknown_tiles() {
 async fn hold_repeat_runs_until_press_end() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -872,7 +1032,7 @@ async fn hold_repeat_runs_until_press_end() {
 async fn duplicate_press_start_does_not_leak_a_repeat_loop() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -931,7 +1091,7 @@ async fn slow_hold_actions_do_not_starve_other_sessions() {
     let mut backend = sample_backend();
     backend.exec_delay = Duration::from_millis(1000);
     let (state, _dir) = test_state(backend, |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
 
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
@@ -1004,7 +1164,7 @@ async fn wait_for_exec(backend: &MockBackend, expected: (i64, bool)) {
 async fn held_keys_release_when_the_socket_drops() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -1031,7 +1191,7 @@ async fn held_keys_release_when_the_socket_drops() {
 async fn hub_teardown_ends_the_session_and_releases_held_keys() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -1070,7 +1230,7 @@ async fn hub_teardown_ends_the_session_and_releases_held_keys() {
 async fn reaped_silent_session_ends_and_releases_held_keys() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={token}")).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -1109,7 +1269,7 @@ async fn reaped_silent_session_ends_and_releases_held_keys() {
 #[tokio::test(flavor = "multi_thread")]
 async fn undeclared_interactions_are_rejected() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -1133,7 +1293,7 @@ async fn undeclared_interactions_are_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn board_switch_pushes_board_open() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -1156,7 +1316,7 @@ async fn board_switch_pushes_board_open() {
 #[tokio::test(flavor = "multi_thread")]
 async fn published_deltas_reach_clients() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -1175,7 +1335,7 @@ async fn published_deltas_reach_clients() {
 #[tokio::test(flavor = "multi_thread")]
 async fn assets_serve_with_token_and_cache_headers() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let png_url = format!(
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(b"raw-png-bytes")
@@ -1199,12 +1359,35 @@ async fn assets_serve_with_token_and_cache_headers() {
         headers["cache-control"].as_str(),
         "immutable, max-age=31536000"
     );
+    assert_eq!(headers["accept-ranges"].as_str(), "bytes");
+
+    // Satisfied range: 206 with the inclusive Content-Range window.
+    let (status, headers, body) = http_get_with_headers(
+        addr,
+        &format!("/assets/{hash}?token={}", token),
+        &[("Range", "bytes=4-7")],
+    )
+    .await;
+    assert_eq!(status, 206, "partial content must answer 206");
+    assert_eq!(headers["content-range"].as_str(), "bytes 4-7/13");
+    assert_eq!(body, b"png-");
+    assert_eq!(headers["accept-ranges"].as_str(), "bytes");
+
+    // Unsatisfiable range: 416 with the total-size form.
+    let (status, headers, _body) = http_get_with_headers(
+        addr,
+        &format!("/assets/{hash}?token={}", token),
+        &[("Range", "bytes=99-")],
+    )
+    .await;
+    assert_eq!(status, 416);
+    assert_eq!(headers["content-range"].as_str(), "bytes */13");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn server_pings_idle_clients() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -1223,7 +1406,7 @@ async fn server_pings_idle_clients() {
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_frame_gets_typed_error_and_close() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -1256,7 +1439,7 @@ async fn outdated_clients_are_closed_after_hello() {
     let (state, _dir) = test_state(sample_backend(), |cfg| {
         cfg.min_client = "9.9.9".into();
     });
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     send_frame(
@@ -1293,7 +1476,7 @@ async fn exec_side_values_land_on_ext_channels() {
         .buttons
         .push(button_row(25, "value-pusher", "button", None, None));
     let (state, _dir) = test_state(backend, |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
@@ -1326,7 +1509,7 @@ async fn exec_side_values_land_on_ext_channels() {
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_goodbye_reaches_clients_then_closes() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let (device, token) = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
     let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;

@@ -228,11 +228,26 @@ pub struct Pairing {
     /// Wrong-code attempts inside the TTL window (the failed-attempt
     /// budget's sliding window).
     failures: std::sync::Mutex<Vec<Instant>>,
+    /// How long a code stays valid. `PAIR_CODE_TTL` in production;
+    /// tests shrink it so expiry is observable without waiting.
+    ttl: Duration,
 }
 
 impl Pairing {
     pub fn new() -> Pairing {
-        Pairing::default()
+        Pairing {
+            ttl: PAIR_CODE_TTL,
+            ..Pairing::default()
+        }
+    }
+
+    /// A pool whose codes expire after `ttl` - the test seam for the
+    /// expiry paths (production always uses [`Pairing::new`]).
+    pub fn with_ttl(ttl: Duration) -> Pairing {
+        Pairing {
+            ttl,
+            ..Pairing::default()
+        }
     }
 
     pub fn new_code(&self) -> String {
@@ -244,7 +259,7 @@ impl Pairing {
         self.codes
             .lock()
             .expect("pairing poisoned")
-            .retain(|_, created| created.elapsed() < PAIR_CODE_TTL);
+            .retain(|_, created| created.elapsed() < self.ttl);
         self.codes
             .lock()
             .expect("pairing poisoned")
@@ -256,7 +271,7 @@ impl Pairing {
         let codes = self.codes.lock().expect("pairing poisoned");
         match codes.get(code) {
             None => Err(PairError::Invalid),
-            Some(created) if created.elapsed() >= PAIR_CODE_TTL => Err(PairError::Expired),
+            Some(created) if created.elapsed() >= self.ttl => Err(PairError::Expired),
             Some(_) => Ok(()),
         }
     }
@@ -268,7 +283,7 @@ impl Pairing {
         let mut codes = self.codes.lock().expect("pairing poisoned");
         let outcome = match codes.get(code) {
             None => Err(PairError::Invalid),
-            Some(created) if created.elapsed() >= PAIR_CODE_TTL => Err(PairError::Expired),
+            Some(created) if created.elapsed() >= self.ttl => Err(PairError::Expired),
             Some(_) => Ok(()),
         };
         match outcome {
@@ -298,7 +313,7 @@ impl Pairing {
     fn record_failed_attempt(&self) -> bool {
         let mut failures = self.failures.lock().expect("pairing poisoned");
         failures.push(Instant::now());
-        failures.retain(|at| at.elapsed() < PAIR_CODE_TTL);
+        failures.retain(|at| at.elapsed() < self.ttl);
         failures.len() >= MAX_FAILED_PAIR_ATTEMPTS
     }
 }
@@ -316,6 +331,30 @@ mod tests {
         assert_eq!(pairing.consume(&code), Ok(()));
         assert_eq!(pairing.consume(&code), Err(PairError::Invalid));
         assert_eq!(pairing.consume("NOPE2345"), Err(PairError::Invalid));
+    }
+
+    #[test]
+    fn concurrent_consumers_burn_one_code_exactly_once() {
+        let pairing = std::sync::Arc::new(Pairing::new());
+        let code = pairing.new_code();
+        let winners = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..16 {
+                let pairing = pairing.clone();
+                let code = code.clone();
+                let winners = &winners;
+                s.spawn(move || {
+                    if pairing.consume(&code).is_ok() {
+                        winners.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            winners.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "exactly one consumer may mint off a one-time code"
+        );
     }
 
     #[test]

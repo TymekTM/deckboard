@@ -208,7 +208,10 @@ async fn asset_get(
                 header::CONTENT_RANGE,
                 format!("bytes {start}-{end_incl}/{total}").parse().unwrap(),
             );
-            (head, bytes).into_response()
+            // a satisfied range is partial content: 200 with a
+            // Content-Range header is spec-invalid and clients treat the
+            // body as the whole asset
+            (StatusCode::PARTIAL_CONTENT, head, bytes).into_response()
         }
         crate::assets::AssetBody::Unsatisfiable(total) => (
             [(header::CONTENT_RANGE, format!("bytes */{total}"))],
