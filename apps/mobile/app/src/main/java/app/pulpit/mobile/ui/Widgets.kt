@@ -645,11 +645,18 @@ private fun StatusDetailView(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (!row.isHeader) {
-                        val glyphProvider = row.provider.ifEmpty { laneProvider(row.label) }
-                        ProviderGlyph(glyphProvider, 17.dp, alpha = 0.72f)
-                        Spacer(Modifier.size(5.dp))
+                        // dot pinned to the left edge, brand mark after it -
+                        // the editor's row order (dot, glyph, label); plan
+                        // rows resolve their provider from the label, and
+                        // providers without a mark draw dot + label only,
+                        // like the desktop's missing-SVG skip
                         StatusDot(row.state)
                         Spacer(Modifier.size(7.dp))
+                        val glyphProvider = row.provider.ifEmpty { laneProvider(row.label) }
+                        if (providerPaths.containsKey(glyphProvider.lowercase())) {
+                            ProviderGlyph(glyphProvider, 17.dp, alpha = 0.72f)
+                            Spacer(Modifier.size(7.dp))
+                        }
                     }
                     Text(
                         text = row.label,
