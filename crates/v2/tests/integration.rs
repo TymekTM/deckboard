@@ -985,7 +985,7 @@ async fn interaction_acks_execs_and_reports_unknown_tiles() {
     assert_eq!(payload.code, error_code::UNSUPPORTED_INTERACTION);
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn hold_repeat_runs_until_press_end() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
@@ -1028,7 +1028,7 @@ async fn hold_repeat_runs_until_press_end() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn duplicate_press_start_does_not_leak_a_repeat_loop() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
