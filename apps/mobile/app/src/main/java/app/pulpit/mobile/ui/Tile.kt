@@ -360,13 +360,24 @@ private fun ButtonTile(
                         }                         finally {
                             // a long press or a swipe already sent this
                             // touch's interaction; the plain release must
-                            // not fire a second one
-                            if (tracker.consumed) {
-                                onPressCancel()
-                            } else if (released || currentTile.interacts(V2.INT_PRESS_END)) {
-                                pressEnd()
-                            } else {
-                                onPressCancel()
+                            // not fire a second one - but a press-mode
+                            // tile still owes its press-end even then
+                            // (MOB-02): only press-end stops the server's
+                            // hold-repeat loop, so the release decision
+                            // handles consumed gestures explicitly
+                            when (
+                                releaseDecision(
+                                    consumed = tracker.consumed,
+                                    released = released,
+                                    declaresPressEnd = currentTile.interacts(V2.INT_PRESS_END),
+                                    declaresPressPair = currentTile.interacts(V2.INT_PRESS_START) &&
+                                        currentTile.interacts(V2.INT_PRESS_END),
+                                    tapSentFromOnTap = currentTile.interacts(V2.INT_DOUBLE_TAP) &&
+                                        !currentTile.interacts(V2.INT_PRESS_END),
+                                )
+                            ) {
+                                ReleaseDecision.Fire -> pressEnd()
+                                ReleaseDecision.Cancel -> onPressCancel()
                             }
                         }
                     },
