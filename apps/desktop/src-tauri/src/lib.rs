@@ -1766,6 +1766,23 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn import_rejects_files_over_the_cap_before_reading() {
+        // CORE-09: an oversized pick refuses at the stat - the file is
+        // never read into memory (set_len extends without writing, so
+        // the test stays cheap)
+        let dir = scratch_dir("import-cap");
+        let db = pulpit_db::Db::open_or_create(&dir.join("t.db")).expect("db");
+        let backend = Arc::new(SqlBackend::new(db));
+        let big = dir.join("big.boardjson");
+        let file = std::fs::File::create(&big).expect("create");
+        file.set_len(IMPORT_READ_CAP_BYTES + 1).expect("extend");
+        drop(file);
+        let err = import_boards_blocking(backend, &big.to_string_lossy()).expect_err("must refuse");
+        assert!(err.contains("limit to 64 MiB"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An isolated scratch directory for a test's devices.json.
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
         let dir =
@@ -2261,18 +2278,54 @@ async fn export_boards(
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+/// Hard cap on a `.boardjson` import (CORE-09): the path comes from the
+/// frontend, so a giant file must be rejected before it is read and
+/// parsed into memory - the board/tile count bounds only fire after the
+/// parse. 64 MiB is far above what the 100-board/1024-tile caps allow
+/// an honest export to weigh.
+const IMPORT_READ_CAP_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read, parse and import a `.boardjson` file written by this editor or
+/// the original app. Split out of the command so the size-cap behavior
+/// is testable without a Tauri app; runs on the blocking pool.
+fn import_boards_blocking(
+    backend: Arc<SqlBackend>,
+    path: &str,
+) -> Result<Vec<i64>, String> {
+    // stat first: an oversized file rejects before a single byte is read
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() > IMPORT_READ_CAP_BYTES {
+        return Err(format!(
+            "Plik importu ma {} MiB - limit to {} MiB.",
+            meta.len() / (1024 * 1024),
+            IMPORT_READ_CAP_BYTES / (1024 * 1024)
+        ));
+    }
+    // take() bounds the read itself: a file that grows between the stat
+    // and the read still cannot pull more than cap+1 bytes in
+    use std::io::Read as _;
+    let mut content = String::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(IMPORT_READ_CAP_BYTES + 1)
+        .read_to_string(&mut content)
+        .map_err(|e| e.to_string())?;
+    if content.len() as u64 > IMPORT_READ_CAP_BYTES {
+        return Err("Plik importu przekracza limit 64 MiB.".to_string());
+    }
+    let boards: Vec<serde_json::Value> =
+        serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    backend.import_boards(&boards).map_err(|e| e.to_string())
+}
+
 /// Read and import a `.boardjson` file written by this editor or the
 /// original app.
 #[tauri::command]
 async fn import_boards(state: State<'_, DesktopState>, path: String) -> Result<Vec<i64>, String> {
     let backend = state.backend()?;
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let boards: Vec<serde_json::Value> =
-        serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let ids = tauri::async_runtime::spawn_blocking(move || backend.import_boards(&boards))
+    let ids = tauri::async_runtime::spawn_blocking(move || import_boards_blocking(backend, &path))
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())??;
     state.broadcaster()?.sync_boards().await;
     for id in ids.iter().copied() {
         state.publish_board_set(id);
