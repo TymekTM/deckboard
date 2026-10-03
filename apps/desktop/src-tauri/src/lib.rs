@@ -1215,10 +1215,13 @@ fn resolve_update_url(stored: Option<&str>) -> Option<String> {
 }
 
 /// A parsed update manifest: where to fetch and how to verify.
+/// `sha256` is REQUIRED (DESK-02): the digest is the only integrity
+/// mechanism in the flow, so a manifest without it is refused instead
+/// of silently installing an unverified binary.
 struct UpdateManifest {
     version: String,
     url: String,
-    sha256: Option<String>,
+    sha256: String,
 }
 
 fn parse_update_manifest(text: &str) -> Result<UpdateManifest, String> {
@@ -1243,7 +1246,11 @@ fn parse_update_manifest(text: &str) -> Result<UpdateManifest, String> {
     let sha256 = manifest
         .get("sha256")
         .and_then(|v| v.as_str())
-        .map(str::to_string);
+        .ok_or("Manifest nie ma pola \"sha256\" - bez sumy kontrolnej odmowa instalacji.")?
+        .to_string();
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Pole \"sha256\" manifestu nie jest sumą kontrolną (64 znaki hex).".to_string());
+    }
     Ok(UpdateManifest {
         version,
         url,
@@ -1372,23 +1379,58 @@ fn apply_update(exe: &std::path::Path, downloaded: &std::path::Path) -> Result<(
     Ok(())
 }
 
-/// Schedule the freshly swapped exe to start after this process exits
-/// (the single-instance plugin would kill a sibling that starts too
-/// early). `cmd` survives the parent: it waits 2 s, then starts the app.
-fn relaunch_after_swap(exe: &std::path::Path) -> Result<(), String> {
+/// The cmd.exe script the update guard runs (DESK-02): wait out this
+/// process's exit, then either start the swapped exe (the normal path),
+/// or - when the process died between the swap's two renames, leaving
+/// no exe in place - finish the swap first: the staged download (or, as
+/// the last resort, the rolled-back `.old`) takes the exe's name and
+/// starts, so a crash mid-swap cannot leave the machine with no exe.
+/// Every path rides in quotes: spaces, `&` and parentheses in an
+/// install path must stay literal.
+fn relaunch_script(
+    exe: &std::path::Path,
+    staged: &std::path::Path,
+    old: &std::path::Path,
+) -> String {
+    let (exe, staged, old) = (
+        exe.to_string_lossy(),
+        staged.to_string_lossy(),
+        old.to_string_lossy(),
+    );
+    format!(
+        "/C timeout /t 2 /nobreak >nul & \
+         if exist \"{exe}\" (start \"\" \"{exe}\") \
+         else if exist \"{staged}\" (move /y \"{staged}\" \"{exe}\" >nul & start \"\" \"{exe}\") \
+         else if exist \"{old}\" (move /y \"{old}\" \"{exe}\" >nul & start \"\" \"{exe}\")"
+    )
+}
+
+/// Spawn the detached recovery guard BEFORE the swap starts, so the
+/// crash window between the two renames is covered. Returned as a
+/// [`std::process::Child`] so a failed swap can kill it before its
+/// timeout fires; on success the caller must [`std::mem::forget`] the
+/// child - the guard has to outlive this process to relaunch it.
+fn spawn_update_guard(
+    exe: &std::path::Path,
+    staged: &std::path::Path,
+) -> Result<std::process::Child, String> {
     use std::os::windows::process::CommandExt;
     const DETACHED: u32 = 0x0000_0008;
     const NO_WINDOW: u32 = 0x0800_0000;
-    let exe_str = exe.to_string_lossy().into_owned();
-    std::process::Command::new("cmd")
-        .args([
-            "/C",
-            &format!("timeout /t 2 /nobreak >nul & start \"\" \"{exe_str}\""),
-        ])
-        .creation_flags(DETACHED | NO_WINDOW)
-        .spawn()
-        .map_err(|e| format!("Nie udało się zaplanować restartu: {e}"))?;
-    Ok(())
+    // raw_arg passes the script verbatim: Rust's default arg escaping
+    // would wrap it in quotes and backslash-escape the inner ones,
+    // which cmd.exe does not understand - the paths would arrive
+    // mangled. Paths cannot contain a literal `"` on Windows; a
+    // %-sequence in a path would still expand, like in every cmd line.
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.raw_arg(relaunch_script(
+        exe,
+        staged,
+        &exe.with_extension("exe.old"),
+    ))
+    .creation_flags(DETACHED | NO_WINDOW)
+    .spawn()
+    .map_err(|e| format!("Nie udało się zaplanować restartu: {e}"))
 }
 
 /// Download (manifest URL again, so the check cannot go stale), verify
@@ -1430,17 +1472,27 @@ async fn install_update(
         let staged = staging_dir.join("pulpit-desktop.new");
         let _ = std::fs::remove_file(&staged);
         download_update(&manifest.url, &staged)?;
-        if let Some(expected) = &manifest.sha256 {
-            if !sha256_matches(&staged, expected)? {
-                let _ = std::fs::remove_file(&staged);
-                return Err(
-                    "Suma kontrolna pobranego pliku się nie zgadza - instalacja przerwana."
-                        .to_string(),
-                );
+        // unconditional: sha256 is required by the parser, so an
+        // unverified binary can never be swapped in (DESK-02)
+        if !sha256_matches(&staged, &manifest.sha256)? {
+            let _ = std::fs::remove_file(&staged);
+            return Err(
+                "Suma kontrolna pobranego pliku się nie zgadza - instalacja przerwana.".to_string(),
+            );
+        }
+        // The guard is alive BEFORE the first rename: a death between
+        // the swap's two renames (no exe in place) gets healed by its
+        // script instead of bricking the install. A failed swap kills
+        // it before its timeout fires; a successful one forgets it so
+        // it survives this process as the relauncher.
+        let mut guard = spawn_update_guard(&exe, &staged)?;
+        match apply_update(&exe, &staged) {
+            Ok(()) => std::mem::forget(guard),
+            Err(e) => {
+                let _ = guard.kill();
+                return Err(e);
             }
         }
-        apply_update(&exe, &staged)?;
-        relaunch_after_swap(&exe)?;
         Ok(format!(
             "Zainstalowano v{}. Aplikacja uruchomi się ponownie.",
             manifest.version
@@ -1650,18 +1702,74 @@ mod tests {
             resolve_update_url(Some(" https://example.com/feed.json ")).as_deref(),
             Some("https://example.com/feed.json")
         );
-        // manifest: version+url required, url must be https, sha optional
-        let m =
-            parse_update_manifest(r#"{"version":"1.3.0","url":"https://x/y.exe","sha256":"abc"}"#)
-                .expect("parses");
+        // manifest: version+url required, url must be https, sha256 is
+        // REQUIRED and must be a 64-hex digest (DESK-02) - a feed
+        // without a digest must never yield an installable manifest
+        let digest = "a".repeat(64);
+        let m = parse_update_manifest(&format!(
+            r#"{{"version":"1.3.0","url":"https://x/y.exe","sha256":"{digest}"}}"#
+        ))
+        .expect("parses");
         assert_eq!(m.version, "1.3.0");
         assert_eq!(m.url, "https://x/y.exe");
-        assert_eq!(m.sha256.as_deref(), Some("abc"));
+        assert_eq!(m.sha256, digest);
         assert!(parse_update_manifest(r#"{"version":"1.3.0"}"#).is_err());
         assert!(parse_update_manifest(r#"{"version":"1.3.0","url":"http://x/y.exe"}"#).is_err());
+        assert!(parse_update_manifest(r#"{"version":"1.3.0","url":"https://x/y.exe"}"#).is_err());
+        assert!(parse_update_manifest(
+            r#"{"version":"1.3.0","url":"https://x/y.exe","sha256":"abc"}"#
+        )
+        .is_err());
+        assert!(parse_update_manifest(&format!(
+            r#"{{"version":"1.3.0","url":"https://x/y.exe","sha256":"{}"}}"#,
+            "z".repeat(64)
+        ))
+        .is_err());
         // version compare unchanged
         assert!(version_newer("1.3.0", "1.2.9"));
         assert!(!version_newer("1.3.0", "1.3.0"));
+    }
+
+    #[test]
+    fn relaunch_script_quotes_paths_and_heals_a_lost_exe() {
+        // DESK-02: the guard script waits, then either starts the exe,
+        // or finishes a swap that crashed between its two renames
+        // (staged first, .old as the last resort)
+        let exe = std::path::Path::new(r"C:\Program Files\Pulpit\pulpit-desktop.exe");
+        let staged =
+            std::path::Path::new(r"C:\Users\T\AppData\pulpitApp\updates\pulpit-desktop.new");
+        let old = std::path::Path::new(r"C:\Program Files\Pulpit\pulpit-desktop.exe.old");
+        let script = relaunch_script(exe, staged, old);
+        assert!(
+            script.starts_with("/C timeout /t 2 /nobreak >nul & "),
+            "got: {script}"
+        );
+        // spaces and every path mention ride inside quotes
+        assert!(
+            script.contains(
+                r#"if exist "C:\Program Files\Pulpit\pulpit-desktop.exe" (start "" "C:\Program Files\Pulpit\pulpit-desktop.exe")"#
+            ),
+            "got: {script}"
+        );
+        assert!(
+            script.contains(&format!(
+                r#"else if exist "{}" (move /y "{}" "{}" >nul & start "" "{}")"#,
+                staged.display(),
+                staged.display(),
+                exe.display(),
+                exe.display()
+            )),
+            "got: {script}"
+        );
+        assert!(
+            script.contains(&format!(
+                r#"else if exist "{}" (move /y "{}" "{}" >nul"#,
+                old.display(),
+                old.display(),
+                exe.display()
+            )),
+            "got: {script}"
+        );
     }
 
     #[test]
