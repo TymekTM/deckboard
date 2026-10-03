@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
@@ -120,22 +119,6 @@ fun BoardScreen(vm: PulpitViewModel) {
                 )
             }
         }
-    }
-}
-
-/** Static busy ring: deck tablets often run with animator scales off,
- *  which freezes an indeterminate spinner into an invisible dot. A fixed
- *  300-degree arc reads as "busy" on every device. */
-@Composable
-private fun RingSpinner(modifier: Modifier = Modifier) {
-    Canvas(modifier.size(34.dp)) {
-        drawArc(
-            color = Color.White,
-            startAngle = -90f,
-            sweepAngle = 300f,
-            useCenter = false,
-            style = Stroke(width = 6f, cap = StrokeCap.Round),
-        )
     }
 }
 
