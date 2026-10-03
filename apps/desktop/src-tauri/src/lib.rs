@@ -1036,10 +1036,13 @@ fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, S
             }
         })
         .collect();
-    tracing::info!(%code, "pairing code minted from the editor - expires in 5 minutes");
+    // Code-free mint log line, the exact text the v2 routes use (audit
+    // B2 step 1 / CORE-03: logs outlive the 5-minute TTL, and pairing
+    // auto-accepts, so a logged code is a standing invite).
+    tracing::info!("{}", pulpit_v2::pair_minted_message());
     Ok(PairingOffer {
         code,
-        expires_in_secs: 300,
+        expires_in_secs: pulpit_v2::PAIR_CODE_TTL.as_secs(),
         addresses,
     })
 }
@@ -1530,6 +1533,17 @@ mod tests {
     fn pairing_url_matches_the_protocol_doc() {
         let url = pairing_shape("192.168.0.97", 8500, "ABCD2345");
         assert_eq!(url, "pulpit://192.168.0.97:8500?pair=ABCD2345");
+    }
+
+    #[test]
+    fn pairing_mint_log_and_ttl_stay_code_free() {
+        // CORE-03/DESK-05: the mint log line is the shared static string
+        // (no site interpolates the code into it), and the offer's TTL
+        // is the same constant the v2 routes derive it from.
+        let message = pulpit_v2::pair_minted_message();
+        assert!(message.contains("code suppressed in logs"));
+        assert!(!message.contains("{code}"), "got: {message}");
+        assert_eq!(pulpit_v2::PAIR_CODE_TTL.as_secs(), 300);
     }
 
     #[test]

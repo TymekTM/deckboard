@@ -154,8 +154,9 @@ async fn pair_create(
 }
 
 /// The `POST /v2/pair` log line - deliberately takes no code argument
-/// so the secret cannot leak into it.
-fn pair_minted_message() -> &'static str {
+/// so the secret cannot leak into it. Public so the desktop's mint
+/// command logs the exact same code-free text (audit B2 step 1).
+pub fn pair_minted_message() -> &'static str {
     "pairing code minted - expires in 5 minutes (code suppressed in logs)"
 }
 
