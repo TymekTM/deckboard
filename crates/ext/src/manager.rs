@@ -669,10 +669,12 @@ fn load_extension(
     events_tx: &tokio_mpsc::UnboundedSender<ExtEvent>,
     active_clients: &Arc<AtomicUsize>,
 ) -> Result<(ProbeMeta, Option<mpsc::Sender<ExtRequest>>), HostError> {
-    // extract to a temp dir before spawning (plain IO, thread-agnostic)
-    let source = crate::source::PackageSource::open(path, package.to_string())
-        .map_err(|e| HostError::Other(e.to_string()))?;
-    let root = source.root;
+    // extract to a temp dir before spawning (plain IO, thread-agnostic);
+    // the keep-guard rides into the thread so the extraction outlives
+    // the runtime reading from it
+    let (root, keep) = crate::source::PackageSource::open(path, package.to_string())
+        .map_err(|e| HostError::Other(e.to_string()))?
+        .into_root();
     let package = package.to_string();
     let configs = configs.clone();
     let events_tx = events_tx.clone();
@@ -685,43 +687,46 @@ fn load_extension(
     std::thread::Builder::new()
         .name(format!("ext-{package}"))
         .stack_size(64 * 1024 * 1024)
-        .spawn(move || match ExtRuntime::load(&root, &package, &configs) {
-            Ok(mut rt) => {
-                let has_timers = rt.has_timers();
-                let meta = ProbeMeta {
-                    name: rt.name.clone(),
-                    actions: rt.actions.clone(),
-                    inputs: rt.inputs.clone(),
-                    has_timers,
-                };
-                // drain setValue/interval events the load itself produced
-                for ev in rt.drain() {
-                    ExtManager::forward(&events_tx, ev);
-                }
-                if has_timers {
-                    let (req_tx, req_rx) = mpsc::channel();
-                    if res_tx.send(Ok((meta, Some(req_tx.clone())))).is_ok() {
-                        runtime_loop(
-                            ExtSlot {
-                                root,
-                                package,
-                                configs,
-                                live: Some(rt),
-                            },
-                            req_rx,
-                            events_tx,
-                            active_clients,
-                        );
+        .spawn(move || {
+            let _keep = keep;
+            match ExtRuntime::load(&root, &package, &configs) {
+                Ok(mut rt) => {
+                    let has_timers = rt.has_timers();
+                    let meta = ProbeMeta {
+                        name: rt.name.clone(),
+                        actions: rt.actions.clone(),
+                        inputs: rt.inputs.clone(),
+                        has_timers,
+                    };
+                    // drain setValue/interval events the load itself produced
+                    for ev in rt.drain() {
+                        ExtManager::forward(&events_tx, ev);
                     }
-                } else {
-                    let _ = res_tx.send(Ok((meta, None)));
-                    // runtime drops: freed JS pages stay committed in the
-                    // OS heap, which is exactly why lazy packages must not
-                    // be re-probed on every start (the metadata cache)
+                    if has_timers {
+                        let (req_tx, req_rx) = mpsc::channel();
+                        if res_tx.send(Ok((meta, Some(req_tx.clone())))).is_ok() {
+                            runtime_loop(
+                                ExtSlot {
+                                    root,
+                                    package,
+                                    configs,
+                                    live: Some(rt),
+                                },
+                                req_rx,
+                                events_tx,
+                                active_clients,
+                            );
+                        }
+                    } else {
+                        let _ = res_tx.send(Ok((meta, None)));
+                        // runtime drops: freed JS pages stay committed in the
+                        // OS heap, which is exactly why lazy packages must not
+                        // be re-probed on every start (the metadata cache)
+                    }
                 }
-            }
-            Err(e) => {
-                let _ = res_tx.send(Err(e));
+                Err(e) => {
+                    let _ = res_tx.send(Err(e));
+                }
             }
         })
         .map_err(|e| HostError::Other(e.to_string()))?;
@@ -748,9 +753,9 @@ fn spawn_runtime(
     active_clients: &Arc<AtomicUsize>,
     load_timeout: Duration,
 ) -> Result<mpsc::Sender<ExtRequest>, HostError> {
-    let source = crate::source::PackageSource::open(path, package.to_string())
-        .map_err(|e| HostError::Other(e.to_string()))?;
-    let root = source.root;
+    let (root, keep) = crate::source::PackageSource::open(path, package.to_string())
+        .map_err(|e| HostError::Other(e.to_string()))?
+        .into_root();
     let package = package.to_string();
     let configs = configs.clone();
     let events_tx = events_tx.clone();
@@ -761,24 +766,28 @@ fn spawn_runtime(
     std::thread::Builder::new()
         .name(format!("ext-{package}"))
         .stack_size(64 * 1024 * 1024)
-        .spawn(move || match ExtRuntime::load(&root, &package, &configs) {
-            Ok(rt) => {
-                if res_tx.send(Ok(())).is_ok() {
-                    runtime_loop(
-                        ExtSlot {
-                            root,
-                            package,
-                            configs,
-                            live: Some(rt),
-                        },
-                        req_rx,
-                        events_tx,
-                        active_clients,
-                    );
+        .spawn(move || {
+            // the extraction must outlive this thread
+            let _keep = keep;
+            match ExtRuntime::load(&root, &package, &configs) {
+                Ok(rt) => {
+                    if res_tx.send(Ok(())).is_ok() {
+                        runtime_loop(
+                            ExtSlot {
+                                root,
+                                package,
+                                configs,
+                                live: Some(rt),
+                            },
+                            req_rx,
+                            events_tx,
+                            active_clients,
+                        );
+                    }
                 }
-            }
-            Err(e) => {
-                let _ = res_tx.send(Err(e));
+                Err(e) => {
+                    let _ = res_tx.send(Err(e));
+                }
             }
         })
         .map_err(|e| HostError::Other(e.to_string()))?;
