@@ -27,8 +27,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import app.pulpit.mobile.net.ConnState
 import app.pulpit.mobile.state.PulpitViewModel
 
@@ -36,6 +41,7 @@ import app.pulpit.mobile.state.PulpitViewModel
 fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
     val cfg by vm.config.collectAsState()
     val conn by vm.connState.collectAsState()
+    val context = LocalContext.current
 
     var host by remember(cfg.host) { mutableStateOf(cfg.host) }
     var port by remember(cfg.port) { mutableStateOf(cfg.port.toString()) }
@@ -94,6 +100,26 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
                 color = Color.White.copy(alpha = 0.6f),
                 modifier = Modifier.padding(top = 12.dp),
             )
+            // The keep-alive service needs to escape Doze on aggressive
+            // ROMs; stock Android keeps foreground services running, but
+            // the OEM grid (Lineage included) may not. One tap, once.
+            val pm = context.getSystemService(PowerManager::class.java)
+            val pkg = context.packageName
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(pkg)) {
+                TextButton(
+                    text = "Zezwól na pracę w tle (omijaj oszczędzanie baterii)",
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    Uri.parse("package:$pkg"),
+                                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }
+                    },
+                )
+            }
             TextButton(
                 text = "Forget pairing",
                 onClick = { vm.forgetPairing() },
@@ -106,6 +132,18 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            )
+            // USB path (ROADMAP M4): with the desktop reachable over adb
+            // reverse, the server answers on the phone's own loopback.
+            TextButton(
+                text = "Przez USB (adb reverse) - wstaw 127.0.0.1",
+                onClick = { host = "127.0.0.1" },
+            )
+            Text(
+                text = "na PC: adb reverse tcp:8500 tcp:8500",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.5f),
+                modifier = Modifier.padding(top = 4.dp),
             )
         }
 

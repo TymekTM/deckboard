@@ -1,18 +1,20 @@
 //! App state over protocol v2: connection lifecycle (token or pairing),
 //! boards snapshot + live deltas, the current board, and the live channel
 //! state (scalars + series). Reconnects with backoff; every (re)connect
-//! gets a full snapshot from the server, so there is no client cache to
-//! invalidate.
+//! gets a full snapshot from the server, so the on-disk cache
+//! (BoardCache) is display-only and never needs invalidating.
 
 package app.pulpit.mobile.state
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
-import android.util.Log
+import android.os.Build
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
+import app.pulpit.mobile.LinkService
 import app.pulpit.mobile.net.ConnState
 import app.pulpit.mobile.net.V2Client
 import app.pulpit.mobile.net.V2Event
@@ -34,6 +36,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 data class ServerConfig(
@@ -122,6 +125,11 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     private var eventJob: Job? = null
     private var reconnectAttempts = 0
 
+    /** Display-only offline cache (see [BoardCache]): written on every
+     *  full snapshot so a cold launch shows the board while the link
+     *  reconnects. Cleared on unpair. */
+    private val cache = BoardCache(File(app.filesDir, "cache"))
+
     /** One pending reconnect per connect cycle: Failed and Disconnected
      *  arrive back to back, and each state flip would otherwise schedule
      *  a duplicate timer (double-counting the attempt budget). */
@@ -145,7 +153,9 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         // A paired device reconnects on its own; pairing needs the user
         // to enter a fresh code.
         if (!_config.value.token.isNullOrBlank()) {
+            loadCacheIntoUi()
             connect()
+            startKeepAlive()
         }
         // The silent probe: while the shutdown overlay is up and the app is
         // foreground, poke the server every PROBE_SECONDS so a restarted
@@ -155,7 +165,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 delay(PROBE_SECONDS * 1000L)
                 if (foreground && _serverDown.value) {
-                    Log.i(TAG, "shutdown probe: trying the server again")
+                    Plog.i(TAG, "shutdown probe: trying the server again")
                     connect()
                 }
             }
@@ -165,6 +175,55 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         disconnect()
         scope.cancel()
+    }
+
+    // -- offline cache (display-only) --------------------------------------
+
+    /** Cold launch with a stored pairing: paint the last snapshot before
+     *  the first bytes hit the wire, so the deck comes up looking alive
+     *  and the retry banner says how the link really is. */
+    private fun loadCacheIntoUi() {
+        val snap = cache.load() ?: return
+        Plog.i(TAG, "offline cache: ${snap.boards.size} boards restored")
+        _boards.value = snap.boards.sortedBy { it.order }
+        _currentBoard.value = _boards.value.firstOrNull()
+        _values.value = snap.values
+        _series.value = snap.series
+    }
+
+    /** Fire-and-forget persist of the latest full snapshot (boards or
+     *  state.sync); patches are not persisted - the next snapshot will
+     *  be, and a cold launch only needs the shape of the deck. */
+    private fun persistCache() {
+        if (_boards.value.isEmpty()) return
+        val payload = CachePayload(_boards.value, _values.value, _series.value)
+        scope.launch(Dispatchers.IO) { cache.save(payload) }
+    }
+
+    // -- keep-alive (foreground service) ------------------------------------
+
+    /** Raise [LinkService] so Doze cannot starve the link once the
+     *  screen goes dark (ROADMAP M4). The service holds no socket; it
+     *  only keeps the process at foreground priority and flips the flag
+     *  [closesLinkOnBackground] consults. */
+    private fun startKeepAlive() {
+        val app = getApplication<Application>()
+        LinkBus.status.value = linkStatusLine(_connState.value, _config.value.host)
+        runCatching {
+            val intent = Intent(app, LinkService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) {
+                app.startForegroundService(intent)
+            } else {
+                app.startService(intent)
+            }
+        }.onFailure { Plog.w(TAG, "keep-alive service refused to start: ${it.message}") }
+    }
+
+    /** Back to plan 008 (close on background): unpair, or the user hit
+     *  "Rozłącz" and the service stopped itself. */
+    private fun stopKeepAlive() {
+        val app = getApplication<Application>()
+        runCatching { app.stopService(Intent(app, LinkService::class.java)) }
     }
 
     /** Kick off a fetch for [hash]. Reads [ServerConfig.token], so nothing
@@ -224,9 +283,9 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (load.rewrite) {
             if (load.token == null) {
-                Log.i(TAG, "stored pairing token unreadable - the device must pair again")
+                Plog.i(TAG, "stored pairing token unreadable - the device must pair again")
             } else {
-                Log.i(TAG, "migrating plaintext pairing token to keystore encryption")
+                Plog.i(TAG, "migrating plaintext pairing token to keystore encryption")
             }
             storeToken(load.token)
         }
@@ -251,7 +310,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         if (token != null && envelope == null) {
             // encryption failed (unpair with a null token is the normal
             // path): the reason is worth a line, the token never is.
-            Log.w(TAG, "token vault: encrypt failed - token not persisted, re-pair after restart")
+            Plog.w(TAG, "token vault: encrypt failed - token not persisted, re-pair after restart")
         }
         if (envelope == null) {
             editor.remove("token")
@@ -312,7 +371,9 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     fun forgetPairing() {
         saveConfig(_config.value.copy(token = null))
+        stopKeepAlive()
         disconnect()
+        cache.clear()
         _boards.value = emptyList()
         _currentBoard.value = null
         _values.value = emptyMap()
@@ -362,11 +423,21 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         // (one-time code). Leave both alone.
         val refused = (_connState.value as? ConnState.Failed)?.retryable == false
         if (refused || pendingPairCode != null) return
-        // A dark screen has nothing to show: close the socket so the radio
-        // and the CPU can sleep instead of decoding patches nobody sees.
-        // Every connect gets a full snapshot, so nothing goes stale;
-        // onAppForeground reconnects.
-        Log.i(TAG, "app in background - closing the link")
+        // 008's battery win, with the M4 keep-alive escape hatch: while
+        // the foreground service is up the deck stays connected in the
+        // dark; otherwise the socket closes so the radio and the CPU can
+        // sleep. Every connect gets a full snapshot, so nothing goes
+        // stale; onAppForeground reconnects.
+        if (!closesLinkOnBackground(
+                LinkBus.keepLinkInBackground.value,
+                refused,
+                pendingPairCode != null,
+            )
+        ) {
+            Plog.i(TAG, "app in background - keep-alive service holds the link")
+            return
+        }
+        Plog.i(TAG, "app in background - closing the link")
         disconnect()
     }
 
@@ -375,6 +446,8 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             launch {
                 client.state.collect { st ->
                     _connState.value = st
+                    // the keep-alive notification mirrors the link line
+                    LinkBus.status.value = linkStatusLine(st, _config.value.host)
                     when (st) {
                         is ConnState.Connected -> {
                             reconnectAttempts = 0
@@ -383,7 +456,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                             disarmStandby()
                         }
                         is ConnState.ServerDown -> {
-                            Log.i(TAG, "server announced shutdown - retry loop suspended")
+                            Plog.i(TAG, "server announced shutdown - retry loop suspended")
                             _serverDown.value = true
                         }
                         // A refusal is final: stay on the connect screen with the reason.
@@ -423,8 +496,10 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                     .keys
                 _channelMeta.value = ev.welcome.channels
                 ev.issuedToken?.let { token ->
-                    Log.i(TAG, "paired, storing device token")
+                    Plog.i(TAG, "paired, storing device token")
                     saveConfig(_config.value.copy(token = token))
+                    // first pairing: raise the keep-alive service too
+                    startKeepAlive()
                 }
                 _deviceName.value = ev.welcome.device.name
                 pendingPairCode = null
@@ -434,6 +509,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                 val cur = _currentBoard.value
                 _currentBoard.value = _boards.value.firstOrNull { it.id == cur?.id }
                     ?: _boards.value.firstOrNull()
+                persistCache()
             }
             is V2Event.Delta -> applyDelta(ev.ops)
             is V2Event.SwitchBoard -> {
@@ -443,6 +519,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             is V2Event.State -> {
                 _values.value = ev.values
                 _series.value = ev.series
+                persistCache()
             }
             is V2Event.Patch -> {
                 val values = _values.value.toMutableMap()
@@ -470,7 +547,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             is V2Event.ServerError -> {
                 // Fatal codes are already terminal in V2Client
                 // (ConnState.Failed, retryable = false); nothing to do here.
-                Log.w(TAG, "server error: ${ev.code} ${ev.message.orEmpty()}")
+                Plog.w(TAG, "server error: ${ev.code} ${ev.message.orEmpty()}")
             }
             is V2Event.Acked -> {} // interactions are fire-and-confirm
         }
@@ -512,7 +589,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             if (_serverDown.value || !foreground) return@launch
             val st = _connState.value
             if ((st is ConnState.Failed && st.retryable) || st is ConnState.Disconnected) {
-                Log.i(TAG, "reconnect attempt $reconnectAttempts")
+                Plog.i(TAG, "reconnect attempt $reconnectAttempts")
                 connect()
             }
         }
@@ -526,7 +603,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         standbyJob = scope.launch {
             delay(LINK_STANDBY_MS)
             standbyJob = null
-            Log.i(TAG, "link down for ${LINK_STANDBY_MS / 60_000} min - letting the screen sleep")
+            Plog.i(TAG, "link down for ${LINK_STANDBY_MS / 60_000} min - letting the screen sleep")
             _linkStandby.value = true
         }
     }
