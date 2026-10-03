@@ -406,7 +406,7 @@ async fn browser_requests_are_rejected_on_the_sockets() {
     assert!(result.is_ok(), "Origin-less native requests must work");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn pair_route_refuses_non_loopback_callers() {
     // Derive a non-loopback local address the way the OS would route
     // it (UDP connect picks the source interface; no packet is sent).
@@ -440,7 +440,7 @@ async fn pair_route_refuses_non_loopback_callers() {
     assert_eq!(status, 200, "loopback callers still mint");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn expired_code_gets_pair_expired_over_the_socket() {
     let (state, _dir) = test_state_with_pairing(
         sample_backend(),
@@ -487,7 +487,7 @@ async fn expired_code_gets_pair_expired_over_the_socket() {
     assert!(closed.is_ok(), "socket must close after pair-expired");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn silent_hello_times_out_and_closes() {
     let (state, _dir) = test_state(sample_backend(), |cfg| {
         cfg.hello_timeout = Duration::from_millis(150);
@@ -523,7 +523,7 @@ async fn silent_hello_times_out_and_closes() {
     assert!(closed.is_ok(), "socket must close after the hello timeout");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn unknown_and_revoked_tokens_are_refused_at_the_upgrade() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let (device, token) = state.devices.create("Tablet");
@@ -543,7 +543,7 @@ async fn unknown_and_revoked_tokens_are_refused_at_the_upgrade() {
     assert!(revoked.is_err(), "revoked device's token must not upgrade");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn pairing_codes_never_reach_the_log() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let addr = spawn_server(state).await;
@@ -744,7 +744,7 @@ async fn pairing_flow_mints_welcome_and_device() {
         .any(|d| d.id == welcome.device.id));
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn hello_names_are_sanitized_before_persisting() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let (_device, token) = state.devices.create("Old name");
@@ -805,7 +805,7 @@ async fn hello_names_are_sanitized_before_persisting() {
     assert_eq!(welcome.device.name, "Device");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn device_revoked_mid_handshake_is_unauthorized() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let (device, token) = state.devices.create("Tablet");
@@ -1225,7 +1225,7 @@ async fn hub_teardown_ends_the_session_and_releases_held_keys() {
     wait_for_exec(&backend, (23, false)).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn reaped_silent_session_ends_and_releases_held_keys() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
