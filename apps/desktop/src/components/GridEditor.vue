@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
-import { CELL_W, ROW_H, MAX_BOARD_DIM } from "../catalog";
+import { CELL_W, ROW_H, MAX_BOARD_DIM, clamp } from "../catalog";
 import TileCell from "./TileCell.vue";
 
 // Edit-mode grid: drag to move, corner handle to resize, double-click to
@@ -55,10 +55,6 @@ function tileStyle(tile) {
     height: `${clamp(h, 1, props.board.height) * row.value}px`,
     zIndex: d ? 10 : 1,
   };
-}
-
-function clamp(v, min, max) {
-  return Math.min(max, Math.max(min, v));
 }
 
 // every unoccupied grid position renders as a visible empty slot, like the

@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { save, open, ask } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
-import { CATALOG } from "./catalog";
+import { CATALOG, clamp } from "./catalog";
 import GridEditor from "./components/GridEditor.vue";
 import EditTileModal from "./components/EditTileModal.vue";
 import BoardModal from "./components/BoardModal.vue";
@@ -194,10 +194,6 @@ function copyTile(tile) {
   // shallow spread is enough: button fields are all primitives, and the
   // snapshot must not follow later edits of the original
   tileClipboard.value = { ...tile };
-}
-
-function clamp(v, min, max) {
-  return Math.min(max, Math.max(min, v));
 }
 
 // Paste a copied button at an empty cell: create the row with the copied

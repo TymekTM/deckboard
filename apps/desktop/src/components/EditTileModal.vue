@@ -1,7 +1,7 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { CATALOG } from "../catalog";
+import { CATALOG, parsePlanWindows, setPlanWindows } from "../catalog";
 import { api } from "../api";
 import SelectField from "./SelectField.vue";
 import ActionPicker from "./ActionPicker.vue";
@@ -55,25 +55,15 @@ const form = reactive(
 
 // AI plan tile: which usage windows render, stored in the options column
 // as "windows:5h,week" (no token = both). Applies only to ai-plan-limits.
+// The token parses through the shared catalog helper (DESK-10) - the
+// status tile filters rows with the same function.
 const isPlanTile = computed(() => form.type === "ai-plan-limits");
-const planWindows = computed(() => {
-  const match = String(form.options || "").match(/(?:^|;)windows:([^;]*)/);
-  const want = match
-    ? match[1].split(",").map((s) => s.trim())
-    : ["5h", "week"];
-  return { five: want.includes("5h"), week: want.includes("week") };
-});
+const planWindows = computed(() => parsePlanWindows(form.options));
 function setPlanWindow(key, event) {
-  const next = { ...planWindows.value, [key]: event.target.checked };
-  const parts = [];
-  if (next.five) parts.push("5h");
-  if (next.week) parts.push("week");
-  const rest = String(form.options || "")
-    .replace(/(^|;)windows:[^;]*/g, "")
-    .replace(/^;+|;+$/g, "")
-    .replace(/;;+/g, ";");
-  const token = `windows:${parts.join(",")}`;
-  form.options = rest ? `${rest};${token}` : token;
+  form.options = setPlanWindows(form.options, {
+    ...planWindows.value,
+    [key]: event.target.checked,
+  });
 }
 
 // ---- action catalog (static groups + live extension inputs) ----------------

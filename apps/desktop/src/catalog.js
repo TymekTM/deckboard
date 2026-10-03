@@ -513,3 +513,43 @@ export function boardDim(value, fallback) {
   if (!Number.isFinite(n)) return fallback;
   return Math.min(MAX_BOARD_DIM, Math.max(1, n));
 }
+
+// Clamp to inclusive bounds. Used to live as private copies in App.vue
+// and GridEditor.vue; one home here so the bounds logic cannot drift
+// (DESK-10).
+export function clamp(v, min, max) {
+  return Math.min(max, Math.max(min, v));
+}
+
+// ---- plan usage windows (ai-plan-limits tiles) ------------------------------
+
+// Which usage windows a plan tile renders, stored in its options column as
+// a "windows:5h,week" token (no token = both windows). The edit dialog
+// writes the token (checkbox rows) and the status tile reads it (row
+// filter), so both sides parse through this one function - the regex and
+// the want-list used to be duplicated in EditTileModal.vue and
+// TileCell.vue and could drift silently (DESK-10).
+export function parsePlanWindows(options) {
+  const match = String(options || "").match(/(?:^|;)windows:([^;]*)/);
+  const want = match
+    ? match[1].split(",").map((s) => s.trim()).filter(Boolean)
+    : null;
+  return {
+    five: !want || want.includes("5h"),
+    week: !want || want.includes("week"),
+  };
+}
+
+// Rewrite (or append) the windows token in an options string, preserving
+// any sibling tokens: "flag:x;windows:5h" + {week only} -> "flag:x;windows:week".
+export function setPlanWindows(options, windows) {
+  const rest = String(options || "")
+    .replace(/(^|;)windows:[^;]*/g, "")
+    .replace(/^;+|;+$/g, "")
+    .replace(/;;+/g, ";");
+  const parts = [];
+  if (windows.five) parts.push("5h");
+  if (windows.week) parts.push("week");
+  const token = `windows:${parts.join(",")}`;
+  return rest ? `${rest};${token}` : token;
+}
