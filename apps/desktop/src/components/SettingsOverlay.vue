@@ -56,6 +56,110 @@ const adbBusy = ref(false);
 const adbNote = ref("");
 const adbNoteBad = ref(false);
 
+// AI usage (Ustawienia): the aidev producer detects the plan-limits rows
+// automatically; the user picks which ones the tile shows. An empty
+// stored selection means "everything detected" and is materialized into
+// checked boxes on load; saving writes [] only while nothing is hidden.
+const aidevDetected = ref([]); // [{id, label}] from the producer registry
+const aidevShow = ref([]); // working set of checked row ids
+const aidevSummary = ref(true);
+const aidevRowStyle = ref("name"); // "name" | "logo" row identifier
+const aidevBusy = ref(false);
+const aidevError = ref("");
+const aidevNote = ref("");
+
+// provider slug -> display name of a checkbox group
+const AIDEV_PROVIDERS = {
+  glm: "GLM",
+  codex: "Codex",
+  claude: "Claude",
+  openrouter: "OpenRouter",
+  "anthropic-api": "Anthropic API",
+  antigravity: "Antigravity",
+  custom: "Inne",
+};
+
+const aidevGroups = computed(() => {
+  const groups = new Map();
+  for (const row of aidevDetected.value) {
+    const slug = String(row.id).split(":")[0];
+    const name = AIDEV_PROVIDERS[slug] ?? slug;
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(row);
+  }
+  return [...groups.entries()].map(([name, rows]) => ({ name, rows }));
+});
+
+async function refreshAidev() {
+  try {
+    const cfg = await api.aidevStatusConfig();
+    aidevDetected.value = cfg.detected || [];
+    // an absent selection means everything detected is on
+    const saved = new Set(cfg.show || []);
+    aidevShow.value = saved.size
+      ? aidevDetected.value.filter((r) => saved.has(r.id)).map((r) => r.id)
+      : aidevDetected.value.map((r) => r.id);
+    aidevSummary.value = cfg.summary !== false;
+    aidevRowStyle.value = cfg.row_style === "logo" ? "logo" : "name";
+  } catch (e) {
+    aidevError.value = e ? String(e) : "Nie udało się pobrać ustawień AI usage.";
+  }
+}
+
+async function saveAidev() {
+  aidevBusy.value = true;
+  aidevError.value = "";
+  try {
+    // an all-checked working set stores [] so future detected rows keep
+    // appearing automatically
+    const all = aidevDetected.value.map((r) => r.id);
+    const everything = all.length > 0 && aidevShow.value.length === all.length;
+    await api.setAidevStatusConfig(
+      everything ? [] : aidevShow.value,
+      aidevSummary.value,
+      aidevRowStyle.value,
+    );
+    aidevNote.value = "Zapisano — zadziała przy następnym odświeżeniu kafelka.";
+    setTimeout(() => {
+      aidevNote.value = "";
+    }, 4000);
+  } catch (e) {
+    aidevError.value = e ? String(e) : "Nie udało się zapisać ustawień AI usage.";
+  } finally {
+    aidevBusy.value = false;
+  }
+}
+
+function aidevChecked(id) {
+  return aidevShow.value.includes(id);
+}
+
+function toggleAidevRow(id) {
+  const next = aidevChecked(id)
+    ? aidevShow.value.filter((x) => x !== id)
+    : [...aidevShow.value, id];
+  if (!next.length) {
+    aidevNote.value = "Przynajmniej jeden wiersz musi zostać zaznaczony.";
+    setTimeout(() => {
+      aidevNote.value = "";
+    }, 4000);
+    return;
+  }
+  aidevShow.value = next;
+  saveAidev();
+}
+
+function toggleAidevSummary() {
+  aidevSummary.value = !aidevSummary.value;
+  saveAidev();
+}
+
+function setAidevRowStyle(style) {
+  if (aidevRowStyle.value === style) return;
+  aidevRowStyle.value = style;
+  saveAidev();
+}
+
 async function refreshAdb() {
   adbBusy.value = true;
   try {
@@ -175,9 +279,11 @@ async function refreshDevices() {
 }
 
 // a pairing can complete while the overlay is open: refetch when the
-// devices tile is (re)focused
+// devices tile is (re)focused. The AI-usage detection list also grows
+// while the overlay sits open, so refetch on (re)focus too.
 watch(focused, (tile) => {
   if (tile === "devices") refreshDevices();
+  if (tile === "aidev") refreshAidev();
 });
 
 function revokeDevice(device) {
@@ -303,6 +409,7 @@ onMounted(async () => {
   autostart.value = await api.getAutostart().catch(() => false);
   refreshLan();
   refreshDevices();
+  refreshAidev();
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
@@ -614,6 +721,93 @@ onUnmounted(() => {
           </article>
         </div>
       </section>
+
+      <section class="row" aria-labelledby="sec-aidev">
+        <h2 id="sec-aidev">AI usage</h2>
+        <div class="tiles">
+          <article class="tile" :class="tileCls('aidev')">
+            <button
+              class="hit"
+              :tabindex="focused === 'aidev' ? -1 : 0"
+              aria-label="Rozwiń: AI usage"
+              @click="focused = 'aidev'"
+            ></button>
+            <header class="tile-head">
+              <h3>AI usage</h3>
+              <span class="chip" :class="aidevDetected.length ? 'ok' : ''">
+                {{
+                  aidevDetected.length
+                    ? `${aidevShow.length} z ${aidevDetected.length} wierszy`
+                    : "wykrywanie…"
+                }}
+              </span>
+            </header>
+            <p class="sum">
+              Kafele limitów planów AI: które wiersze pokazywać, czy mieć linię podsumowania.
+              Limity wykrywane automatycznie (GLM, Claude, Codex, OpenRouter).
+            </p>
+            <div v-show="focused === 'aidev'" class="detail">
+              <div class="ctl">
+                <div class="ctl-text">
+                  <span class="ctl-name">Identyfikacja wierszy</span>
+                  <span class="ctl-note">Nazwa tekstowa albo logo marki — nigdy oba naraz.</span>
+                </div>
+                <span class="seg">
+                  <button
+                    class="seg-btn"
+                    :class="{ on: aidevRowStyle === 'name' }"
+                    :disabled="aidevBusy"
+                    @click="setAidevRowStyle('name')"
+                  >Nazwa</button>
+                  <button
+                    class="seg-btn"
+                    :class="{ on: aidevRowStyle === 'logo' }"
+                    :disabled="aidevBusy"
+                    @click="setAidevRowStyle('logo')"
+                  >Logo</button>
+                </span>
+              </div>
+              <div class="ctl">
+                <div class="ctl-text">
+                  <span class="ctl-name">Linia podsumowania</span>
+                  <span class="ctl-note">Wiersz pod listą nazywający okienko najbliżej limitu.</span>
+                </div>
+                <button
+                  class="switch"
+                  role="switch"
+                  :aria-checked="aidevSummary"
+                  :disabled="aidevBusy"
+                  @click="toggleAidevSummary"
+                ><span class="knob"></span></button>
+              </div>
+              <template v-if="aidevGroups.length">
+                <div v-for="g in aidevGroups" :key="g.name" class="aid-group">
+                  <div class="aid-provider">{{ g.name }}</div>
+                  <label v-for="row in g.rows" :key="row.id" class="aid-check">
+                    <input
+                      type="checkbox"
+                      :checked="aidevChecked(row.id)"
+                      :disabled="aidevBusy"
+                      @change="toggleAidevRow(row.id)"
+                    />
+                    {{ row.label }}
+                  </label>
+                </div>
+              </template>
+              <p v-else class="note">
+                Wykrywanie potrzebuje jednego cyklu producenta — poczekaj chwilę i wróć do tej
+                karty.
+              </p>
+              <p class="note">
+                Odznaczone wiersze znikają z kafelka AI plan limits. Zmiany zapisują się same
+                i działają bez restartu aplikacji.
+              </p>
+              <p v-if="aidevError" class="err">{{ aidevError }}</p>
+              <p v-else-if="aidevNote" class="note pending">{{ aidevNote }}</p>
+            </div>
+          </article>
+        </div>
+      </section>
     </div>
 
     <!-- in-app revoke confirmation; replaces the native dialog popup -->
@@ -804,6 +998,57 @@ onUnmounted(() => {
 .ctl-text { min-width: 0; }
 .ctl-name { display: block; font-size: 13.5px; font-weight: 500; }
 .ctl-note { display: block; font-size: 12px; color: var(--ink-3); margin-top: 2px; line-height: 1.5; }
+
+/* AI usage: auto-detected row checkboxes, grouped per provider */
+.aid-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 10px 0;
+  border-top: 1px solid var(--tile-2);
+}
+.aid-provider {
+  flex: none;
+  min-width: 96px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.aid-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+}
+.aid-check input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+.aid-check:hover { color: var(--ink-2); }
+
+/* name | logo segmented pick */
+.seg {
+  flex: none;
+  display: inline-flex;
+  border: 1px solid var(--tile-2);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--tile-2); }
+.seg-btn.on { background: var(--tile-2); color: var(--ink); }
+.seg-btn:disabled { cursor: default; opacity: 0.7; }
 .locked {
   flex: none;
   display: flex;

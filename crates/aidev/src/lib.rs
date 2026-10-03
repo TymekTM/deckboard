@@ -105,6 +105,9 @@ pub struct Config {
     /// time (02:00 in Poland on UTC+1), which this switch moves to local
     /// midnight.
     pub local_midnight: bool,
+    /// Plan-limits tile presentation (Ustawienia -> AI usage): which
+    /// detected rows to show and whether the summary line is wanted.
+    pub status: StatusConfig,
     pub providers: Providers,
     /// Generic JSON endpoints: name, url, headers, used/limit JSON paths.
     /// This is the "support practically everything" escape hatch.
@@ -146,6 +149,94 @@ pub struct ZaiProvider {
     pub host: Option<String>,
 }
 
+/// Plan-limits tile presentation, edited from Ustawienia -> AI usage.
+/// `show` lists the row ids that survive; empty means "everything the
+/// producers detect" (the historical behavior). `summary` keeps the
+/// one-line headline under the row list. `row_style` picks the row
+/// identifier: "name" renders the text label, "logo" the provider mark
+/// (falling back to the name when no mark exists) - never both.
+#[derive(serde::Deserialize, Clone, PartialEq)]
+pub struct StatusConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub show: Vec<String>,
+    #[serde(default = "default_true")]
+    pub summary: bool,
+    #[serde(default)]
+    pub row_style: RowStyle,
+}
+
+#[derive(serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RowStyle {
+    #[default]
+    Name,
+    Logo,
+}
+
+impl RowStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RowStyle::Name => "name",
+            RowStyle::Logo => "logo",
+        }
+    }
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        // the derive would give summary=false; the line is ON unless
+        // the user turns it off
+        Self {
+            show: Vec::new(),
+            summary: true,
+            row_style: RowStyle::default(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One detected plan-limits row, published for the settings UI: `id` is
+/// the stable selection key ("glm:5h", "codex:week", ...), `label` the
+/// human-readable row name ("GLM 5h").
+#[derive(Clone, serde::Serialize)]
+pub struct DetectedRow {
+    pub id: String,
+    pub label: String,
+}
+
+static DETECTED: std::sync::OnceLock<std::sync::Mutex<Vec<DetectedRow>>> =
+    std::sync::OnceLock::new();
+
+/// Remember the rows this cycle's producers built, before any
+/// user-selection filtering, so the settings UI can offer every limit
+/// the machine actually reports (auto-detection).
+pub(crate) fn record_detected(rows: &[crate::limits::ProviderRow]) {
+    let cell = DETECTED.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut known = cell.lock().expect("detected registry lock");
+    for row in rows {
+        if row.id.is_empty() || known.iter().any(|d| d.id == row.id) {
+            continue;
+        }
+        known.push(DetectedRow {
+            id: row.id.clone(),
+            label: row.name.clone(),
+        });
+    }
+}
+
+/// Every plan-limits row detected so far (deduplicated by id, insertion
+/// order kept). The settings UI reads this to render the checkboxes.
+pub fn detected_rows() -> Vec<DetectedRow> {
+    DETECTED
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .expect("detected registry lock")
+        .clone()
+}
+
 #[derive(serde::Deserialize, Clone)]
 pub struct CustomProvider {
     pub name: String,
@@ -176,6 +267,7 @@ impl Default for Config {
             glm_five_hour_tokens: None,
             glm_week_tokens: None,
             local_midnight: false,
+            status: StatusConfig::default(),
             providers: Providers::default(),
             custom: Vec::new(),
         }
@@ -228,8 +320,12 @@ fn push_loop(tx: &tokio_mpsc::UnboundedSender<serde_json::Value>, paths: Paths) 
     let mut antigravity = antigravity::Usage::new(config.history_days);
     let mut http = limits::HttpState::default();
     let mut last_http: Option<std::time::Instant> = None;
-    let http_every = std::time::Duration::from_secs(config.http_poll_secs.max(30));
     loop {
+        // the config is re-read every cycle so edits from Ustawienia ->
+        // AI usage apply live, without restarting the app; the scanners
+        // keep their history, only the knobs move
+        let config = Config::load(&paths.config);
+        let http_every = std::time::Duration::from_secs(config.http_poll_secs.max(30));
         let now = unix_now();
         zcode.scan(local_usage::Format::Zcode, &paths.zcode_cli.join("rollout"));
         claude.scan(local_usage::Format::Claude, &paths.claude_projects);
@@ -283,13 +379,18 @@ fn assemble(
     let total = |key: fn(&local_usage::Sums) -> u64| sums.iter().map(|(_, s)| key(s)).sum::<u64>();
 
     let plan_rows = limits::plan_rows(config, http, &sums, paths, now);
-    // one-line headline: whichever window is closest to its limit
-    let plan_summary = plan_rows
-        .iter()
-        .filter_map(|r| r.percent.map(|p| (p, r)))
-        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(p, r)| format!("{} {:.0}%", r.name, p))
-        .unwrap_or_default();
+    // one-line headline: whichever window is closest to its limit; the
+    // AI-usage settings can turn the whole line off
+    let plan_summary = if config.status.summary {
+        plan_rows
+            .iter()
+            .filter_map(|r| r.percent.map(|p| (p, r)))
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(p, r)| format!("{} {:.0}%", r.name, p))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     let agents = agents::snapshot(config, paths, now);
     let hour_rows: Vec<_> = sums
@@ -309,8 +410,13 @@ fn assemble(
             "title": "AI plan limits",
             "rows": plan_rows.iter().map(limits::row_json).collect::<Vec<_>>(),
             // percent summary only when at least one lane knows its ceiling;
-            // an empty string keeps the renderer from drawing the line
+            // an empty string keeps the renderer from drawing the line.
+            // `hide_summary` tells renderers that recompute their own
+            // headline from the visible rows to keep quiet too, and
+            // `row_style` picks name vs brand mark as the row identifier.
             "summary": plan_summary,
+            "hide_summary": !config.status.summary,
+            "row_style": config.status.row_style.as_str(),
         },
         "ai-agent-status": agents,
         // graph tile: the client keeps the last 10 samples as a sparkline;
@@ -411,6 +517,22 @@ mod tests {
         assert_eq!(cfg.poll_secs, 15);
         assert_eq!(cfg.history_days, 8);
         assert_eq!(cfg.glm_five_hour_tokens, None);
+        // no status section: everything detected is shown, summary on,
+        // rows identified by name
+        assert_eq!(cfg.status.show, Vec::<String>::new());
+        assert!(cfg.status.summary);
+        assert_eq!(cfg.status.row_style, RowStyle::Name);
+    }
+
+    #[test]
+    fn config_parses_status_selection() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"status": {"show": ["glm:5h", "claude:week"], "summary": false, "row_style": "logo"}}"#,
+        )
+        .expect("status config parses");
+        assert_eq!(cfg.status.show, ["glm:5h", "claude:week"]);
+        assert!(!cfg.status.summary);
+        assert_eq!(cfg.status.row_style, RowStyle::Logo);
     }
 
     #[test]
@@ -444,6 +566,7 @@ mod tests {
         let config = Config::default();
         let http = limits::HttpState {
             rows: vec![limits::ProviderRow {
+                id: limits::row_id("OpenRouter", None),
                 name: "OpenRouter".into(),
                 state: "ok".into(),
                 text: "used $4.00 / $10.00".into(),

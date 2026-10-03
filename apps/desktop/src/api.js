@@ -34,4 +34,7 @@ export const api = {
   listAudioDevices: () => invoke("list_audio_devices"),
   exportBoards: (ids, path) => invoke("export_boards", { ids, path }),
   importBoards: (path) => invoke("import_boards", { path }),
+  aidevStatusConfig: () => invoke("aidev_status_config"),
+  setAidevStatusConfig: (show, summary, rowStyle) =>
+    invoke("set_aidev_status_config", { show, summary, rowStyle }),
 };

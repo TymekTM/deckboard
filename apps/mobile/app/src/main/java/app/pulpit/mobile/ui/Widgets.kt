@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -547,7 +548,8 @@ fun statusData(tile: Tile, live: kotlinx.serialization.json.JsonElement?): Statu
         )
     }.orEmpty()
     val summary = obj["summary"]?.jsonPrimitive?.contentOrNull.orEmpty()
-    return StatusData(rows, compact, summary)
+    val rowStyle = obj["row_style"]?.jsonPrimitive?.contentOrNull ?: "name"
+    return StatusData(rows, compact, summary, rowStyle)
 }
 
 /** "GLM 5h" -> "zcode": plan lane labels name the provider family. */
@@ -574,23 +576,25 @@ private val providerPaths = mapOf(
 )
 
 @Composable
-private fun ProviderGlyph(provider: String, size: Dp, alpha: Float = 0.85f) {
+private fun ProviderGlyph(provider: String, size: Dp, alpha: Float = 0.85f, tint: Color = Color.White) {
     val key = provider.lowercase()
     val d = providerPaths[key] ?: return
     // androidx.core's parser is the version-stable way to turn SVG path
     // data into something compose draws; the paint is hoisted because the
-    // draw lambda runs on every frame
+    // draw lambda runs on every frame. Tinted white like the editor's
+    // inline SVGs - a fresh Paint defaults to black, which vanished on
+    // the dark tiles.
     val nativePath = remember(d) { androidx.core.graphics.PathParser.createPathFromPathData(d) }
-    val paint = remember(alpha) {
+    val paint = remember(alpha, tint) {
         android.graphics.Paint().apply {
             style = android.graphics.Paint.Style.FILL
             isAntiAlias = true
+            color = tint.copy(alpha = alpha).toArgb()
         }
     }
     Canvas(Modifier.size(size)) {
         scale(size.toPx() / 24f) {
             drawIntoCanvas { canvas ->
-                paint.alpha = (alpha * 255).toInt()
                 canvas.nativeCanvas.drawPath(nativePath, paint)
             }
         }
@@ -644,23 +648,33 @@ private fun StatusDetailView(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    val glyphProvider = row.provider.ifEmpty { laneProvider(row.label) }
+                    // dot pinned to the left edge; the identifier is the
+                    // text label OR the brand mark, never both (the
+                    // producer's row_style switch, defaulting to name)
+                    val showMark = !row.isHeader &&
+                        data.rowStyle == "logo" &&
+                        providerPaths.containsKey(glyphProvider.lowercase())
                     if (!row.isHeader) {
-                        val glyphProvider = row.provider.ifEmpty { laneProvider(row.label) }
-                        ProviderGlyph(glyphProvider, 17.dp, alpha = 0.72f)
-                        Spacer(Modifier.size(5.dp))
                         StatusDot(row.state)
                         Spacer(Modifier.size(7.dp))
+                        if (showMark) {
+                            ProviderGlyph(glyphProvider, 17.dp, alpha = 0.72f)
+                            Spacer(Modifier.size(7.dp))
+                        }
                     }
-                    Text(
-                        text = row.label,
-                        fontSize = if (row.isHeader) 9.5.sp else 11.sp,
-                        fontWeight = if (row.isHeader) FontWeight.Bold else FontWeight.SemiBold,
-                        letterSpacing = if (row.isHeader) 0.6.sp else 0.sp,
-                        color = titleColor.copy(alpha = if (row.isHeader) 0.55f else 1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
+                    if (!showMark) {
+                        Text(
+                            text = row.label,
+                            fontSize = if (row.isHeader) 9.5.sp else 11.sp,
+                            fontWeight = if (row.isHeader) FontWeight.Bold else FontWeight.SemiBold,
+                            letterSpacing = if (row.isHeader) 0.6.sp else 0.sp,
+                            color = titleColor.copy(alpha = if (row.isHeader) 0.55f else 1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                    }
                     if (row.value.isNotEmpty()) {
                         Spacer(Modifier.size(6.dp))
                         Text(

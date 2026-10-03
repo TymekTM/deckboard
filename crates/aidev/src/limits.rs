@@ -20,14 +20,38 @@ use crate::{local_usage::fmt_tokens, local_usage::Sums, Apikey, Config, Paths};
 /// One display row of the plan-limits tile. `state` colors the dot:
 /// ok | warn | high | error. `percent` is the usage fill of the bar; the
 /// value text speaks in the remaining limit and, when the source reports
-/// it, the reset countdown (`reset_at`, unix epoch seconds).
+/// it, the reset countdown (`reset_at`, unix epoch seconds). `id` is the
+/// stable selection key the AI-usage settings store ("glm:5h",
+/// "codex:week"); it never reaches the wire.
 #[derive(Clone)]
 pub struct ProviderRow {
+    pub id: String,
     pub name: String,
     pub state: String,
     pub text: String,
     pub percent: Option<f64>,
     pub reset_at: Option<i64>,
+}
+
+/// Stable selection id of a row: the provider slug plus, for window
+/// bars, the window label ("glm:5h", "codex:week"). Window labels come
+/// out of `window_label()` already lowercase.
+pub(crate) fn row_id(provider: &str, window: Option<&str>) -> String {
+    match window {
+        Some(w) => format!("{}:{w}", provider.to_lowercase()),
+        None => provider.to_lowercase(),
+    }
+}
+
+/// Keep the rows picked in Ustawienia -> AI usage; an empty selection
+/// means "show everything detected" (the historical behavior).
+pub(crate) fn filter_by_selection(rows: Vec<ProviderRow>, show: &[String]) -> Vec<ProviderRow> {
+    if show.is_empty() {
+        return rows;
+    }
+    rows.into_iter()
+        .filter(|row| row.id.is_empty() || show.iter().any(|id| id == &row.id))
+        .collect()
 }
 
 pub fn row_json(row: &ProviderRow) -> serde_json::Value {
@@ -40,13 +64,24 @@ pub fn row_json(row: &ProviderRow) -> serde_json::Value {
     })
 }
 
+/// Claude OAuth usage windows: utilization percentages plus the reset
+/// instants the API reports (`resets_at`, RFC-3339) converted to unix
+/// epoch seconds, so the renderer can count down to the reset.
+#[derive(Clone, Copy, Default)]
+pub struct ClaudeOAuthUsage {
+    pub five: Option<f64>,
+    pub week: Option<f64>,
+    pub five_reset: Option<i64>,
+    pub week_reset: Option<i64>,
+}
+
 #[derive(Default)]
 pub struct HttpState {
     pub rows: Vec<ProviderRow>,
     /// Claude 5h/weekly utilization from the OAuth usage API; `None` when
     /// the token is missing, scope-less or the call fails - the tile then
     /// falls back to local sums against configured ceilings.
-    pub claude_oauth: Option<(Option<f64>, Option<f64>)>,
+    pub claude_oauth: Option<ClaudeOAuthUsage>,
     /// Codex windows from the wham/usage API; `None` when the lane is not
     /// configured, the CLI is not logged in, or the call fails - the tile
     /// then falls back to the limits embedded in local rollouts.
@@ -136,7 +171,13 @@ pub fn plan_rows(
         ));
     }
     match http.claude_oauth {
-        Some((five, week)) => rows.extend(percent_rows("Claude", five, week)),
+        Some(u) => rows.extend(percent_rows(
+            "Claude",
+            u.five,
+            u.week,
+            u.five_reset,
+            u.week_reset,
+        )),
         None => rows.extend(local_rows(
             "Claude",
             claude.five_hour,
@@ -145,7 +186,10 @@ pub fn plan_rows(
             config.claude_week_tokens,
         )),
     }
-    rows
+    // publish the full detected set for the settings UI before the
+    // user's selection hides any of it
+    crate::record_detected(&rows);
+    filter_by_selection(rows, &config.status.show)
 }
 
 fn resolve_key(cfg: Option<&Apikey>, env: &str) -> Option<String> {
@@ -240,6 +284,7 @@ fn anthropic_row(key: &str, boundary: crate::local_usage::DayBoundary) -> Provid
             let tokens = anthropic_totals(&v);
             match tokens {
                 Some(t) if t > 0 => ProviderRow {
+                    id: row_id("Anthropic API", None),
                     name: "Anthropic API".into(),
                     state: "ok".into(),
                     text: format!("{} today", fmt_tokens(t)),
@@ -318,6 +363,7 @@ const GLM_LANE: &str = "GLM";
 fn window_row(provider: &str, window: &str, percent: f64, reset_at: Option<i64>) -> ProviderRow {
     let percent = percent.clamp(0.0, 100.0);
     ProviderRow {
+        id: row_id(provider, Some(window)),
         name: format!("{provider} {window}"),
         state: threshold_state(Some(percent)).to_string(),
         text: limit_text(percent, reset_at, crate::unix_now()),
@@ -401,6 +447,7 @@ fn codex_rows(name: &str, limits: &crate::codex::Limits) -> Vec<ProviderRow> {
     }
     if rows.is_empty() {
         rows.push(ProviderRow {
+            id: row_id(name, None),
             name: name.to_string(),
             state: "ok".into(),
             text: format!("{} plan", limits.plan_type.as_deref().unwrap_or("limited")),
@@ -493,6 +540,7 @@ fn zai_rows_from(v: serde_json::Value) -> Vec<ProviderRow> {
     windows.sort_by_key(|(minutes, _)| *minutes);
     if windows.is_empty() {
         return vec![ProviderRow {
+            id: row_id(GLM_LANE, None),
             name: GLM_LANE.into(),
             state: "ok".into(),
             text: match &plan {
@@ -525,6 +573,15 @@ fn zai_window(raw: &serde_json::Value) -> Option<(u64, ProviderRow)> {
     };
     let minutes = number.checked_mul(multiplier)?;
     let api_percent = raw.get("percentage")?.as_f64()?;
+    // the reset instant arrives as epoch milliseconds (CodexBar's
+    // mapping); values that small are already seconds - accept both
+    let reset_at = raw.get("nextResetTime").and_then(|r| r.as_i64()).map(|ms| {
+        if ms > 100_000_000_000 {
+            ms / 1000
+        } else {
+            ms
+        }
+    });
     let usage = raw.get("usage").and_then(|u| u.as_f64());
     let current = raw.get("currentValue").and_then(|c| c.as_f64());
     let remaining = raw.get("remaining").and_then(|r| r.as_f64());
@@ -545,10 +602,10 @@ fn zai_window(raw: &serde_json::Value) -> Option<(u64, ProviderRow)> {
     let window = crate::codex::RateLimit {
         used_percent: 0.0,
         window_minutes: minutes,
-        resets_at: None,
+        resets_at: reset_at,
     }
     .window_label();
-    Some((minutes, window_row(GLM_LANE, &window, percent, None)))
+    Some((minutes, window_row(GLM_LANE, &window, percent, reset_at)))
 }
 
 /// Local lanes from token sums, one row per window: a window with a
@@ -577,6 +634,7 @@ fn local_rows(
                 None,
             )),
             None => rows.push(ProviderRow {
+                id: row_id(name, Some(window)),
                 name: format!("{name} {window}"),
                 state: "ok".into(),
                 text: fmt_tokens(used),
@@ -587,6 +645,7 @@ fn local_rows(
     }
     if rows.is_empty() {
         rows.push(ProviderRow {
+            id: row_id(name, None),
             name: name.to_string(),
             state: "ok".into(),
             text: "no usage".into(),
@@ -599,19 +658,26 @@ fn local_rows(
 
 /// Claude via OAuth: per-window bar rows; utilization values arrive as
 /// 0..1 fractions or straight percentages, both normalized here.
-fn percent_rows(name: &str, five_hour: Option<f64>, week: Option<f64>) -> Vec<ProviderRow> {
+fn percent_rows(
+    name: &str,
+    five_hour: Option<f64>,
+    week: Option<f64>,
+    five_reset: Option<i64>,
+    week_reset: Option<i64>,
+) -> Vec<ProviderRow> {
     let normalize = |v: Option<f64>| v.map(|p| if p <= 1.0 { p * 100.0 } else { p });
     let five = normalize(five_hour);
     let week = normalize(week);
     let mut rows = Vec::new();
     if let Some(p) = five {
-        rows.push(window_row(name, "5h", p, None));
+        rows.push(window_row(name, "5h", p, five_reset));
     }
     if let Some(p) = week {
-        rows.push(window_row(name, "week", p, None));
+        rows.push(window_row(name, "week", p, week_reset));
     }
     if rows.is_empty() {
         rows.push(ProviderRow {
+            id: row_id(name, None),
             name: name.to_string(),
             state: "ok".into(),
             text: "no data".into(),
@@ -672,7 +738,7 @@ pub(crate) fn claude_oauth_credentials(
 /// token; utilization values arrive as 0..1 fractions or straight
 /// percentages, both normalized by [`percent_rows`]. Any failure just
 /// drops the lane and the tile falls back to local sums.
-fn claude_oauth_usage(paths: &Paths) -> Option<(Option<f64>, Option<f64>)> {
+fn claude_oauth_usage(paths: &Paths) -> Option<ClaudeOAuthUsage> {
     let credentials = paths.claude_projects.parent()?.join(".credentials.json");
     let text = std::fs::read_to_string(credentials).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -694,12 +760,38 @@ fn claude_oauth_usage(paths: &Paths) -> Option<(Option<f64>, Option<f64>)> {
             return None;
         }
     };
+    claude_usage_from(v)
+}
+
+/// Map the /api/oauth/usage response onto the lane struct; split from
+/// the HTTP call so tests can feed fixtures directly. `five_hour` /
+/// `seven_day` carry `utilization` and an RFC-3339 `resets_at`.
+fn claude_usage_from(v: serde_json::Value) -> Option<ClaudeOAuthUsage> {
     let lane = |key: &str| {
         v.get(key)
             .and_then(|l| l.get("utilization"))
             .and_then(|u| u.as_f64())
     };
-    Some((lane("five_hour"), lane("seven_day")))
+    let reset = |key: &str| {
+        v.get(key)
+            .and_then(|l| l.get("resets_at"))
+            .and_then(|r| r.as_str())
+            .and_then(rfc3339_to_epoch)
+    };
+    Some(ClaudeOAuthUsage {
+        five: lane("five_hour"),
+        week: lane("seven_day"),
+        five_reset: reset("five_hour"),
+        week_reset: reset("seven_day"),
+    })
+}
+
+/// RFC-3339 timestamp ("2026-04-11T07:00:00.528743+00:00") -> unix epoch
+/// seconds; `None` for anything chrono refuses.
+fn rfc3339_to_epoch(text: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|t| t.timestamp())
 }
 
 /// ---- Codex wham/usage lane -----------------------------------------------------
@@ -824,6 +916,7 @@ fn numeric_row(name: &str, used: f64, limit: Option<f64>, unit: Option<&str>) ->
         None => format!("used {}", fmt(used)),
     };
     ProviderRow {
+        id: row_id(name, None),
         name: name.to_string(),
         state: threshold_state(percent).to_string(),
         text,
@@ -834,6 +927,7 @@ fn numeric_row(name: &str, used: f64, limit: Option<f64>, unit: Option<&str>) ->
 
 fn error_row(name: &str, error: &str) -> ProviderRow {
     ProviderRow {
+        id: row_id(name, None),
         name: name.to_string(),
         state: "error".into(),
         text: error.to_string(),
@@ -1138,7 +1232,7 @@ mod tests {
 
     #[test]
     fn percent_rows_normalize_fractions_and_percentages() {
-        let rows = percent_rows("Claude", Some(0.42), Some(75.0));
+        let rows = percent_rows("Claude", Some(0.42), Some(75.0), None, None);
         assert_eq!(rows[0].name, "Claude 5h");
         assert_eq!(rows[0].percent, Some(42.0));
         assert_eq!(rows[1].percent, Some(75.0));
@@ -1151,7 +1245,7 @@ mod tests {
         let limits: serde_json::Value = serde_json::from_str(
             r#"{"success":true,"code":200,"data":{"level":"pro","limits":[
                 {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":34,
-                 "usage":120000,"currentValue":40800},
+                 "usage":120000,"currentValue":40800,"nextResetTime":1806073946574},
                 {"type":"TOKENS_LIMIT","unit":6,"number":1,"percentage":0,
                  "usage":600000,"remaining":540000,"currentValue":0},
                 {"type":"TIME_LIMIT","unit":3,"number":1,"percentage":10}
@@ -1163,11 +1257,64 @@ mod tests {
         let labels: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(labels, ["GLM 5h", "GLM week"]);
         // rows speak in the remaining share; the counts only keep them honest
-        assert_eq!(rows[0].text, "66% left");
+        assert!(rows[0].text.starts_with("66% left, reset "));
         assert_eq!(rows[0].percent, Some(34.0));
+        // the epoch-millisecond reset lands as epoch seconds
+        assert_eq!(rows[0].reset_at, Some(1_806_073_946));
         // remaining is honored when currentValue is zeroed
         assert_eq!(rows[1].text, "90% left");
         assert_eq!(rows[1].percent, Some(10.0));
+    }
+
+    #[test]
+    fn claude_usage_maps_utilization_and_rfc3339_resets() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"five_hour":{"utilization":33.0,
+                "resets_at":"2030-04-11T07:00:00.528743+00:00"},
+                "seven_day":{"utilization":0.13,
+                "resets_at":"2030-04-17T00:59:59+00:00"}}"#,
+        )
+        .unwrap();
+        let usage = claude_usage_from(v).expect("usage parsed");
+        assert_eq!(usage.five, Some(33.0));
+        assert_eq!(usage.week, Some(0.13));
+        assert_eq!(usage.five_reset, Some(1_902_121_200));
+        assert_eq!(usage.week_reset, Some(1_902_617_999));
+        // a response without resets still yields the utilization lane
+        let bare: serde_json::Value =
+            serde_json::from_str(r#"{"five_hour":{"utilization":9}}"#).unwrap();
+        let usage = claude_usage_from(bare).expect("usage parsed");
+        assert_eq!(usage.five, Some(9.0));
+        assert_eq!(usage.week, None);
+        assert_eq!(usage.five_reset, None);
+    }
+
+    #[test]
+    fn selection_filter_keeps_picked_rows_only() {
+        let rows = vec![
+            ProviderRow {
+                id: "glm:5h".into(),
+                name: "GLM 5h".into(),
+                state: "ok".into(),
+                text: "66% left".into(),
+                percent: Some(34.0),
+                reset_at: None,
+            },
+            ProviderRow {
+                id: "claude:week".into(),
+                name: "Claude week".into(),
+                state: "ok".into(),
+                text: "91% left".into(),
+                percent: Some(9.0),
+                reset_at: None,
+            },
+        ];
+        // empty selection = everything detected
+        assert_eq!(filter_by_selection(rows.clone(), &[]).len(), 2);
+        let show = vec!["claude:week".to_string()];
+        let kept = filter_by_selection(rows, &show);
+        let names: Vec<&str> = kept.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["Claude week"]);
     }
 
     #[test]
@@ -1219,6 +1366,7 @@ mod tests {
         let config = Config::default();
         let http = HttpState {
             rows: vec![ProviderRow {
+                id: row_id("OpenRouter", None),
                 name: "OpenRouter".into(),
                 state: "ok".into(),
                 text: "used $4.00 / $10.00".into(),
@@ -1273,6 +1421,7 @@ mod tests {
         let http = HttpState {
             rows: vec![
                 ProviderRow {
+                    id: row_id(GLM_LANE, Some("5h")),
                     name: "GLM 5h".into(),
                     state: "ok".into(),
                     text: "66% left".into(),
@@ -1280,6 +1429,7 @@ mod tests {
                     reset_at: None,
                 },
                 ProviderRow {
+                    id: row_id(GLM_LANE, Some("week")),
                     name: "GLM week".into(),
                     state: "ok".into(),
                     text: "90% left".into(),
