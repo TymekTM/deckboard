@@ -7,7 +7,7 @@
 //! would otherwise grow for the process lifetime.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,12 +42,12 @@ impl V2Hub {
             pump: Mutex::new(None),
             cancel: cancel_tx,
             held_keys: Mutex::new(HashMap::new()),
+            welcomed: AtomicBool::new(false),
         })
     }
 
     /// Adds an authenticated session to the broadcast fan-out.
-    pub fn attach(&self, session: &Arc<V2Session>) {
-        self.sessions
+    pub fn attach(&self, session: &Arc<V2Session>) {        self.sessions
             .lock()
             .expect("v2 hub poisoned")
             .insert(session.id, session.clone());
@@ -86,6 +86,41 @@ impl V2Hub {
             tracing::info!(session = id, "v2 session closed: outbound queue full");
             self.remove(id);
         }
+    }
+
+    /// Sends a `state.patch` only to sessions whose handshake completed
+    /// (`set_welcomed`). Returns true when at least one session was
+    /// skipped: the flusher re-marks those channels dirty, because the
+    /// skipped session's full `state.sync` (queued before `set_welcomed`)
+    /// was snapshotted before or during this change - and anything after
+    /// it arrives as the next patch. Without the re-mark, a change drained
+    /// in the handshake window would never reach that client.
+    pub fn broadcast_patch_to_welcomed(&self, frame: &Frame) -> bool {
+        let Ok(text) = serde_json::to_string(frame) else {
+            return false;
+        };
+        let mut skipped = false;
+        let mut dead = Vec::new();
+        {
+            let sessions = self.sessions.lock().expect("v2 hub poisoned");
+            for session in sessions.values() {
+                if !session.is_welcomed() {
+                    skipped = true;
+                    continue;
+                }
+                if session
+                    .try_send(super::session::WsOut::Text(text.clone()))
+                    .is_err()
+                {
+                    dead.push(session.id);
+                }
+            }
+        }
+        for id in dead {
+            tracing::info!(session = id, "v2 session closed: outbound queue full");
+            self.remove(id);
+        }
+        skipped
     }
 
     /// Drops sessions whose last inbound frame (text or pong) is older
@@ -154,6 +189,13 @@ pub struct V2Session {
     /// the release-phase exec must run on every teardown path
     /// (docs/protocol-v2.md §6).
     held_keys: Mutex<HashMap<i64, ButtonRow>>,
+    /// False between `attach` and the queued `welcome`/full syncs: the
+    /// flusher must not push a `state.patch` into that window or the
+    /// client sees a patch for a board it does not know yet (the flaky
+    /// `token_connect_delivers_full_snapshot` ordering). Skipped changes
+    /// are re-marked dirty - the full `state.sync` queued at welcome
+    /// already covers them, so nothing is lost.
+    welcomed: AtomicBool,
 }
 
 impl V2Session {
@@ -162,6 +204,16 @@ impl V2Session {
             Ok(text) => self.try_send(super::session::WsOut::Text(text)).is_ok(),
             Err(_) => false,
         }
+    }
+
+    /// Marks the handshake complete: the welcome, boards sync and state
+    /// sync frames are queued, so patches may flow from now on.
+    pub fn set_welcomed(&self) {
+        self.welcomed.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_welcomed(&self) -> bool {
+        self.welcomed.load(Ordering::Relaxed)
     }
 
     fn try_send(
@@ -311,6 +363,45 @@ mod tests {
             pulpit_proto::TYPE_BOARD_OPEN,
             serde_json::json!({"board": 0}),
         )
+    }
+
+    #[test]
+    fn patches_are_withheld_until_welcome_then_reach_the_session() {
+        // The flusher must not push a state.patch into the attach ->
+        // welcome window (the client would see a patch for boards it
+        // does not know yet); withheld changes are reported so the
+        // engine can re-mark them dirty. After `set_welcomed` the
+        // session receives patches normally.
+        let hub = V2Hub::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let session = hub.create(tx);
+        hub.attach(&session);
+
+        let skipped = hub.broadcast_patch_to_welcomed(&frame());
+        assert!(
+            skipped,
+            "an un-welcomed session must be reported as skipped"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no patch may reach a session before its welcome"
+        );
+
+        session.set_welcomed();
+        let skipped = hub.broadcast_patch_to_welcomed(&Frame::push_typed(
+            pulpit_proto::TYPE_STATE_PATCH,
+            &crate::StatePatch {
+                changes: vec![pulpit_proto::ChannelValue {
+                    channel: "ch".into(),
+                    value: serde_json::json!(1),
+                }],
+            },
+        ));
+        assert!(!skipped, "a welcomed session is delivered to, not skipped");
+        let WsOut::Text(text) = rx.try_recv().expect("patch after welcome") else {
+            panic!("text frame expected")
+        };
+        assert!(text.contains("patch"), "got: {text}");
     }
 
     #[test]

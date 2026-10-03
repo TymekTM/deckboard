@@ -269,6 +269,10 @@ async fn run_session(
         TYPE_STATE_SYNC,
         &state.engine.snapshot(),
     ));
+    // Handshake complete: the flusher may start patching this socket.
+    // Everything drained before this point is covered by the state sync
+    // above (or re-marked dirty and arriving with the next flush).
+    session.set_welcomed();
 
     // 4) Live frames until the client goes away.
     while let Some(msg) = stream.next().await {
