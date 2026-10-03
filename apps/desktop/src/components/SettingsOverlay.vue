@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 
 const props = defineProps({
@@ -45,6 +46,67 @@ const portBusy = ref(false);
 // in-app revoke confirmation (replaces the native dialog popup)
 const confirmRevoke = ref(null); // device awaiting confirmation
 const cancelBtn = ref(null);
+
+// M8 sideload: adb device list + keep-data APK install
+const adbList = ref([]);
+const adbBusy = ref(false);
+const adbNote = ref("");
+const adbNoteBad = ref(false);
+
+async function refreshAdb() {
+  adbBusy.value = true;
+  try {
+    adbList.value = await api.adbDevices();
+  } catch (e) {
+    adbList.value = [];
+    adbNote.value = String(e);
+    adbNoteBad.value = true;
+  } finally {
+    adbBusy.value = false;
+  }
+}
+
+async function installApk() {
+  const path = await open({
+    multiple: false,
+    filters: [{ name: "APK", extensions: ["apk"] }],
+  });
+  if (!path) return;
+  adbBusy.value = true;
+  adbNote.value = "Instaluję (adb install -r, dane aplikacji zostają)...";
+  adbNoteBad.value = false;
+  try {
+    adbNote.value = (await api.adbInstallApk(String(path))) || "Gotowe.";
+    await refreshAdb();
+  } catch (e) {
+    adbNote.value = String(e);
+    adbNoteBad.value = true;
+  } finally {
+    adbBusy.value = false;
+  }
+}
+
+// M8 update check: reads the update_url feed (empty = off), no download
+const updateBusy = ref(false);
+const updateNote = ref("");
+const updateNoteBad = ref(false);
+
+async function checkUpdates() {
+  updateBusy.value = true;
+  updateNote.value = "Sprawdzam...";
+  updateNoteBad.value = false;
+  try {
+    const r = await api.checkForUpdates();
+    updateNote.value = r.update_available
+      ? `Dostępna wersja ${r.latest} (masz ${r.current}). ${r.url || "Pobierz ze strony wydania."}`
+      : `System jest aktualny (v${r.current}).`;
+  } catch (e) {
+    updateNote.value = String(e);
+    updateNoteBad.value = true;
+  } finally {
+    updateBusy.value = false;
+  }
+}
 
 const version = computed(() => props.status.version || "0.1.1");
 
@@ -350,6 +412,14 @@ onUnmounted(() => {
                 <div><dt>Wersja</dt><dd>Editor v{{ version }}</dd></div>
                 <div><dt>Logi</dt><dd class="mono">~/pulpitApp/logs</dd></div>
               </dl>
+              <div class="ctl" style="margin-top: 12px">
+                <div class="ctl-text">
+                  <span class="ctl-name">Aktualizacje</span>
+                  <span class="ctl-note">Sprawdza feed z update_url w editor.json; nie pobiera nic sama.</span>
+                </div>
+                <button class="act" :disabled="updateBusy" @click="checkUpdates">Sprawdź</button>
+              </div>
+              <p v-if="updateNote" :class="updateNoteBad ? 'err' : 'note pending'">{{ updateNote }}</p>
             </div>
           </article>
 
@@ -510,6 +580,20 @@ onUnmounted(() => {
                   nowe parowanie. Pytanie o zaufanie pozostawione bez odpowiedzi wygasa razem
                   z kodem parowania i odrzuca tablet.
                 </p>
+                <div class="ctl" style="margin-top: 10px">
+                  <div class="ctl-text">
+                    <span class="ctl-name">Instalacja APK (sideload)</span>
+                    <span class="ctl-note">
+                      Tablet podłączony po USB z adb; instalacja z zachowaniem danych
+                      (adb install -r). Urządzenia: {{ adbList.length ? adbList.join(", ") : "brak" }}
+                    </span>
+                  </div>
+                  <span style="display: flex; gap: 8px; flex: none">
+                    <button class="act" :disabled="adbBusy" @click="refreshAdb">Odśwież</button>
+                    <button class="act accent" :disabled="adbBusy" @click="installApk">Zainstaluj APK…</button>
+                  </span>
+                </div>
+                <p v-if="adbNote" :class="adbNoteBad ? 'err' : 'note pending'">{{ adbNote }}</p>
               </template>
             </div>
           </article>
