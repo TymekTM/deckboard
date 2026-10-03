@@ -63,6 +63,22 @@ class ProtoFixturesTest {
         assertEquals(V2.SHAPE_SERIES, welcome.channels["ext.si-cpu-usage"]!!.shape)
         assertEquals(120, welcome.channels["ext.si-cpu-usage"]!!.cap)
         assertEquals(V2.SHAPE_SCALAR, welcome.channels["ext.speaker-muted"]!!.shape)
+        // M5 capability negotiation: the server echoes its own set
+        assertTrue(welcome.capabilities.contains("series"))
+        assertTrue(welcome.capabilities.contains("gestures"))
+    }
+
+    @Test
+    fun interactionLongPressParses() {
+        // M5 custom gestures ride the ordinary interaction frame
+        val frame = fixture("interaction-longpress.json")
+        assertEquals("interaction", frame.type)
+        val payload = json.decodeFromString(
+            InteractionPayload.serializer(),
+            frame.payload.toString(),
+        )
+        assertEquals("long-press", payload.interaction)
+        assertEquals(21L, payload.tile)
     }
 
     @Test
@@ -94,8 +110,30 @@ class ProtoFixturesTest {
         assertEquals("ext.speaker-muted", button.state!!.channel)
         assertEquals(V2.SHAPE_SCALAR, button.state!!.shape)
         assertEquals("#F5AB35", button.style!!.color)
+        assertEquals("#ED4245", button.style!!.color2)
         assertEquals("\uf026", button.style!!.icon)
+        assertEquals("\uf028", button.style!!.icon2)
         assertEquals("Mute", button.style!!.title)
+        // style parity fields (012 C5): optional pairs, absent keeps the
+        // client default, and img2 travels as asset_hash2
+        assertEquals("#101010", button.style!!.borderColor)
+        assertEquals("#f0f0f0", button.style!!.borderColor2)
+        assertEquals("#ffe0e0", button.style!!.iconColor)
+        assertEquals("#1db954", button.style!!.iconColor2)
+        assertEquals("#ffcc00", button.style!!.titleColor)
+        assertEquals("#00ffcc", button.style!!.titleColor2)
+        assertTrue(button.assetHash!!.isNotEmpty())
+        assertTrue(button.assetHash2!!.isNotEmpty())
+
+        // tolerance: a style object from an older server (no parity
+        // fields) parses with null defaults, never a thrown field error
+        val legacyShape = json.decodeFromString(
+            Style.serializer(),
+            """{"color":"#123456"}""",
+        )
+        assertEquals("#123456", legacyShape.color)
+        assertNull(legacyShape.borderColor)
+        assertNull(legacyShape.titleColor2)
 
         val slider = board.tiles[1]
         assertEquals(V2.KIND_SLIDER, slider.kind)

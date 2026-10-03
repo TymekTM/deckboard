@@ -17,7 +17,7 @@ use pulpit_actions::EventSink;
 use pulpit_db::ButtonRow;
 use pulpit_proto::*;
 
-use crate::devices::PairError;
+use crate::devices::{PairError, Pairing};
 use crate::hub::V2Session;
 use crate::service::{Auth, V2State};
 use crate::state::{ext_channel, StateEngine};
@@ -82,11 +82,24 @@ pub(super) async fn run(state: Arc<V2State>, socket: WebSocket, auth: Auth) {
     // through the session; the handle lives there, not in a local.
     session.set_pump(pump);
 
-    if run_session(&state, &session, &mut stream, &out_tx, auth)
-        .await
-        .is_fatal()
-    {
-        // Fatal: let the pump flush the queued error frames, then close
+    // The session body races hub-side teardown (queue overflow, silence
+    // watchdog, server exit): those paths cancel the session so the task
+    // ends promptly instead of lingering on a dead socket, and the tail
+    // below always runs its cleanup.
+    let mut cancelled = session.cancelled();
+    let outcome = tokio::select! {
+        outcome = run_session(&state, &session, &mut stream, &out_tx, auth) => outcome,
+        _ = cancelled.wait_for(|v| *v) => End::Cancelled,
+    };
+    // Unconditional teardown on every path: stop repeat loops, then run
+    // the release phase for keys whose press-start never got a
+    // press-end (§6: a repeat loop "is released when the connection
+    // dies").
+    session.abort_holds();
+    release_held_keys(&state, &session).await;
+    if outcome.flushes_pump() {
+        // Fatal or cancelled by the hub: let the pump flush the queued
+        // frames (error bursts, the shutdown goodbye), then close
         // politely - an abort would drop them.
         let _ = out_tx.try_send(WsOut::Close);
         session.finish_pump(Duration::from_millis(500)).await;
@@ -104,13 +117,18 @@ enum End {
     Closed,
     /// Server decided the connection must die (auth/size violations).
     Fatal,
+    /// Hub-side teardown (queue overflow, silence watchdog, exit).
+    Cancelled,
     // Reaching the end of `run_session` without either just means the
     // stream ended; it maps to Closed.
 }
 
 impl End {
-    fn is_fatal(&self) -> bool {
-        *self == End::Fatal
+    /// Whether the pump should flush queued frames before the close.
+    /// Cancelled sessions may still owe the client frames (the shutdown
+    // goodbye), so they flush like fatal ones.
+    fn flushes_pump(&self) -> bool {
+        !matches!(self, End::Closed)
     }
 }
 
@@ -161,22 +179,55 @@ async fn run_session(
     let mut issued_token: Option<String> = None;
     let device = match auth {
         Auth::Device(device) => {
-            match hello.name.as_deref().filter(|n| !n.is_empty()) {
-                // hello may rename a paired device; persisted so the next
-                // welcome and the desktop device list agree. The welcome
-                // carries the updated entry, not the pre-auth snapshot.
-                Some(name) if name != device.name => {
-                    state.devices.rename(&device.id, name).unwrap_or(device)
+            // hello.name may rename a paired device; persisted so the next
+            // welcome and the desktop device list agree. The welcome
+            // carries the updated entry, not the pre-auth snapshot. The
+            // name is untrusted client input: sanitized before it can
+            // reach the registry, the logs or the desktop device list.
+            let rename_to = sanitize_device_name(hello.name.as_deref());
+            let touched = match rename_to {
+                Some(name) if name != device.name => state.devices.rename(&device.id, &name),
+                _ => state.devices.touch(&device.id),
+            };
+            match touched {
+                Some(device) => device,
+                // The entry vanished between the upgrade's verify and
+                // here (revoked mid-handshake): treat as revoked, not as
+                // the stale pre-auth snapshot (audit B2 step 3).
+                None => {
+                    session.send_frame(&error_ack(
+                        &frame,
+                        error_code::UNAUTHORIZED,
+                        "device no longer trusted",
+                    ));
+                    return End::Fatal;
                 }
-                _ => state.devices.touch(&device.id).unwrap_or(device),
             }
         }
         Auth::Pair(code) => match state.pairing.consume(&code) {
             Ok(()) => {
-                let name = hello.name.clone().unwrap_or_else(|| "Device".into());
-                tracing::warn!(session = session.id, name = %name, "pairing auto-accepted (no UI yet)");
-                let device = state.devices.create(&name);
-                issued_token = Some(device.token.clone());
+                let name = sanitize_device_name(hello.name.as_deref())
+                    .unwrap_or_else(|| "Device".to_string());
+                // Trust gate (audit B2 step 6): a fresh pairing needs the
+                // desktop operator's approval before a device is minted.
+                // The consult runs on the blocking pool (the prompt may
+                // wait for the operator; the socket loop must not stall)
+                // and is bounded by the pairing-code TTL: an unanswered
+                // prompt denies once the code would have expired anyway.
+                // A denial rejects the hello; the one-time code is
+                // already burned, so a retry needs a fresh code.
+                if !approve_pairing(&state.pairing, &name, &code).await {
+                    tracing::warn!(session = session.id, name = %name, "pairing denied on the desktop");
+                    session.send_frame(&error_ack(
+                        &frame,
+                        error_code::PAIR_EXPIRED,
+                        "pairing was not approved on the desktop in time",
+                    ));
+                    return End::Fatal;
+                }
+                tracing::info!(session = session.id, name = %name, "pairing approved on the desktop");
+                let (device, token) = state.devices.create(&name);
+                issued_token = Some(token);
                 device
             }
             Err(PairError::Expired) => {
@@ -199,6 +250,12 @@ async fn run_session(
     };
     session.set_device(device.clone());
     tracing::info!(session = session.id, device = %device.name, client = %hello.client, version = %hello.version, "v2 client authenticated");
+    // M5 capability negotiation: the declared set is logged so a missing
+    // feature on some client is diagnosable from the server log. Gating
+    // pushes on it is a separate, later decision.
+    if !hello.capabilities.is_empty() {
+        tracing::info!(session = session.id, capabilities = ?hello.capabilities, "client capabilities");
+    }
 
     // Broadcast fan-out starts only now that the session is authenticated:
     // a pre-auth socket must never see pushes. Attaching before the boards
@@ -222,6 +279,7 @@ async fn run_session(
         },
         channels: state.engine.catalog(),
         token: issued_token,
+        capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
     };
     session.send_frame(&Frame {
         v: PROTOCOL_VERSION,
@@ -235,6 +293,10 @@ async fn run_session(
         TYPE_STATE_SYNC,
         &state.engine.snapshot(),
     ));
+    // Handshake complete: the flusher may start patching this socket.
+    // Everything drained before this point is covered by the state sync
+    // above (or re-marked dirty and arriving with the next flush).
+    session.set_welcomed();
 
     // 4) Live frames until the client goes away.
     while let Some(msg) = stream.next().await {
@@ -287,6 +349,28 @@ async fn next_text(
         }
     }
     None
+}
+
+/// Asks the pairing trust gate about a fresh device, off the async
+/// workers (the gate may block on the operator). The wait is bounded by
+/// the pairing's code TTL (the same shrinkable timer the codes use); a
+/// timeout, a denied answer or a failed blocking dispatch all count as
+/// a denial.
+async fn approve_pairing(pairing: &Arc<Pairing>, name: &str, code: &str) -> bool {
+    // M8 Bluetooth-style requests arrive pre-approved: the operator just
+    // confirmed the dialog carrying this very code. Single-use, so a
+    // replayed code cannot mint a second device.
+    if pairing.take_pre_approved(code) {
+        return true;
+    }
+    let wait = pairing.ttl();
+    let name = name.to_string();
+    let pairing = pairing.clone();
+    let ask = tokio::task::spawn_blocking(move || pairing.ask_trust(&name));
+    match tokio::time::timeout(wait, ask).await {
+        Ok(Ok(approved)) => approved,
+        Ok(Err(_)) | Err(_) => false,
+    }
 }
 
 fn error_ack(request: &Frame, code: &str, message: &str) -> Frame {
@@ -394,6 +478,12 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
         Interaction::PressStart => {
             ack_ok();
             exec_once(state, button.clone(), true);
+            // tap-start only holds something down for key tiles; their
+            // release phase must run even if this socket never sends
+            // press-end (dropped tablet, overflow teardown, exit).
+            if button.kind == "key" {
+                session.key_pressed(payload.tile, button.clone());
+            }
             let params: Value = serde_json::from_str(button.options.as_deref().unwrap_or(""))
                 .unwrap_or(Value::Null);
             if let Some((delay_ms, interval_ms)) = crate::boards::hold_repeat_config(&params) {
@@ -408,6 +498,7 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
         }
         Interaction::PressEnd => {
             session.stop_hold(payload.tile);
+            session.key_released(payload.tile);
             ack_ok();
             exec_once(state, button, false);
         }
@@ -416,6 +507,16 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
             let value = payload.args.value.unwrap_or(0.0);
             let backend = state.backend.clone();
             tokio::task::spawn_blocking(move || backend.slider(button, value));
+        }
+        // M5 custom gestures: alternative triggers of the tile's action
+        // with release semantics - one execution each, no key-hold, no
+        // server-side repeat (that stays with press-start).
+        Interaction::LongPress
+        | Interaction::DoubleTap
+        | Interaction::SwipeLeft
+        | Interaction::SwipeRight => {
+            ack_ok();
+            exec_once(state, button, false);
         }
         // Unreachable while the allowed-interactions check stands (no tile
         // declares wheel/drag); kept as a defensive typed error.
@@ -446,8 +547,21 @@ fn start_hold(
         let _ = tokio::time::timeout(cap, async {
             loop {
                 // each repeat tick executes the action (release phase) -
-                // tap-start would no-op everything except held keys
-                exec_blocking(&backend, &engine, &hub, button.clone(), false);
+                // tap-start would no-op everything except held keys. The
+                // exec is blocking work (actions sleep, fetch URLs,
+                // re-auth): it must run on the blocking pool, and the
+                // await serializes ticks so a slow one is never
+                // overlapped by the next. The server runtime is
+                // single-threaded - calling it inline would stall every
+                // socket for the duration of the action.
+                let tick_button = button.clone();
+                let tick_backend = backend.clone();
+                let tick_engine = engine.clone();
+                let tick_hub = hub.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    exec_blocking(&tick_backend, &tick_engine, &tick_hub, tick_button, false)
+                })
+                .await;
                 tokio::time::sleep(Duration::from_millis(interval_ms)).await;
             }
         })
@@ -466,6 +580,31 @@ fn exec_once(state: &Arc<V2State>, button: ButtonRow, is_tap_start: bool) {
     tokio::task::spawn_blocking(move || {
         exec_blocking(&backend, &engine, &hub, button, is_tap_start)
     });
+}
+
+/// Runs the release phase for every key the session left pressed. The
+/// exec is blocking work (enigo key-ups), so it runs on the blocking
+/// pool; the session task has nothing else to do afterwards, so the
+/// await is harmless even for slow backends.
+async fn release_held_keys(state: &Arc<V2State>, session: &Arc<V2Session>) {
+    let held = session.take_held_keys();
+    if held.is_empty() {
+        return;
+    }
+    tracing::info!(
+        session = session.id,
+        tiles = held.len(),
+        "releasing keys held by the closing session"
+    );
+    let backend = state.backend.clone();
+    let engine = state.engine.clone();
+    let hub = state.hub.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        for button in held {
+            exec_blocking(&backend, &engine, &hub, button, false);
+        }
+    })
+    .await;
 }
 
 fn exec_blocking(
@@ -499,6 +638,26 @@ fn exec_blocking(
     }
 }
 
+/// Device names from `hello.name`: untrusted client input that ends up
+/// in logs, the registry and the desktop device list - trimmed,
+/// control-character-free, capped, `None` when nothing usable remains.
+pub(crate) fn sanitize_device_name(raw: Option<&str>) -> Option<String> {
+    let name: String = raw
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(DEVICE_NAME_MAX_CHARS)
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Cap for `hello.name` (audit B2): enough for any honest device label,
+/// small enough that junk cannot bloat logs or `devices.json`.
+const DEVICE_NAME_MAX_CHARS: usize = 64;
+
 /// Naive semver-ish compare: numeric dot parts, missing parts are 0.
 fn version_lt(client: &str, min: &str) -> bool {
     fn parts(v: &str) -> Vec<u64> {
@@ -521,6 +680,22 @@ fn version_lt(client: &str, min: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn pairing_wait_denies_after_the_ttl() {
+        // The gate answers "yes" - but only after the pairing's code TTL
+        // is spent: the desktop was unreachable, so the wait must deny
+        // (the TTL-expiry fallback, audit B2 step 6).
+        let pairing = crate::devices::Pairing::with_ttl(Duration::from_millis(50));
+        pairing.set_trust_gate(|_name| {
+            std::thread::sleep(Duration::from_millis(300));
+            true
+        });
+        assert!(
+            !approve_pairing(&std::sync::Arc::new(pairing), "Tablet salon", "CODE1234").await,
+            "a gate that answers past the TTL is a denial"
+        );
+    }
+
     #[test]
     fn version_compare() {
         assert!(version_lt("0.1.0", "0.2.0"));
@@ -529,6 +704,28 @@ mod tests {
         assert!(!version_lt("1.0.0", "0.9.9"));
         assert!(version_lt("0.2.0", "9.9.9"));
         assert!(!version_lt("garbage", "0.0.0"));
+    }
+
+    #[test]
+    fn device_names_are_sanitized() {
+        // trim + control stripping, alone and combined
+        assert_eq!(
+            sanitize_device_name(Some("  Tablet salon \n")),
+            Some("Tablet salon".into())
+        );
+        assert_eq!(
+            sanitize_device_name(Some("a\u{0}b\u{7}c")),
+            Some("abc".into())
+        );
+        assert_eq!(sanitize_device_name(Some(" \u{1}\t ")), None);
+        assert_eq!(sanitize_device_name(Some("")), None);
+        assert_eq!(sanitize_device_name(None), None);
+        // cap at 64 chars, by characters not bytes
+        let long = "ą".repeat(100);
+        assert_eq!(
+            sanitize_device_name(Some(&long)).unwrap().chars().count(),
+            DEVICE_NAME_MAX_CHARS
+        );
     }
 
     #[test]

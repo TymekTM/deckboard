@@ -61,6 +61,8 @@ pub struct V2State {
     /// `boards.sync` frame cached per generation: a reconnect with no board
     /// writes skips the SQLite scan and data-URL imports entirely.
     pub boards_cache: Mutex<Option<(u64, Arc<Frame>)>>,
+    /// M8 Bluetooth-style pairing requests (plan 014).
+    pub pair_requests: crate::devices::PairRequests,
     pub config: V2Config,
 }
 
@@ -75,6 +77,8 @@ pub fn router(state: Arc<V2State>) -> Router {
     Router::new()
         .route("/v2/ws", get(ws_connect))
         .route("/v2/pair", post(pair_create))
+        .route("/v2/pair-request", post(pair_request_create))
+        .route("/v2/pair-request/:id", get(pair_request_status))
         .route("/assets/:hash", get(asset_get))
         .with_state(state)
 }
@@ -88,8 +92,12 @@ struct WsQuery {
 async fn ws_connect(
     State(state): State<Arc<V2State>>,
     Query(q): Query<WsQuery>,
+    headers: HeaderMap,
     ws: Option<WebSocketUpgrade>,
 ) -> Response {
+    if !pulpit_legacy::origin_host_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "browser requests are not allowed").into_response();
+    }
     let auth = if let Some(token) = q.token {
         match state.devices.verify(&token) {
             Some(device) => Some(Auth::Device(device)),
@@ -123,20 +131,21 @@ async fn ws_connect(
 async fn pair_create(
     State(state): State<Arc<V2State>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
     if !addr.ip().is_loopback() {
         return (StatusCode::FORBIDDEN, "pairing codes are local-only").into_response();
     }
+    if !pulpit_legacy::origin_host_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "browser requests are not allowed").into_response();
+    }
     let code = state.pairing.new_code();
-    // M1 has no desktop UI: log the QR-able URL so the operator can relay
-    // it to the device by hand.
-    let host = local_lan_ip()
-        .await
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    tracing::info!(
-        url = %format!("pulpit://{}:{}?pair={}", host, state.config.public_port, code),
-        "pairing code minted - expires in 5 minutes"
-    );
+    // The code is delivered to the loopback caller in the response body
+    // and never written to the log: logs outlive the 5-minute TTL by
+    // weeks and pairing auto-accepts, so a logged code is a standing
+    // invite (audit B2). The message is a static string so the secret
+    // cannot be interpolated into it by accident.
+    tracing::info!("{}", pair_minted_message());
     Json(json!({
         "code": code,
         "expires_in": crate::devices::PAIR_CODE_TTL.as_secs(),
@@ -144,12 +153,129 @@ async fn pair_create(
     .into_response()
 }
 
-/// Best-effort LAN address (the local end of the default route); never
-/// sends a packet. Falls back to loopback when there is no route.
-async fn local_lan_ip() -> Option<String> {
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
-    socket.connect("8.8.8.8:80").await.ok()?;
-    Some(socket.local_addr().ok()?.ip().to_string())
+/// The `POST /v2/pair` log line - deliberately takes no code argument
+/// so the secret cannot leak into it.
+fn pair_minted_message() -> &'static str {
+    "pairing code minted - expires in 5 minutes (code suppressed in logs)"
+}
+
+/// M8 Bluetooth-style pairing, step 1 (plan 014): a LAN tablet that
+/// discovered this desktop over mDNS asks to pair. The server mints the
+/// ordinary one-time code and asks the operator through the
+/// pair-request gate; the verification code goes back to the TABLET in
+/// the response (it shows the same number the desktop dialog shows).
+/// The response never waits for the operator - the tablet polls
+/// `GET /v2/pair-request/:id` (step 2) while the dialog is up. One live
+/// request at a time; browser-initiated requests are refused like the
+/// rest of the API (B1).
+#[derive(serde::Deserialize)]
+struct PairRequestBody {
+    name: String,
+}
+
+async fn pair_request_create(
+    State(state): State<Arc<V2State>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<PairRequestBody>,
+) -> Response {
+    if addr.ip().is_loopback() {
+        // The point of the flow is a remote tablet; a loopback caller is
+        // the desktop itself, which has the native dialog already.
+        return (StatusCode::FORBIDDEN, "use the desktop pairing UI").into_response();
+    }
+    if !pulpit_legacy::origin_host_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "browser requests are not allowed").into_response();
+    }
+    let name =
+        session::sanitize_device_name(Some(&body.name)).unwrap_or_else(|| "Device".to_string());
+    let id = hex_string_16();
+    let code = state.pairing.new_code();
+    let Some(request) = state
+        .pair_requests
+        .begin(id.clone(), code.clone(), name.clone())
+    else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"code": "request-in-flight"})),
+        )
+            .into_response();
+    };
+    let pairing = state.pairing.clone();
+    let decision_request = request.clone();
+    let pairing_code = code.clone();
+    tokio::spawn(async move {
+        let gate = pairing.request_gate();
+        let decision = tokio::task::spawn_blocking(move || match gate {
+            Some(gate) => gate(&decision_request.name, &decision_request.code),
+            None => {
+                tracing::warn!(name = %decision_request.name, "pair-request auto-accepted (no gate installed)");
+                true
+            }
+        })
+        .await
+        .unwrap_or(false);
+        use crate::devices::PairDecision;
+        request.set_decision(if decision {
+            // the operator just compared this code on the dialog: the
+            // hello that consumes it must not ask a second time
+            pairing.pre_approve(&pairing_code);
+            PairDecision::Approved
+        } else {
+            PairDecision::Rejected
+        });
+        tracing::info!(name = %request.name, approved = decision, "pair-request decided");
+    });
+    // The minted log line stays code-free, like `POST /v2/pair`.
+    tracing::info!("{}", pair_minted_message());
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "request_id": id,
+            "code": code,
+            "expires_in_secs": crate::devices::PAIR_CODE_TTL.as_secs(),
+        })),
+    )
+        .into_response()
+}
+
+/// M8 step 2: the tablet polls for the operator's decision. Terminal
+/// decisions clear the slot so the next request can start at once; a
+/// polled-approved response is the client's cue to open
+/// `/v2/ws?pair=<code>` with the code it already shows.
+async fn pair_request_status(
+    State(state): State<Arc<V2State>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(request) = state.pair_requests.get(&id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({"status": "unknown"}))).into_response();
+    };
+    if request.age() >= crate::devices::PAIR_CODE_TTL {
+        state.pair_requests.reset(&id);
+        return (StatusCode::OK, Json(json!({"status": "expired"}))).into_response();
+    }
+    use crate::devices::PairDecision;
+    let status = match request.decision() {
+        PairDecision::Pending => Json(json!({"status": "pending"})).into_response(),
+        PairDecision::Approved => {
+            state.pair_requests.reset(&id);
+            Json(json!({"status": "approved"})).into_response()
+        }
+        PairDecision::Rejected => {
+            state.pair_requests.reset(&id);
+            Json(json!({"status": "rejected"})).into_response()
+        }
+    };
+    status
+}
+
+/// Random request id: hex so it survives any logging/casing untouched.
+fn hex_string_16() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..16)
+        .map(|_| format!("{:02x}", rng.gen::<u8>()))
+        .collect()
 }
 
 async fn asset_get(
@@ -205,7 +331,10 @@ async fn asset_get(
                 header::CONTENT_RANGE,
                 format!("bytes {start}-{end_incl}/{total}").parse().unwrap(),
             );
-            (head, bytes).into_response()
+            // a satisfied range is partial content: 200 with a
+            // Content-Range header is spec-invalid and clients treat the
+            // body as the whole asset
+            (StatusCode::PARTIAL_CONTENT, head, bytes).into_response()
         }
         crate::assets::AssetBody::Unsatisfiable(total) => (
             [(header::CONTENT_RANGE, format!("bytes */{total}"))],

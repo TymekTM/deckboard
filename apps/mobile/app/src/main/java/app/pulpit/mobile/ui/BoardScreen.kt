@@ -36,32 +36,42 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateMap
+import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.pulpit.mobile.net.ConnState
 import app.pulpit.mobile.net.displayText
 import app.pulpit.mobile.net.isActiveValue
+import app.pulpit.mobile.net.numericValue
 import app.pulpit.mobile.proto.Board
+import app.pulpit.mobile.proto.ChannelInfo
 import app.pulpit.mobile.proto.V2
 import app.pulpit.mobile.state.PulpitViewModel
+import kotlinx.serialization.json.JsonElement
 
 @Composable
 fun BoardScreen(vm: PulpitViewModel) {
@@ -281,10 +291,13 @@ private fun BoardChip(vm: PulpitViewModel) {
 
 @Composable
 private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
-    val liveValues by vm.values.collectAsState()
-    val series by vm.series.collectAsState()
-    val channelMeta by vm.channelMeta.collectAsState()
-    val bitmaps by vm.bitmaps.collectAsState()
+    // State holders, not snapshots: reading .value here would recompose
+    // the whole grid on every state.patch (10 Hz while anything moves).
+    // Each TileCell derives just its own channel from them.
+    val values = vm.values.collectAsState()
+    val series = vm.series.collectAsState()
+    val channelMeta = vm.channelMeta.collectAsState()
+    val bitmaps = vm.bitmaps.collectAsState()
     // toggles without a state channel keep client-side position state
     val positions = remember(board.id) { mutableStateMapOf<Long, Boolean>() }
 
@@ -292,7 +305,9 @@ private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
     // color shows through while the asset loads
     val bgAsset = board.background?.hash
     LaunchedEffect(bgAsset) { bgAsset?.let { vm.ensureAsset(it) } }
-    val bgBitmap = bgAsset?.let { bitmaps[it] }
+    val bgBitmap by remember(bitmaps, bgAsset) {
+        derivedStateOf { bgAsset?.let { bitmaps.value[it] } }
+    }
 
     BoxWithConstraints(
         modifier.background(hex(board.background?.color, DeckColors.background)),
@@ -309,34 +324,77 @@ private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
         val tileHeight = maxHeight / board.height.coerceAtLeast(1)
 
         board.tiles.forEach { t ->
-            val watchChannel = t.state?.channel
-            val live = liveValues[watchChannel]
-            t.assetHash?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
-            val active = when {
-                watchChannel != null -> isActiveValue(live)
-                else -> positions[t.id] ?: false
-            }
-            Box(
-                Modifier
-                    .offset(x = tile * t.x, y = tileHeight * t.y)
-                    .width(tile * t.w)
-                    .height(tileHeight * t.h),
-            ) {
-                Tile(
-                    tile = t,
-                    tileSize = tile,
-                    active = active,
-                    liveText = displayText(live),
-                    series = SeriesWindow(series[watchChannel] ?: emptyList()),
-                    channel = watchChannel?.let { channelMeta[it] },
-                    items = TileItems(listItems(t, live)),
-                    status = statusData(t, live),
-                    image = t.assetHash?.let { bitmaps[it] },
-                    onPressStart = { vm.pressStart(board.id, t) },
-                    onPressEnd = { vm.pressEnd(board.id, t) },
-                    onSlider = { v -> vm.slider(board.id, t, v) },
-                )
+            // identity by tile id, not list position: a delta that adds or
+            // removes a tile must not hand its neighbors' animation and
+            // gesture state to the wrong tile
+            key(t.id) {
+                Box(
+                    Modifier
+                        .offset(x = tile * t.x, y = tileHeight * t.y)
+                        .width(tile * t.w)
+                        .height(tileHeight * t.h),
+                ) {
+                    TileCell(vm, board.id, t, tile, values, series, channelMeta, bitmaps, positions)
+                }
             }
         }
     }
+}
+
+/** One grid tile. Reads only its own channel, series window, and image,
+ *  so a patch for another channel leaves it alone - the lambdas below
+ *  re-run (a map lookup), the tile does not recompose. */
+@Composable
+private fun TileCell(
+    vm: PulpitViewModel,
+    boardId: Long,
+    t: app.pulpit.mobile.proto.Tile,
+    tileSize: Dp,
+    values: State<Map<String, JsonElement>>,
+    series: State<Map<String, List<Double>>>,
+    channelMeta: State<Map<String, ChannelInfo>>,
+    bitmaps: State<Map<String, ImageBitmap>>,
+    positions: SnapshotStateMap<Long, Boolean>,
+) {
+    val watchChannel = t.state?.channel
+    val live by remember(values, watchChannel) {
+        derivedStateOf(structuralEqualityPolicy()) { watchChannel?.let { values.value[it] } }
+    }
+    val points by remember(series, watchChannel) {
+        derivedStateOf(structuralEqualityPolicy()) {
+            watchChannel?.let { series.value[it] } ?: emptyList()
+        }
+    }
+    val meta by remember(channelMeta, watchChannel) {
+        derivedStateOf(structuralEqualityPolicy()) { watchChannel?.let { channelMeta.value[it] } }
+    }
+    val image by remember(bitmaps, t.assetHash) {
+        derivedStateOf { t.assetHash?.let { bitmaps.value[it] } }
+    }
+    val image2 by remember(bitmaps, t.assetHash2) {
+        derivedStateOf { t.assetHash2?.let { bitmaps.value[it] } }
+    }
+    t.assetHash?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
+    t.assetHash2?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
+    val active = when {
+        watchChannel != null -> isActiveValue(live)
+        else -> positions[t.id] ?: false
+    }
+    Tile(
+        tile = t,
+        tileSize = tileSize,
+        active = active,
+        liveText = displayText(live),
+        liveValue = numericValue(live),
+        series = SeriesWindow(points),
+        channel = meta,
+        items = TileItems(listItems(t, live)),
+        status = statusData(t, live),
+        image = image,
+        image2 = image2,
+        onPressStart = { vm.pressStart(boardId, t) },
+        onPressEnd = { vm.pressEnd(boardId, t) },
+        onSlider = { v -> vm.slider(boardId, t, v) },
+        onGesture = { name -> vm.gesture(boardId, t, name) },
+    )
 }

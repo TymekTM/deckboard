@@ -72,19 +72,44 @@ connection loop in a foreground service and prompts the user to exempt the
 app from battery optimization on first run. Without this the "live
 controller" silently dies with the screen off.
 
-## ADR-008: LAN trust with one-time pairing codes and per-device tokens
+## ADR-008: LAN trust with one-time pairing codes, a trust prompt and per-device tokens
 
 The legacy layer stays unauthenticated (LAN trust, like the original) - do
 not tunnel it through the internet. Protocol v2 authenticates at the
-WebSocket upgrade: pairing mints a one-time code (8 chars, 5 min, loopback
-`POST /v2/pair`, QR `pulpit://host:port?pair=<code>`); the tablet
-connects with it, sends `hello`, and the desktop shows a "trust this
-device?" prompt (M1 headless: auto-accept with a warning log; the prompt
-ships with the desktop UI). Trusting creates a per-device entry in
-`~/pulpitApp/devices.json` (`{id, name, token, created, last_seen}`);
-every later connect uses `?token=...`. Revoking a device = deleting its
-entry, so a leaked token never widens beyond one tablet. The tablet keeps
-its token in EncryptedSharedPreferences.
+WebSocket upgrade. Pairing mints a one-time code (8 chars, 5 min TTL,
+loopback-only minting via `POST /v2/pair`, QR
+`pulpit://host:port?pair=<code>`); a code burns on first use, five wrong
+codes invalidate every outstanding one, and codes are never written to
+the logs.
+
+Trust is a desktop decision (012 B2): converting a code into a device
+first asks the operator in a native "trust this device?" dialog. The
+wait is bounded by the code TTL - an unanswered prompt denies the
+pairing once the code would have expired anyway - and a denial rejects
+the `hello` and burns the code, so retrying needs a fresh one. Headless
+builds (no operator to ask) keep the auto-accept default with a warning
+log. Trusting creates a per-device entry in `~/pulpitApp/devices.json`
+(`{id, name, created, last_seen}` plus a SHA-256 token digest only; the
+plaintext token travels exactly once, in the pairing `welcome`, and the
+digest is all that ever reaches the server's disk). Every later connect
+uses `?token=...`. `hello.name` is sanitized (trimmed, control
+characters stripped, 64-char cap) before it reaches the registry, the
+logs or the desktop device list.
+
+The desktop settings (the "Tablety" section) list paired devices with
+their last-seen time; revoking a device deletes its entry and closes its
+live sessions immediately, so a leaked token never widens beyond one
+tablet.
+
+The tablet stores its token Keystore-encrypted at rest: AES-256-GCM
+under a non-exportable AndroidKeyStore key, framed as an `enc1:` envelope
+(fresh random IV alongside the ciphertext) in the usual app-private
+prefs file, with `allowBackup="false"` - a small hand-rolled cipher
+wrapper instead of EncryptedSharedPreferences, which would add a
+dependency (and is deprecated) for what ~40 lines of `javax.crypto` do.
+A plaintext token from an older install is re-encrypted on first load,
+and a token that cannot be decrypted (key lost, ciphertext tampered)
+reads as unpaired: the device pairs again rather than crash.
 
 ## ADR-009: Structured logging from day one
 
@@ -116,3 +141,39 @@ format, extension ids (`deckboard-system-info`, `deckboard-callurl`,
 (`DeckboardExtension`). The Tauri identifier change (`app.pulpit.desktop`)
 means the NSIS bundle installs next to, not over, the old build - a
 one-time manual uninstall.
+
+## ADR-012: Extensions are trusted user-installed code (stub)
+
+Status: stub recording current behavior, not a fresh decision. The
+extension host (crates/ext, ADR-011's copied `~/pulpitApp/extensions`)
+runs original-ecosystem packages with full user powers: unrestricted
+file reads/writes, `cmd` shell execution, arbitrary HTTP and `open`.
+There is no permission model and no sandbox; installing an extension is
+assumed to be as deliberate as installing any desktop app. This is a
+different trust boundary from ADR-005 (web widgets share one WebView but
+are proxy-gated); extensions are NOT proxy-gated. Hardening so far
+bounds robustness, not trust: per-call HTTP timeouts, load/dispatch
+timeouts for wedged packages, private per-open extraction dirs. If a
+third-party extension marketplace or sideloaded-package sharing ever
+lands, revisit with a permission model before that - not after.
+
+## ADR-013: Discovery pairs like Bluetooth, manual stays (M8)
+
+Status: accepted (2026-10-03, plan 014)
+
+Tablets should not need a keyboard to type an IP, but automatic
+pairing must never mean silent pairing. The desktop advertises
+`_pulpit._tcp` over mDNS (pure-Rust mdns-sd, no system mDNS
+dependency; TXT carries proto=v2 + version) and a tablet browses
+with Android NsdManager. Pairing from discovery is numeric
+comparison: the tablet POSTs /v2/pair-request, the server mints the
+ordinary one-time code, and the SAME verification code shows on both
+screens; a human on each side confirms (desktop gate dialog, tablet
+poll). The pre-approval is single-use and burns with the code, so the
+ordinary pairing path stays the only way a device token is minted.
+Manual pairing (desktop mints a code, tablet types it, trust dialog)
+remains for networks where mDNS does not traverse, and several
+desktops/tablets may coexist - discovery is multi-instance by
+nature, pairing is always pairwise and operator-gated. Loopback
+callers cannot use the request endpoint (the desktop has its own
+UI), and browser origins are refused as everywhere else (B1).

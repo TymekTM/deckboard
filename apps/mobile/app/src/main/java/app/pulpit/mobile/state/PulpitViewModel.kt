@@ -1,21 +1,25 @@
 //! App state over protocol v2: connection lifecycle (token or pairing),
 //! boards snapshot + live deltas, the current board, and the live channel
 //! state (scalars + series). Reconnects with backoff; every (re)connect
-//! gets a full snapshot from the server, so there is no client cache to
-//! invalidate.
+//! gets a full snapshot from the server, so the on-disk cache
+//! (BoardCache) is display-only and never needs invalidating.
 
 package app.pulpit.mobile.state
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
-import android.util.Log
+import android.os.Build
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
+import app.pulpit.mobile.LinkService
 import app.pulpit.mobile.net.ConnState
 import app.pulpit.mobile.net.V2Client
 import app.pulpit.mobile.net.V2Event
+import app.pulpit.mobile.net.createPairRequest
+import app.pulpit.mobile.net.pairRequestStatus
 import app.pulpit.mobile.proto.Board
 import app.pulpit.mobile.proto.ChannelInfo
 import app.pulpit.mobile.proto.BoardOp
@@ -24,6 +28,7 @@ import app.pulpit.mobile.proto.V2
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,6 +38,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 data class ServerConfig(
@@ -44,18 +50,20 @@ data class ServerConfig(
 
 class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val scope = CoroutineScope(Job())
+    /** Every field below is confined to the main thread: Compose calls in
+     *  from there, and this scope runs every coroutine there too. Blocking
+     *  work hops to Dispatchers.IO explicitly (ensureAsset); frame decoding
+     *  already happens on OkHttp's thread inside V2Client. SupervisorJob so
+     *  one failed child cannot cancel the reconnect loop and the probe. */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val prefs = app.getSharedPreferences("pulpit", Context.MODE_PRIVATE)
 
-    private val _config = MutableStateFlow(
-        ServerConfig(
-            host = prefs.getString("host", "") ?: "",
-            port = prefs.getInt("port", 8500),
-            name = prefs.getString("name", "") ?: "",
-            token = prefs.getString("token", null),
-        ),
-    )
+    /** Keystore-backed cipher for the token at rest (ADR-008); the pure
+     *  decisions it feeds live in TokenVault (unit-tested). */
+    private val tokenCipher = KeystoreTokenCipher()
+
+    private val _config = MutableStateFlow(loadConfig())
     val config: StateFlow<ServerConfig> = _config
 
     private val _connState = MutableStateFlow<ConnState>(ConnState.Disconnected)
@@ -68,8 +76,18 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     private val _serverDown = MutableStateFlow(false)
     val serverDown: StateFlow<Boolean> = _serverDown
 
-    /** Tracks the Activity's STARTED/STOPPED so the silent probe sleeps
-     *  with the screen: no connect attempts while the tablet is dozing. */
+    /** True once the link has been down for LINK_STANDBY_MS while the app
+     *  was in front: the Activity stops holding the screen on and the
+     *  system timeout puts the display to sleep. Cleared by a successful
+     *  connect and by the next foreground (the user woke the deck). */
+    private val _linkStandby = MutableStateFlow(false)
+    val linkStandby: StateFlow<Boolean> = _linkStandby
+
+    private var standbyJob: Job? = null
+
+    /** Tracks the Activity's STARTED/STOPPED: the socket lives only while
+     *  the app is in front (see onAppBackground), and retries, the probe,
+     *  and the standby countdown run only then. */
     @Volatile private var foreground = false
 
     /** Reconnect attempts since the last successful session; the banner
@@ -100,18 +118,24 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     private val _bitmaps = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
     val bitmaps: StateFlow<Map<String, ImageBitmap>> = _bitmaps
 
-    /** Hashes with a fetch in flight or failed this process; failures are
-     *  not retried - a 404 stays a 404 until the app restarts. */
+    /** Hashes fetched, in flight, or failed this process (main thread
+     *  only). Failures retry ASSET_RETRIES times with backoff; forgetPairing
+     *  clears the set together with the bitmaps it guards. */
     private val assetFetches = mutableSetOf<String>()
 
     private var client: V2Client? = null
     private var eventJob: Job? = null
     private var reconnectAttempts = 0
 
+    /** Display-only offline cache (see [BoardCache]): written on every
+     *  full snapshot so a cold launch shows the board while the link
+     *  reconnects. Cleared on unpair. */
+    private val cache = BoardCache(File(app.filesDir, "cache"))
+
     /** One pending reconnect per connect cycle: Failed and Disconnected
      *  arrive back to back, and each state flip would otherwise schedule
      *  a duplicate timer (double-counting the attempt budget). */
-    private var reconnectScheduled = false
+    private var reconnectJob: Job? = null
 
     /** Set while a pairing is in flight (no token yet). */
     private var pendingPairCode: String? = null
@@ -127,11 +151,105 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         MutableStateFlow<Map<String, ChannelInfo>>(emptyMap())
     val channelMeta: StateFlow<Map<String, ChannelInfo>> = _channelMeta
 
+    // -- M8 discovery pairing (Bluetooth-style, plan 014) -------------------
+
+    /** Live pair-request: the verification code both screens show, plus
+     *  where the request went (and the hello name to persist on
+     *  approval - the desktop's request log shows the same name). */
+    data class PairRequestUi(
+        val host: String,
+        val port: Int,
+        val code: String,
+        val deviceName: String,
+    )
+
+    private val _pairRequest = MutableStateFlow<PairRequestUi?>(null)
+    val pairRequest: StateFlow<PairRequestUi?> = _pairRequest
+
+    /** Asks a discovered desktop to pair. The desktop shows its dialog
+     *  with the same code; this polls until the operator decides and
+     *  then finishes through the ordinary pairing path (pre-approved
+     *  server-side, so no second dialog). */
+    fun startPairRequest(host: String, port: Int, deviceName: String) {
+        if (_pairRequest.value != null) return
+        scope.launch {
+            try {
+                val created = createPairRequest(sharedHttp, host, port, deviceName)
+                _pairRequest.value = PairRequestUi(host, port, created.code, deviceName)
+                pollPairDecision(host, port, created.request_id, created.expires_in_secs)
+            } catch (e: Exception) {
+                _pairRequest.value = null
+                _connState.value = ConnState.Failed(
+                    e.message ?: "żądanie parowania nie powiodło się",
+                    retryable = false,
+                )
+            }
+        }
+    }
+
+    /** Leaves the waiting state without touching the desktop (its dialog
+     *  still resolves on its own; the unanswered request expires). */
+    fun cancelPairRequest() {
+        _pairRequest.value = null
+    }
+
+    private suspend fun pollPairDecision(host: String, port: Int, id: String, ttlSecs: Long) {
+        val deadline = System.currentTimeMillis() + (ttlSecs + 5) * 1000
+        while (System.currentTimeMillis() < deadline) {
+            delay(2000)
+            val status = try {
+                pairRequestStatus(sharedHttp, host, port, id)
+            } catch (_: Exception) {
+                continue
+            }
+            when (status) {
+                "approved" -> {
+                    val ui = _pairRequest.value
+                    _pairRequest.value = null
+                    if (ui != null) {
+                        withContext(Dispatchers.Main.immediate) {
+                            saveConfig(
+                                _config.value.copy(
+                                    host = ui.host,
+                                    port = ui.port,
+                                    name = ui.deviceName,
+                                ),
+                            )
+                            connectWithPairCode(ui.code)
+                        }
+                    }
+                    return
+                }
+                "rejected" -> {
+                    _pairRequest.value = null
+                    _connState.value =
+                        ConnState.Failed("komputer odrzucił parowanie", retryable = false)
+                    return
+                }
+                "expired" -> {
+                    _pairRequest.value = null
+                    _connState.value = ConnState.Failed(
+                        "żądanie wygasło - uruchom parowanie ponownie",
+                        retryable = false,
+                    )
+                    return
+                }
+            }
+        }
+        if (_pairRequest.value != null) {
+            _pairRequest.value = null
+            _connState.value =
+                ConnState.Failed("komputer nie odpowiedział w czasie", retryable = false)
+        }
+    }
+
     init {
         // A paired device reconnects on its own; pairing needs the user
         // to enter a fresh code.
         if (!_config.value.token.isNullOrBlank()) {
+            loadCacheIntoUi()
             connect()
+            startKeepAlive()
         }
         // The silent probe: while the shutdown overlay is up and the app is
         // foreground, poke the server every PROBE_SECONDS so a restarted
@@ -141,7 +259,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 delay(PROBE_SECONDS * 1000L)
                 if (foreground && _serverDown.value) {
-                    Log.i(TAG, "shutdown probe: trying the server again")
+                    Plog.i(TAG, "shutdown probe: trying the server again")
                     connect()
                 }
             }
@@ -151,6 +269,55 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         disconnect()
         scope.cancel()
+    }
+
+    // -- offline cache (display-only) --------------------------------------
+
+    /** Cold launch with a stored pairing: paint the last snapshot before
+     *  the first bytes hit the wire, so the deck comes up looking alive
+     *  and the retry banner says how the link really is. */
+    private fun loadCacheIntoUi() {
+        val snap = cache.load() ?: return
+        Plog.i(TAG, "offline cache: ${snap.boards.size} boards restored")
+        _boards.value = snap.boards.sortedBy { it.order }
+        _currentBoard.value = _boards.value.firstOrNull()
+        _values.value = snap.values
+        _series.value = snap.series
+    }
+
+    /** Fire-and-forget persist of the latest full snapshot (boards or
+     *  state.sync); patches are not persisted - the next snapshot will
+     *  be, and a cold launch only needs the shape of the deck. */
+    private fun persistCache() {
+        if (_boards.value.isEmpty()) return
+        val payload = CachePayload(_boards.value, _values.value, _series.value)
+        scope.launch(Dispatchers.IO) { cache.save(payload) }
+    }
+
+    // -- keep-alive (foreground service) ------------------------------------
+
+    /** Raise [LinkService] so Doze cannot starve the link once the
+     *  screen goes dark (ROADMAP M4). The service holds no socket; it
+     *  only keeps the process at foreground priority and flips the flag
+     *  [closesLinkOnBackground] consults. */
+    private fun startKeepAlive() {
+        val app = getApplication<Application>()
+        LinkBus.status.value = linkStatusLine(_connState.value, _config.value.host)
+        runCatching {
+            val intent = Intent(app, LinkService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) {
+                app.startForegroundService(intent)
+            } else {
+                app.startService(intent)
+            }
+        }.onFailure { Plog.w(TAG, "keep-alive service refused to start: ${it.message}") }
+    }
+
+    /** Back to plan 008 (close on background): unpair, or the user hit
+     *  "Rozłącz" and the service stopped itself. */
+    private fun stopKeepAlive() {
+        val app = getApplication<Application>()
+        runCatching { app.stopService(Intent(app, LinkService::class.java)) }
     }
 
     /** Kick off a fetch for [hash]. Reads [ServerConfig.token], so nothing
@@ -194,13 +361,75 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Prefs → [ServerConfig]. The stored token is either an `enc1:`
+     *  envelope (decrypted) or a legacy plaintext from before ADR-008
+     *  (kept, then re-encrypted on this load); anything unreadable reads
+     *  as unpaired - the device re-pairs, nothing crashes. Keystore work
+     *  happens only on a token read/write, once per launch at most.
+     *  allowBackup=false keeps the file out of cloud backups, and a
+     *  backup would be useless anyway: the AndroidKeyStore key is
+     *  non-exportable and bound to this device+user, so restored
+     *  ciphertext could never be decrypted elsewhere - a restored
+     *  install simply re-pairs. */
+    private fun loadConfig(): ServerConfig {
+        val load = planTokenLoad(prefs.getString("token", null)) { iv, data ->
+            tokenCipher.decrypt(iv, data)
+        }
+        if (load.rewrite) {
+            if (load.token == null) {
+                Plog.i(TAG, "stored pairing token unreadable - the device must pair again")
+            } else {
+                Plog.i(TAG, "migrating plaintext pairing token to keystore encryption")
+            }
+            storeToken(load.token)
+        }
+        return ServerConfig(
+            host = prefs.getString("host", "") ?: "",
+            port = prefs.getInt("port", 8500),
+            name = prefs.getString("name", "") ?: "",
+            token = load.token,
+        )
+    }
+
+    /** The only place the token reaches disk: encrypted, or removed.
+     *  When encryption fails (broken keystore) nothing is persisted -
+     *  plaintext at rest is what ADR-008 forbids - and the caller's
+     *  in-memory token keeps the current session alive; the device
+     *  re-pairs after a restart. Never logs token material. Writes
+     *  synchronously (commit, not apply): losing a freshly minted
+     *  pairing to a process kill right after install would force a
+     *  pointless re-pair. */
+    private fun storeToken(token: String?): Boolean {
+        val editor = prefs.edit()
+        val envelope = token?.let { t ->
+            tokenCipher.encrypt(t)?.let { (iv, data) -> encodeEnvelope(iv, data) }
+        }
+        if (token != null && envelope == null) {
+            // encryption failed (unpair with a null token is the normal
+            // path): the reason is worth a line, the token never is.
+            Plog.w(TAG, "token vault: encrypt failed - token not persisted, re-pair after restart")
+        }
+        if (envelope == null) {
+            editor.remove("token")
+        } else {
+            editor.putString("token", envelope)
+        }
+        return editor.commit()
+    }
+
     fun saveConfig(cfg: ServerConfig) {
-        prefs.edit()
+        val tokenStored = storeToken(cfg.token)
+        if (!tokenStored) {
+            Plog.w(TAG, "config write failed - pairing not persisted")
+        }
+        val ok = prefs.edit()
             .putString("host", cfg.host)
             .putInt("port", cfg.port)
             .putString("name", cfg.name)
-            .putString("token", cfg.token)
-            .apply()
+            .commit()
+        if (!ok) {
+            Plog.w(TAG, "config write failed - host/port/name not persisted")
+        }
         _config.value = cfg
     }
 
@@ -223,7 +452,6 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun openClient(token: String?, pairCode: String?) {
         disconnect()
-        reconnectScheduled = false
         val cfg = _config.value
         val c = V2Client(cfg.host, cfg.port, token, pairCode, cfg.name)
         client = c
@@ -232,6 +460,8 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
         eventJob?.cancel()
         client?.disconnect()
         client = null
@@ -244,13 +474,16 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     fun forgetPairing() {
         saveConfig(_config.value.copy(token = null))
+        stopKeepAlive()
         disconnect()
+        cache.clear()
         _boards.value = emptyList()
         _currentBoard.value = null
         _values.value = emptyMap()
         _series.value = emptyMap()
         _channelMeta.value = emptyMap()
         _bitmaps.value = emptyMap()
+        assetFetches.clear()
     }
 
     /** The user tapped the shutdown overlay: leave the standby state and
@@ -264,15 +497,51 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onAppForeground() {
         foreground = true
+        // The user just woke the deck: hold the screen again and look for
+        // the PC right away instead of waiting out a backoff.
+        _linkStandby.value = false
+        if (!_config.value.token.isNullOrBlank() && reconnectJob?.isActive != true) {
+            val st = _connState.value
+            val idle = client == null || st is ConnState.Disconnected ||
+                (st is ConnState.Failed && st.retryable)
+            if (idle) {
+                // In shutdown standby this is the silent probe: the
+                // goodbye screen stays until a welcome clears it.
+                if (!_serverDown.value) {
+                    reconnectAttempts = 0
+                    _reconnectAttempt.value = 0
+                }
+                connect()
+            }
+        }
+        if (_connState.value !is ConnState.Connected) armStandby()
     }
 
     fun onAppBackground() {
         foreground = false
-        // No attempts in standby while the screen is off: kill a probe
-        // that is mid-flight so the socket dies with the screen.
-        if (_serverDown.value) {
-            client?.disconnect()
+        standbyJob?.cancel()
+        standbyJob = null
+        // A refusal already closed its socket and its message must stay
+        // on the connect screen; a pairing in flight cannot be retried
+        // (one-time code). Leave both alone.
+        val refused = (_connState.value as? ConnState.Failed)?.retryable == false
+        if (refused || pendingPairCode != null) return
+        // 008's battery win, with the M4 keep-alive escape hatch: while
+        // the foreground service is up the deck stays connected in the
+        // dark; otherwise the socket closes so the radio and the CPU can
+        // sleep. Every connect gets a full snapshot, so nothing goes
+        // stale; onAppForeground reconnects.
+        if (!closesLinkOnBackground(
+                LinkBus.keepLinkInBackground.value,
+                refused,
+                pendingPairCode != null,
+            )
+        ) {
+            Plog.i(TAG, "app in background - keep-alive service holds the link")
+            return
         }
+        Plog.i(TAG, "app in background - closing the link")
+        disconnect()
     }
 
     private fun observeEvents(client: V2Client) {
@@ -280,21 +549,34 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             launch {
                 client.state.collect { st ->
                     _connState.value = st
+                    // the keep-alive notification mirrors the link line
+                    LinkBus.status.value = linkStatusLine(st, _config.value.host)
                     when (st) {
                         is ConnState.Connected -> {
                             reconnectAttempts = 0
                             _reconnectAttempt.value = 0
                             _serverDown.value = false
+                            disarmStandby()
                         }
                         is ConnState.ServerDown -> {
-                            Log.i(TAG, "server announced shutdown - retry loop suspended")
+                            Plog.i(TAG, "server announced shutdown - retry loop suspended")
                             _serverDown.value = true
+                        }
+                        // A refusal is final: stay on the connect screen with the reason.
+                        is ConnState.Failed -> {
+                            armStandby()
+                            when {
+                                !st.retryable -> pendingPairCode = null
+                                !_serverDown.value -> scheduleReconnect()
+                            }
                         }
                         // While the overlay is up the probe owns reconnects:
                         // failures are expected and stay invisible.
-                        is ConnState.Failed, is ConnState.Disconnected ->
+                        is ConnState.Disconnected -> {
+                            armStandby()
                             if (!_serverDown.value) scheduleReconnect()
-                        else -> {}
+                        }
+                        is ConnState.Connecting -> armStandby()
                     }
                 }
             }
@@ -317,8 +599,10 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                     .keys
                 _channelMeta.value = ev.welcome.channels
                 ev.issuedToken?.let { token ->
-                    Log.i(TAG, "paired, storing device token")
+                    Plog.i(TAG, "paired, storing device token")
                     saveConfig(_config.value.copy(token = token))
+                    // first pairing: raise the keep-alive service too
+                    startKeepAlive()
                 }
                 _deviceName.value = ev.welcome.device.name
                 pendingPairCode = null
@@ -328,6 +612,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                 val cur = _currentBoard.value
                 _currentBoard.value = _boards.value.firstOrNull { it.id == cur?.id }
                     ?: _boards.value.firstOrNull()
+                persistCache()
             }
             is V2Event.Delta -> applyDelta(ev.ops)
             is V2Event.SwitchBoard -> {
@@ -337,6 +622,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             is V2Event.State -> {
                 _values.value = ev.values
                 _series.value = ev.series
+                persistCache()
             }
             is V2Event.Patch -> {
                 val values = _values.value.toMutableMap()
@@ -362,12 +648,9 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                 _series.value = series
             }
             is V2Event.ServerError -> {
-                Log.w(TAG, "server error: ${ev.code} ${ev.message.orEmpty()}")
-                if (ev.code == "pair-invalid" || ev.code == "pair-expired" || ev.code == "unauthorized") {
-                    // Bad auth: stop retrying; the connect screen explains.
-                    client.disconnect()
-                    _connState.value = ConnState.Failed(authMessage(ev.code))
-                }
+                // Fatal codes are already terminal in V2Client
+                // (ConnState.Failed, retryable = false); nothing to do here.
+                Plog.w(TAG, "server error: ${ev.code} ${ev.message.orEmpty()}")
             }
             is V2Event.Acked -> {} // interactions are fire-and-confirm
         }
@@ -397,28 +680,41 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
-        if (reconnectScheduled) return
-        reconnectScheduled = true
+        if (reconnectJob?.isActive == true) return
         reconnectAttempts++
         _reconnectAttempt.value = reconnectAttempts
-        scope.launch {
+        reconnectJob = scope.launch {
             delay(reconnectAttempts.coerceAtMost(6) * 2_000L)
-            reconnectScheduled = false
+            reconnectJob = null
             // A retry scheduled just before the goodbye arrived must not
             // fire into standby; the probe owns reconnecting from there.
-            if (_serverDown.value) return@launch
+            // Nor may it fire into the background: the socket is closed.
+            if (_serverDown.value || !foreground) return@launch
             val st = _connState.value
-            if (st is ConnState.Failed || st is ConnState.Disconnected) {
-                Log.i(TAG, "reconnect attempt $reconnectAttempts")
+            if ((st is ConnState.Failed && st.retryable) || st is ConnState.Disconnected) {
+                Plog.i(TAG, "reconnect attempt $reconnectAttempts")
                 connect()
             }
         }
     }
 
-    private fun authMessage(code: String): String = when (code) {
-        "pair-invalid" -> "invalid pairing code - generate a new one on the desktop"
-        "pair-expired" -> "pairing code expired - generate a new one on the desktop"
-        else -> "device revoked on the desktop - pair again"
+    /** Start the standby countdown on the first non-connected state while
+     *  in front. Idempotent: reconnect attempts do not restart it, so the
+     *  3 minutes count from the moment the link was lost. */
+    private fun armStandby() {
+        if (!foreground || _linkStandby.value || standbyJob?.isActive == true) return
+        standbyJob = scope.launch {
+            delay(LINK_STANDBY_MS)
+            standbyJob = null
+            Plog.i(TAG, "link down for ${LINK_STANDBY_MS / 60_000} min - letting the screen sleep")
+            _linkStandby.value = true
+        }
+    }
+
+    private fun disarmStandby() {
+        standbyJob?.cancel()
+        standbyJob = null
+        _linkStandby.value = false
     }
 
     // -- user interactions ------------------------------------------------
@@ -440,6 +736,15 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     fun slider(boardId: Long, tile: Tile, value: Float) {
         if (tile.interacts(V2.INT_SLIDE)) {
             client?.slide(boardId, tile.id, value)
+        }
+    }
+
+    /** M5 custom gestures: sent only for interactions the tile declares
+     *  (the server enforces the same list, so an undeclared gesture is a
+     *  guaranteed typed error - do not send it). */
+    fun gesture(boardId: Long, tile: Tile, name: String) {
+        if (tile.interacts(name)) {
+            client?.gesture(boardId, tile.id, name)
         }
     }
 

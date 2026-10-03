@@ -54,6 +54,12 @@ object V2 {
     const val INT_PRESS_END = "press-end"
     const val INT_SLIDE = "slide"
 
+    // M5 custom gestures (declared per tile via `gestures` in options)
+    const val INT_LONG_PRESS = "long-press"
+    const val INT_DOUBLE_TAP = "double-tap"
+    const val INT_SWIPE_LEFT = "swipe-left"
+    const val INT_SWIPE_RIGHT = "swipe-right"
+
     // state shapes
     const val SHAPE_SCALAR = "scalar"
     const val SHAPE_SERIES = "series"
@@ -104,6 +110,8 @@ data class Welcome(
     /** Issued only in the welcome that completes a pairing. */
     val token: String? = null,
     val channels: Map<String, ChannelInfo> = emptyMap(),
+    /** M5: what the server supports (mirrors hello.capabilities). */
+    val capabilities: List<String> = emptyList(),
 )
 
 @Serializable
@@ -158,6 +166,8 @@ data class Tile(
     val style: Style? = null,
     @SerialName("web_package") val webPackage: String? = null,
     @SerialName("asset_hash") val assetHash: String? = null,
+    /** Active-state image (legacy `img2`); see docs/protocol-v2.md §4. */
+    @SerialName("asset_hash2") val assetHash2: String? = null,
 ) {
     fun interacts(kind: String): Boolean = interactions.contains(kind)
 
@@ -186,6 +196,15 @@ data class Style(
     @SerialName("icon_family") val iconFamily: String? = null,
     val title: String? = null,
     val shape: String? = null,
+    // Style parity fields (012 C5): optional, so payloads from servers
+    // that predate them keep the client defaults (white title/glyph,
+    // no border). Absent state-2 fields fall back to state 1 per field.
+    @SerialName("border_color") val borderColor: String? = null,
+    @SerialName("border_color2") val borderColor2: String? = null,
+    @SerialName("icon_color") val iconColor: String? = null,
+    @SerialName("icon_color2") val iconColor2: String? = null,
+    @SerialName("title_color") val titleColor: String? = null,
+    @SerialName("title_color2") val titleColor2: String? = null,
 )
 
 @Serializable
@@ -232,6 +251,23 @@ data class BoardsDelta(
     val generation: Long,
     val ops: List<JsonElement> = emptyList(),
 )
+
+/** Decode a boards.delta op list, one op at a time. Unknown or incomplete
+ *  ops are skipped (protocol evolution rules); a known op whose payload
+ *  fails to decode rejects the whole batch (null return) - this client
+ *  can no longer trust its board snapshot and must resync. */
+fun decodeDeltaOps(ops: List<JsonElement>, json: Json): List<BoardOp>? {
+    val decoded = ArrayList<BoardOp>(ops.size)
+    for (el in ops) {
+        val op = try {
+            BoardOp.from(el, json)
+        } catch (e: kotlinx.serialization.SerializationException) {
+            return null
+        }
+        if (op != null) decoded.add(op)
+    }
+    return decoded
+}
 
 @Serializable
 data class BoardOpen(

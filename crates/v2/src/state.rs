@@ -222,6 +222,18 @@ impl StateEngine {
         }
     }
 
+    /// Re-arms channels whose patch was withheld (see
+    /// `V2Hub::broadcast_patch_to_welcomed`): the next flush re-drains
+    /// them with their current values.
+    pub fn mark_dirty<'a>(&self, channels: impl IntoIterator<Item = &'a str>) {
+        let mut inner = self.inner.lock().expect("state engine poisoned");
+        for channel in channels {
+            if inner.channels.contains_key(channel) {
+                inner.dirty.insert(channel.to_string());
+            }
+        }
+    }
+
     /// Latest value per changed channel; called by the flusher task.
     pub fn drain_dirty(&self) -> Vec<ChannelValue> {
         let mut inner = self.inner.lock().expect("state engine poisoned");

@@ -17,4 +17,28 @@ icon2: string | null,
 /**
  * Font family for the glyphs: `"fas"` (default) or `"fab"` (brands).
  */
-icon_family: string | null, title: string | null, shape: string | null, };
+icon_family: string | null, title: string | null, shape: string | null, 
+/**
+ * Tile border color; clients render a hairline border when set.
+ */
+border_color: string | null, 
+/**
+ * Active-state border (per-field fallback to `border_color`, §4).
+ */
+border_color2: string | null, 
+/**
+ * Glyph color; defaults to white client-side when absent.
+ */
+icon_color: string | null, 
+/**
+ * Active-state glyph color (per-field fallback to `icon_color`, §4).
+ */
+icon_color2: string | null, 
+/**
+ * Title text color; defaults to white client-side when absent.
+ */
+title_color: string | null, 
+/**
+ * Active-state title color (per-field fallback to `title_color`, §4).
+ */
+title_color2: string | null, };

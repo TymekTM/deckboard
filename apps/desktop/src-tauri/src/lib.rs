@@ -11,6 +11,9 @@ use pulpit_legacy::{AppState, Backend, EditorBroadcaster, Hub};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 /// Everything the UI commands need, built once in [`setup_core`].
 struct DesktopState {
     backend: Option<Arc<SqlBackend>>,
@@ -19,11 +22,9 @@ struct DesktopState {
     port: u16,
     /// Loaded extensions, for the editor's action catalog and tile styling.
     ext: Option<Arc<ExtManager>>,
-    /// Protocol v2 pairing codes; `None` when the v2 stack failed to start
-    /// (bad devices.json or asset store) - the UI then hides pairing.
-    pairing: Option<Arc<pulpit_v2::Pairing>>,
     /// Protocol v2 state; `None` when the stack failed to start. Carries
-    /// the session fan-out for the shutdown goodbye and the delta
+    /// the session fan-out for the shutdown goodbye, the pairing pool
+    /// (codes + trust gate), the device registry and the delta
     /// publisher the editor's write path notifies after each commit.
     v2: Option<Arc<pulpit_v2::V2State>>,
     /// Current touch-mode hotkey combo ("Ctrl+Alt+D" style).
@@ -182,12 +183,16 @@ pub fn run() {
             exec_slider,
             get_settings,
             set_touch_mode_hotkey,
+            set_server_port,
             get_autostart,
             set_autostart,
             read_image_data,
             list_known_inputs,
             list_lan_addresses,
             create_pairing_code,
+            list_devices,
+            revoke_device,
+            resolve_operator_ask,
             export_boards,
             import_boards,
         ])
@@ -267,12 +272,20 @@ fn register_ext_input(
 /// ADR-001), load extensions and start the embedded legacy server. A failure
 /// keeps the UI alive with `backend: None` so the window can explain why.
 fn setup_core(app: tauri::AppHandle) -> DesktopState {
-    // Port 8500 is what the stock Android client hardcodes (and the original
-    // app's default); `PULPIT_PORT` overrides it for side-by-side runs.
-    let port: u16 = std::env::var("PULPIT_PORT")
+    // Port 8500 is what the stock Android client hardcodes (and the
+    // original app's default). `PULPIT_PORT` overrides it for
+    // side-by-side runs; otherwise the port persisted in editor.json
+    // (Ustawienia -> Serwer) applies.
+    let data_dir = pulpit_db::data_dir();
+    let settings_path = data_dir.join("editor.json");
+    let stored_editor: serde_json::Value = std::fs::read_to_string(&settings_path)
         .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8500);
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let port = effective_port(
+        std::env::var("PULPIT_PORT").ok().as_deref(),
+        stored_editor.get("port"),
+    );
 
     // PULPIT_DB overrides the database location (profiling / hermetic runs)
     let db_path = std::env::var_os("PULPIT_DB").map(std::path::PathBuf::from);
@@ -285,16 +298,13 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             hub: None,
             ext: None,
             port,
-            pairing: None,
             v2: None,
-            hotkey: std::sync::Mutex::new("Ctrl+Alt+D".to_string()),
+            hotkey: std::sync::Mutex::new(DEFAULT_HOTKEY.to_string()),
             settings_path: None,
         };
     }
     let db = db.unwrap();
 
-    let data_dir = pulpit_db::data_dir();
-    let settings_path = data_dir.join("editor.json");
     let settings: serde_json::Value = std::fs::read_to_string(data_dir.join("settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -364,6 +374,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                     engine: feed_v2.clone(),
                     generation: pulpit_v2::Generation::starting_at(1),
                     boards_cache: Default::default(),
+                    pair_requests: Default::default(),
                     config: pulpit_v2::V2Config {
                         public_port: port,
                         ..Default::default()
@@ -376,6 +387,34 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             }
         }
     };
+    // Fresh pairings need the operator's approval (audit B2 step 6): the
+    // gate asks in a native dialog. The session bounds the wait by the
+    // pairing-code TTL, so an unanswered dialog (nobody at the desk)
+    // denies the pairing once the code would have expired anyway; a late
+    // answer is dropped - the one-time code is burned, a retry needs a
+    // fresh one.
+    if let Some(v2) = &v2 {
+        let app = app.clone();
+        v2.pairing
+            .set_trust_gate(move |name| ask_operator(&app, "trust", name, None));
+    }
+    // M8 Bluetooth-style pair-requests (plan 014): a tablet that found us
+    // over mDNS asks to pair; the editor popup shows the verification code
+    // the tablet is displaying too - pairing completes only when the
+    // numbers match and the operator confirms.
+    if let Some(v2) = &v2 {
+        let app = app.clone();
+        v2.pairing.set_pair_request_gate(move |name, code| {
+            ask_operator(&app, "pair-request", name, Some(code.to_string()))
+        });
+    }
+    // M8 discovery: announce the server on mDNS so tablets can find it
+    // without typing an address. Failure is non-fatal (manual pairing
+    // keeps working); the handle stays alive for the process lifetime.
+    match pulpit_v2::discovery::advertise(port, env!("CARGO_PKG_VERSION")) {
+        Ok(discovery) => std::mem::forget(discovery),
+        Err(e) => tracing::warn!("mDNS advertisement failed: {e}"),
+    }
     // v2 background task: coalesced state patches.
     if let Some(v2) = &v2 {
         tauri::async_runtime::spawn(pulpit_v2::run_flusher(
@@ -636,12 +675,25 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         }
     });
 
-    let hotkey = std::fs::read_to_string(&settings_path)
+    let mut hotkey = std::fs::read_to_string(&settings_path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("hotkey").and_then(|h| h.as_str()).map(str::to_string))
-        .unwrap_or_else(|| "Ctrl+Alt+D".to_string());
-    register_touch_mode_hotkey(&app, &hotkey);
+        .unwrap_or_else(|| DEFAULT_HOTKEY.to_string());
+    if let Err(e) = register_touch_mode_hotkey(&app, &hotkey) {
+        // fallback like the original: a stored combo another app now owns
+        // must not leave the user without any hotkey
+        tracing::warn!("stored hotkey unusable ({e}) - falling back to {DEFAULT_HOTKEY}");
+        if register_touch_mode_hotkey(&app, DEFAULT_HOTKEY).is_ok() {
+            hotkey = DEFAULT_HOTKEY.to_string();
+        } else {
+            // nothing is registered: record that as an empty combo so a
+            // later save of the same string re-registers instead of
+            // no-op-ing (hotkey_plan treats an unparseable old as Register)
+            tracing::error!("default hotkey also unusable - no hotkey registered");
+            hotkey = String::new();
+        }
+    }
 
     DesktopState {
         backend: Some(backend),
@@ -649,7 +701,6 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         hub: Some(hub),
         ext: Some(ext_manager),
         port,
-        pairing: v2.as_ref().map(|v| v.pairing.clone()),
         v2: v2.clone(),
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
@@ -855,13 +906,14 @@ fn toggle_main_window(app: &AppHandle) {
 /// (`pulpitApp/editor.json`, default Ctrl+Alt+D - the original's
 /// `toggleTouchMode` concept); an unusable stored combo falls back to the
 /// default with a warning.
-fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) {
+fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
     let shortcut = match combo.parse::<tauri_plugin_global_shortcut::Shortcut>() {
         Ok(s) => s,
         Err(_) => {
-            tracing::warn!("invalid hotkey \"{combo}\" - touch-mode hotkey not registered");
-            return;
+            let msg = format!("invalid hotkey \"{combo}\" - use e.g. Ctrl+Alt+D");
+            tracing::warn!("{msg}");
+            return Err(msg);
         }
     };
     let result = app
@@ -871,8 +923,36 @@ fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) {
                 let _ = app.emit("toggle-touch-mode", ());
             }
         });
-    if let Err(e) = result {
-        tracing::warn!("could not register hotkey \"{combo}\": {e}");
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = format!("could not register hotkey \"{combo}\": {e}");
+            tracing::warn!("{msg}");
+            Err(msg)
+        }
+    }
+}
+
+/// The default touch-mode hotkey, used when a stored combo is unusable.
+const DEFAULT_HOTKEY: &str = "Ctrl+Alt+D";
+
+/// What a hotkey change (012 A4) has to do with (old, new): re-registering
+/// the combo that is already active would fail with "already registered",
+/// so an identical pair is a no-op; anything else registers the new combo
+/// first so a failure leaves the old one working. A stored combo that no
+/// longer parses must not block a change - there is nothing to lose.
+enum HotkeyPlan {
+    Noop,
+    Register,
+}
+
+fn hotkey_plan(old: &str, new: &str) -> Result<HotkeyPlan, String> {
+    let new_shortcut: tauri_plugin_global_shortcut::Shortcut = new
+        .parse()
+        .map_err(|_| format!("invalid shortcut \"{new}\" - use e.g. Ctrl+Alt+D"))?;
+    match old.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+        Ok(old_shortcut) if old_shortcut == new_shortcut => Ok(HotkeyPlan::Noop),
+        _ => Ok(HotkeyPlan::Register),
     }
 }
 
@@ -965,6 +1045,11 @@ fn set_autostart(app: AppHandle, enable: bool) -> Result<(), String> {
     }
 }
 
+/// Hard cap on images read into the WebView as data URLs (012 B3): the
+/// path comes from the frontend, so a giant file must not be base64'd
+/// into memory. 10 MiB is far above any sensible tile icon.
+const IMAGE_READ_CAP_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Read an image file and return it as a data URL for tile backgrounds and
 /// icons. Done in Rust so no filesystem plugin/scope is needed.
 #[tauri::command]
@@ -979,7 +1064,19 @@ fn read_image_data(path: String) -> Result<String, String> {
         "svg" => "image/svg+xml",
         _ => return Err(format!("unsupported image type \".{ext}\"")),
     };
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    // take() bounds the read itself: a file that grows between the length
+    // check and the read still cannot pull more than cap+1 bytes in
+    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    file.take(IMAGE_READ_CAP_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > IMAGE_READ_CAP_BYTES {
+        return Err(format!(
+            "image \".{ext}\" is larger than 10 MiB - pick a smaller file"
+        ));
+    }
     Ok(format!(
         "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -1068,10 +1165,8 @@ struct PairingOffer {
 
 #[tauri::command]
 fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, String> {
-    let pairing = state.pairing.as_ref().ok_or_else(|| {
-        "protocol v2 unavailable (devices.json or asset store failed to load)".to_string()
-    })?;
-    let code = pairing.new_code();
+    let v2 = v2_or_err(&state)?;
+    let code = v2.pairing.new_code();
     let addresses = lan_ipv4s()
         .into_iter()
         .map(|(name, ipv4)| {
@@ -1089,6 +1184,128 @@ fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, S
         expires_in_secs: 300,
         addresses,
     })
+}
+
+/// The operator gates (B2 trust prompt + M8 pair-request) ask through
+/// the editor's own pairing popup - a styled in-app modal - instead of a
+/// native dialog. `ask_operator` emits `operator-ask` to the webview and
+/// parks the calling worker thread on a channel until
+/// [`resolve_operator_ask`] answers (or the timeout denies). Runs on the
+/// pairing session's blocking thread / the pair-request worker, so the
+/// wait costs no socket-loop time. Deny-safe by construction: a closed
+/// webview, an emit failure, a timeout or a dropped channel all deny -
+/// nothing here can accidentally approve.
+fn pending_asks() -> &'static std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>> {
+    static PENDING: OnceLock<std::sync::Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>> =
+        OnceLock::new();
+    PENDING.get_or_init(Default::default)
+}
+
+/// How long the popup may wait for the operator: the pairing-code TTL
+/// (5 min) plus a grace gap, so the popup outlives the code it gates.
+const OPERATOR_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(360);
+
+fn next_ask_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "ask-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn ask_operator(app: &AppHandle, kind: &str, name: &str, code: Option<String>) -> bool {
+    let id = next_ask_id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    pending_asks()
+        .lock()
+        .expect("asks poisoned")
+        .insert(id.clone(), tx);
+    let payload = serde_json::json!({ "id": id, "kind": kind, "name": name, "code": code });
+    if let Err(e) = app.emit("operator-ask", payload) {
+        tracing::warn!(error = %e, "operator ask: webview emit failed - denying");
+        pending_asks().lock().expect("asks poisoned").remove(&id);
+        return false;
+    }
+    tracing::info!(kind, name, "operator ask shown in the editor");
+    let answer = match rx.recv_timeout(OPERATOR_ASK_TIMEOUT) {
+        Ok(approved) => approved,
+        Err(_) => {
+            tracing::warn!(kind, name, "operator ask unanswered - denying");
+            false
+        }
+    };
+    pending_asks().lock().expect("asks poisoned").remove(&id);
+    answer
+}
+
+/// The editor's answer to a shown ask. Unknown ids (already resolved or
+/// expired) are errors so a double-click cannot resurrect a decision.
+#[tauri::command]
+fn resolve_operator_ask(id: String, approved: bool) -> Result<(), String> {
+    let sender = pending_asks().lock().expect("asks poisoned").remove(&id);
+    match sender {
+        Some(tx) => tx
+            .send(approved)
+            .map_err(|_| "ask already gone".to_string()),
+        None => Err("no such ask (already resolved or expired)".to_string()),
+    }
+}
+
+/// A paired device for the settings UI: registry metadata only - no
+/// token material (plaintext or digest) ever leaves the backend.
+#[derive(Serialize)]
+struct DeviceInfo {
+    id: String,
+    name: String,
+    created: u64,
+    last_seen: u64,
+}
+
+fn device_infos(devices: &pulpit_v2::DeviceStore) -> Vec<DeviceInfo> {
+    devices
+        .list()
+        .into_iter()
+        .map(|d| DeviceInfo {
+            id: d.id,
+            name: d.name,
+            created: d.created,
+            last_seen: d.last_seen,
+        })
+        .collect()
+}
+
+/// Revokes the device and closes its live sessions (audit B2 step 6):
+/// a revoked tablet is cut off mid-flight, not at its next reconnect.
+/// `false` when there is no such entry (unknown id, already revoked).
+fn revoke_and_teardown(devices: &pulpit_v2::DeviceStore, hub: &pulpit_v2::V2Hub, id: &str) -> bool {
+    let removed = devices.revoke(id);
+    if removed {
+        let closed = hub.close_device_sessions(id);
+        tracing::info!(device = id, closed, "device revoked: live sessions closed");
+    }
+    removed
+}
+
+/// The v2 stack for the pairing/device commands; `None` means it failed
+/// to start (bad devices.json or asset store) and the UI hides the
+/// feature - the same message every such command reports.
+fn v2_or_err(state: &DesktopState) -> Result<&Arc<pulpit_v2::V2State>, String> {
+    state.v2.as_ref().ok_or_else(|| {
+        "protocol v2 unavailable (devices.json or asset store failed to load)".to_string()
+    })
+}
+
+#[tauri::command]
+fn list_devices(state: State<'_, DesktopState>) -> Result<Vec<DeviceInfo>, String> {
+    Ok(device_infos(&v2_or_err(&state)?.devices))
+}
+
+#[tauri::command]
+fn revoke_device(id: String, state: State<'_, DesktopState>) -> Result<bool, String> {
+    let v2 = v2_or_err(&state)?;
+    Ok(revoke_and_teardown(&v2.devices, &v2.hub, &id))
 }
 
 #[cfg(test)]
@@ -1119,6 +1336,159 @@ mod tests {
     fn pairing_url_matches_the_protocol_doc() {
         let url = pairing_shape("192.168.0.97", 8500, "ABCD2345");
         assert_eq!(url, "pulpit://192.168.0.97:8500?pair=ABCD2345");
+    }
+
+    #[test]
+    fn hotkey_plan_rejects_an_unparseable_new_combo() {
+        assert!(hotkey_plan("Ctrl+Alt+D", "Not+A+Combo").is_err());
+    }
+
+    #[test]
+    fn hotkey_plan_treats_re_saving_the_same_combo_as_a_noop() {
+        // re-registering the shortcut that is already registered would
+        // fail with "already registered" - the plan must say Noop
+        assert!(matches!(
+            hotkey_plan("Ctrl+Alt+D", "Ctrl+Alt+D"),
+            Ok(HotkeyPlan::Noop)
+        ));
+    }
+
+    #[test]
+    fn hotkey_plan_swaps_to_a_different_combo() {
+        assert!(matches!(
+            hotkey_plan("Ctrl+Alt+D", "Ctrl+Alt+P"),
+            Ok(HotkeyPlan::Register)
+        ));
+        // a stored combo that no longer parses must not block a change
+        assert!(matches!(
+            hotkey_plan("hand-edited junk", "Ctrl+Alt+P"),
+            Ok(HotkeyPlan::Register)
+        ));
+        // startup's both-combos-taken state records "" (nothing
+        // registered); saving any combo - even the same string - must
+        // register rather than no-op
+        assert!(matches!(
+            hotkey_plan("", "Ctrl+Alt+D"),
+            Ok(HotkeyPlan::Register)
+        ));
+    }
+
+    #[test]
+    fn effective_port_prefers_env_then_stored_then_default() {
+        let stored = serde_json::json!(8555);
+        assert_eq!(effective_port(Some("9000"), Some(&stored)), 9000);
+        assert_eq!(effective_port(None, Some(&stored)), 8555);
+        assert_eq!(effective_port(None, None), 8500);
+    }
+
+    #[test]
+    fn effective_port_falls_back_on_unusable_values() {
+        let big = serde_json::json!(70000);
+        let low = serde_json::json!(80);
+        let junk = serde_json::json!("not-a-port");
+        // an unparseable env var must not poison the stored value's chance
+        assert_eq!(effective_port(Some("nope"), Some(&big)), 8500);
+        assert_eq!(effective_port(None, Some(&big)), 8500);
+        assert_eq!(effective_port(None, Some(&low)), 8500);
+        assert_eq!(effective_port(None, Some(&junk)), 8500);
+        // a hand-edited file may keep the port as a string
+        assert_eq!(effective_port(None, Some(&serde_json::json!("8555"))), 8555);
+    }
+
+    #[test]
+    fn persist_editor_setting_preserves_other_keys() {
+        let path =
+            std::env::temp_dir().join(format!("pulpit-editor-rmw-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        persist_editor_setting(&path, "port", serde_json::json!(8555)).expect("write port");
+        persist_editor_setting(&path, "hotkey", serde_json::json!("Ctrl+Alt+X"))
+            .expect("write hotkey");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(saved["port"], 8555);
+        assert_eq!(saved["hotkey"], "Ctrl+Alt+X");
+        // over a non-object file (first run / torn write) it starts fresh
+        std::fs::write(&path, b"null").expect("seed null");
+        persist_editor_setting(&path, "port", serde_json::json!(8600)).expect("rewrite");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(saved["port"], 8600);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_image_data_rejects_files_over_the_cap() {
+        let path =
+            std::env::temp_dir().join(format!("pulpit-image-cap-{}.png", std::process::id()));
+        let file = std::fs::File::create(&path).expect("create temp file");
+        // set_len extends without writing, so the test stays cheap
+        file.set_len(IMAGE_READ_CAP_BYTES + 1).expect("extend");
+        drop(file);
+        let err = read_image_data(path.to_string_lossy().into_owned()).expect_err("must refuse");
+        assert!(err.contains("10 MiB"), "unexpected error: {err}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_image_data_encodes_a_small_image_as_a_data_url() {
+        let path =
+            std::env::temp_dir().join(format!("pulpit-image-small-{}.png", std::process::id()));
+        std::fs::write(&path, b"not-really-png-bytes").expect("write temp file");
+        let url = read_image_data(path.to_string_lossy().into_owned()).expect("must read");
+        assert!(url.starts_with("data:image/png;base64,"), "got: {url}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An isolated scratch directory for a test's devices.json.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pulpit-desktop-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn device_listing_omits_token_material() {
+        let dir = scratch_dir("list-devices");
+        let devices = pulpit_v2::DeviceStore::load(dir.join("devices.json")).expect("store");
+        let (device, plaintext) = devices.create("Tablet salon");
+
+        let infos = device_infos(&devices);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].id, device.id);
+        assert_eq!(infos[0].name, "Tablet salon");
+        assert!(infos[0].created > 0 && infos[0].last_seen > 0);
+
+        // no token material - neither plaintext nor digest - leaves the
+        // backend for the UI
+        let json = serde_json::to_string(&infos).expect("json");
+        assert!(!json.contains("token"));
+        assert!(!json.contains(&plaintext));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revoke_teardown_removes_entry_and_closes_its_session() {
+        let dir = scratch_dir("revoke-teardown");
+        let devices = pulpit_v2::DeviceStore::load(dir.join("devices.json")).expect("store");
+        let (device, _token) = devices.create("Tablet salon");
+        let hub = pulpit_v2::V2Hub::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let session = hub.create(tx);
+        hub.attach(&session);
+        session.set_device(device.clone());
+
+        assert!(revoke_and_teardown(&devices, &hub, &device.id));
+        assert!(devices.list().is_empty(), "the entry is gone");
+        assert!(
+            *session.cancelled().borrow(),
+            "the live session is torn down"
+        );
+        // revoking an unknown id (or the same one twice) is an honest no-op
+        assert!(!revoke_and_teardown(&devices, &hub, &device.id));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -1279,7 +1649,9 @@ async fn exec_button(
     }
     let _ = tauri::async_runtime::spawn_blocking(move || {
         let mut sink = UiSink(app.clone());
-        backend.exec(button, false, &mut sink);
+        // full tap sequence (press-start + release): a lone release-phase
+        // exec never presses `key` tiles (A1)
+        backend.exec_tap(button, &mut sink);
     })
     .await;
     Ok(())
@@ -1313,41 +1685,112 @@ async fn list_audio_devices(
         .collect())
 }
 
-/// Editor-local settings (currently just the touch-mode hotkey).
+/// Editor-local settings: the touch-mode hotkey plus the server port
+/// (`port_locked` when the `PULPIT_PORT` environment variable wins over
+/// the stored value).
 #[tauri::command]
 async fn get_settings(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
     let hotkey = state.hotkey.lock().unwrap().clone();
-    Ok(serde_json::json!({ "hotkey": hotkey }))
+    Ok(serde_json::json!({
+        "hotkey": hotkey,
+        "port": state.port,
+        "port_locked": std::env::var_os("PULPIT_PORT").is_some(),
+    }))
 }
 
-/// Validate, register and persist a new touch-mode hotkey combo.
+/// Validate, register and persist a new touch-mode hotkey combo. The new
+/// combo is registered BEFORE the old one is unregistered (012 A4): a
+/// registration failure returns `Err` and leaves the previous hotkey
+/// working, persisted and shown, instead of leaving no hotkey at all.
 #[tauri::command]
 async fn set_touch_mode_hotkey(
     app: AppHandle,
     state: State<'_, DesktopState>,
     combo: String,
 ) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
-
-    // validation only: registration re-parses the combo
-    let _validated: Shortcut = combo
-        .parse()
-        .map_err(|_| format!("invalid shortcut \"{combo}\" - use e.g. Ctrl+Alt+D"))?;
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     let old = state.hotkey.lock().unwrap().clone();
-    if let Ok(old_shortcut) = old.parse::<Shortcut>() {
+    match hotkey_plan(&old, &combo)? {
+        HotkeyPlan::Noop => return Ok(()),
+        HotkeyPlan::Register => {}
+    }
+
+    register_touch_mode_hotkey(&app, &combo)?;
+    if let Ok(old_shortcut) = old.parse::<tauri_plugin_global_shortcut::Shortcut>() {
         let _ = app.global_shortcut().unregister(old_shortcut);
     }
-    register_touch_mode_hotkey(&app, &combo);
     *state.hotkey.lock().unwrap() = combo.clone();
 
     if let Some(path) = &state.settings_path {
-        let json = serde_json::json!({ "hotkey": combo }).to_string();
-        if let Err(e) = std::fs::write(path, json) {
+        if let Err(e) = persist_editor_setting(path, "hotkey", serde_json::json!(combo)) {
             tracing::warn!(error = %e, "could not persist hotkey");
         }
     }
     Ok(())
+}
+
+/// Read-modify-write a single key of editor.json, preserving every other
+/// key (the file carries both the touch-mode hotkey and the server
+/// port). Atomic like every other JSON config rewrite (012 A5): a crash
+/// mid-write must not tear the file.
+fn persist_editor_setting(
+    path: &std::path::Path,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let mut editor: serde_json::Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    if !editor.is_object() {
+        // missing file or a torn/hand-mangled write: start a fresh object
+        editor = serde_json::json!({});
+    }
+    editor[key] = value;
+    pulpit_db::write_atomic(path, editor.to_string().as_bytes()).map_err(|e| e.to_string())
+}
+
+/// The effective server port: the `PULPIT_PORT` environment variable
+/// wins (side-by-side profiling runs), then the value persisted in
+/// editor.json (Ustawienia -> Serwer), then the stock-client default
+/// 8500. An unparseable or out-of-range value falls through to the next
+/// source instead of failing the launch.
+fn effective_port(env: Option<&str>, stored: Option<&serde_json::Value>) -> u16 {
+    if let Some(p) = env.and_then(|p| p.trim().parse::<u16>().ok()) {
+        if (1024..=65535).contains(&p) {
+            return p;
+        }
+    }
+    let stored = stored
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
+        .filter(|p| (1024..=65535).contains(p));
+    stored.map_or(8500, |p| p as u16)
+}
+
+/// Persist a new server port (Ustawienia -> Serwer). The sockets bind
+/// once at startup and tablets aim at `host:port` explicitly, so a live
+/// rebind would strand them: the value applies on the next launch.
+#[tauri::command]
+async fn set_server_port(state: State<'_, DesktopState>, port: u16) -> Result<(), String> {
+    if !(1024..=65535).contains(&port) {
+        return Err(format!(
+            "Port {port} jest poza dozwolonym zakresem 1024-65535."
+        ));
+    }
+    if std::env::var_os("PULPIT_PORT").is_some() {
+        return Err(
+            "Port nadpisuje zmienna środowiskowa PULPIT_PORT — ma ona pierwszeństwo.".to_string(),
+        );
+    }
+    let path = state
+        .settings_path
+        .as_ref()
+        .ok_or_else(|| "Brak ścieżki ustawień (uruchomienie awaryjne).".to_string())?;
+    persist_editor_setting(path, "port", serde_json::json!(port))
 }
 
 #[tauri::command]

@@ -7,10 +7,11 @@
 //! would otherwise grow for the process lifetime.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use pulpit_db::ButtonRow;
 use pulpit_proto::Frame;
 use tokio::sync::mpsc;
 
@@ -31,6 +32,7 @@ impl V2Hub {
     /// hello/auth handshake succeeded. Until then broadcasts must skip the
     /// socket entirely - an unauthenticated peer must not receive pushes.
     pub fn create(&self, out: mpsc::Sender<super::session::WsOut>) -> Arc<V2Session> {
+        let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
         Arc::new(V2Session {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             out,
@@ -38,6 +40,9 @@ impl V2Hub {
             last_seen: AtomicU64::new(crate::unix_millis()),
             holds: Mutex::new(HashMap::new()),
             pump: Mutex::new(None),
+            cancel: cancel_tx,
+            held_keys: Mutex::new(HashMap::new()),
+            welcomed: AtomicBool::new(false),
         })
     }
 
@@ -84,6 +89,41 @@ impl V2Hub {
         }
     }
 
+    /// Sends a `state.patch` only to sessions whose handshake completed
+    /// (`set_welcomed`). Returns true when at least one session was
+    /// skipped: the flusher re-marks those channels dirty, because the
+    /// skipped session's full `state.sync` (queued before `set_welcomed`)
+    /// was snapshotted before or during this change - and anything after
+    /// it arrives as the next patch. Without the re-mark, a change drained
+    /// in the handshake window would never reach that client.
+    pub fn broadcast_patch_to_welcomed(&self, frame: &Frame) -> bool {
+        let Ok(text) = serde_json::to_string(frame) else {
+            return false;
+        };
+        let mut skipped = false;
+        let mut dead = Vec::new();
+        {
+            let sessions = self.sessions.lock().expect("v2 hub poisoned");
+            for session in sessions.values() {
+                if !session.is_welcomed() {
+                    skipped = true;
+                    continue;
+                }
+                if session
+                    .try_send(super::session::WsOut::Text(text.clone()))
+                    .is_err()
+                {
+                    dead.push(session.id);
+                }
+            }
+        }
+        for id in dead {
+            tracing::info!(session = id, "v2 session closed: outbound queue full");
+            self.remove(id);
+        }
+        skipped
+    }
+
     /// Drops sessions whose last inbound frame (text or pong) is older
     /// than `max_silent_ms`. The pump's pings keep a healthy client's
     /// pong arriving every `ping_interval`, so silence past the grace
@@ -104,11 +144,38 @@ impl V2Hub {
         }
     }
 
+    /// Tears down every live session of `device_id` - the revoke path
+    /// (audit B2 step 6): removing the registry entry must also cut an
+    /// already-connected tablet off, not wait for its next reconnect.
+    /// Removal happens outside the map lock, like every teardown path.
+    pub fn close_device_sessions(&self, device_id: &str) -> usize {
+        let mut dead = Vec::new();
+        {
+            let sessions = self.sessions.lock().expect("v2 hub poisoned");
+            for session in sessions.values() {
+                if session.device_id().as_deref() == Some(device_id) {
+                    dead.push(session.id);
+                }
+            }
+        }
+        for id in &dead {
+            tracing::info!(
+                session = id,
+                device = device_id,
+                "v2 session closed: device revoked"
+            );
+            self.remove(*id);
+        }
+        dead.len()
+    }
+
     /// The exit path: one `server.shutdown` goodbye to every attached
     /// session, then a WS close. Each pump drains its queue in order, so
     /// the frame is on the wire before the close - clients that understand
     /// it know the exit is deliberate, not a network drop. A wedged peer
     /// (full queue) misses the goodbye and just gets torn down at exit.
+    /// Every session is also cancelled so its task ends and releases any
+    /// keys it holds - the process dying would otherwise leave them down.
     pub fn shutdown(&self) {
         self.broadcast_frame(&Frame::bare(pulpit_proto::TYPE_SERVER_SHUTDOWN));
         let mut dead = Vec::new();
@@ -118,6 +185,7 @@ impl V2Hub {
                 if session.try_send(super::session::WsOut::Close).is_err() {
                     dead.push(session.id);
                 }
+                session.cancel_session();
             }
         }
         for id in dead {
@@ -137,6 +205,23 @@ pub struct V2Session {
     /// The connection's outbound pump; owned here so hub teardown can
     /// abort a pump stuck on a send that will never complete.
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Hub-side teardown signal (queue overflow, silence watchdog,
+    /// server exit): the session task selects on it so every teardown
+    /// path ends the task and runs its cleanup - a cancelled read loop
+    /// would otherwise linger as a zombie.
+    cancel: tokio::sync::watch::Sender<bool>,
+    /// Tiles with an un-ended key press-start. Only `key` tiles hold
+    /// anything down (tap-start is a no-op for every other kind), and
+    /// the release-phase exec must run on every teardown path
+    /// (docs/protocol-v2.md §6).
+    held_keys: Mutex<HashMap<i64, ButtonRow>>,
+    /// False between `attach` and the queued `welcome`/full syncs: the
+    /// flusher must not push a `state.patch` into that window or the
+    /// client sees a patch for a board it does not know yet (the flaky
+    /// `token_connect_delivers_full_snapshot` ordering). Skipped changes
+    /// are re-marked dirty - the full `state.sync` queued at welcome
+    /// already covers them, so nothing is lost.
+    welcomed: AtomicBool,
 }
 
 impl V2Session {
@@ -145,6 +230,16 @@ impl V2Session {
             Ok(text) => self.try_send(super::session::WsOut::Text(text)).is_ok(),
             Err(_) => false,
         }
+    }
+
+    /// Marks the handshake complete: the welcome, boards sync and state
+    /// sync frames are queued, so patches may flow from now on.
+    pub fn set_welcomed(&self) {
+        self.welcomed.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_welcomed(&self) -> bool {
+        self.welcomed.load(Ordering::Relaxed)
     }
 
     fn try_send(
@@ -177,11 +272,52 @@ impl V2Session {
 
     /// Teardown from the hub side (queue overflow, silence watchdog):
     /// stop hold loops, ask the pump to close (a full queue means the
-    /// socket is wedged anyway) and abort the pump.
+    /// socket is wedged anyway), abort the pump and cancel the session
+    /// task so its tail cleanup always runs.
     pub fn shutdown(&self) {
         self.abort_holds();
         let _ = self.try_send(super::session::WsOut::Close);
         self.abort_pump();
+        self.cancel_session();
+    }
+
+    /// Fires the session task's cancellation signal. Safe to call from
+    /// anywhere, any number of times.
+    pub fn cancel_session(&self) {
+        self.cancel.send_replace(true);
+    }
+
+    /// A receiver that resolves once the session is cancelled. Fresh
+    /// subscriptions see a past cancellation immediately.
+    pub fn cancelled(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.cancel.subscribe()
+    }
+
+    /// Records a key press-start: the tile's release phase must run on
+    /// every teardown path if no `press-end` arrives.
+    pub fn key_pressed(&self, tile: i64, button: ButtonRow) {
+        self.held_keys
+            .lock()
+            .expect("session poisoned")
+            .insert(tile, button);
+    }
+
+    /// The matching `press-end` arrived: nothing left to release.
+    pub fn key_released(&self, tile: i64) {
+        self.held_keys
+            .lock()
+            .expect("session poisoned")
+            .remove(&tile);
+    }
+
+    /// Takes the tiles with un-ended key press-starts for release.
+    pub fn take_held_keys(&self) -> Vec<ButtonRow> {
+        self.held_keys
+            .lock()
+            .expect("session poisoned")
+            .drain()
+            .map(|(_, button)| button)
+            .collect()
     }
 
     pub fn set_device(&self, device: DeviceEntry) {
@@ -194,6 +330,16 @@ impl V2Session {
             .expect("session poisoned")
             .as_ref()
             .map(|d| d.name.clone())
+    }
+
+    /// The paired device behind this session, if the handshake got that
+    /// far - the revoke path matches sessions on it.
+    pub fn device_id(&self) -> Option<String> {
+        self.device
+            .lock()
+            .expect("session poisoned")
+            .as_ref()
+            .map(|d| d.id.clone())
     }
 
     pub fn touch(&self) {
@@ -256,6 +402,45 @@ mod tests {
     }
 
     #[test]
+    fn patches_are_withheld_until_welcome_then_reach_the_session() {
+        // The flusher must not push a state.patch into the attach ->
+        // welcome window (the client would see a patch for boards it
+        // does not know yet); withheld changes are reported so the
+        // engine can re-mark them dirty. After `set_welcomed` the
+        // session receives patches normally.
+        let hub = V2Hub::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let session = hub.create(tx);
+        hub.attach(&session);
+
+        let skipped = hub.broadcast_patch_to_welcomed(&frame());
+        assert!(
+            skipped,
+            "an un-welcomed session must be reported as skipped"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no patch may reach a session before its welcome"
+        );
+
+        session.set_welcomed();
+        let skipped = hub.broadcast_patch_to_welcomed(&Frame::push_typed(
+            pulpit_proto::TYPE_STATE_PATCH,
+            &crate::StatePatch {
+                changes: vec![pulpit_proto::ChannelValue {
+                    channel: "ch".into(),
+                    value: serde_json::json!(1),
+                }],
+            },
+        ));
+        assert!(!skipped, "a welcomed session is delivered to, not skipped");
+        let WsOut::Text(text) = rx.try_recv().expect("patch after welcome") else {
+            panic!("text frame expected")
+        };
+        assert!(text.contains("patch"), "got: {text}");
+    }
+
+    #[test]
     fn broadcast_reaches_sessions_and_remove_cleans_up() {
         let hub = V2Hub::new();
         let (tx_a, mut rx_a) = mpsc::channel(4);
@@ -305,6 +490,13 @@ mod tests {
             }
         }
         assert_eq!(hub.count(), 0, "wedged session must be closed");
+        // The teardown must also end the session task: the cancel
+        // signal is what run() selects on (audit C2) - without it the
+        // read loop would linger as a zombie with no writer.
+        assert!(
+            *session.cancelled().borrow(),
+            "hub-side removal must cancel the session task"
+        );
     }
 
     #[test]
@@ -319,8 +511,67 @@ mod tests {
         stale.age_last_seen_by(10 * 60_000);
         hub.reap_silent(180_000);
         assert_eq!(hub.count(), 1, "fresh session survives the reap");
+        // the reaped session's task must end too (audit C2), and the
+        // survivor's must not
+        assert!(
+            *stale.cancelled().borrow(),
+            "the reaper must cancel the session task"
+        );
+        assert!(
+            !*fresh.cancelled().borrow(),
+            "the survivor must keep running"
+        );
         hub.broadcast_frame(&frame());
         assert_eq!(hub.count(), 1);
+    }
+
+    #[test]
+    fn revoking_a_device_tears_down_its_live_sessions() {
+        // Audit B2 step 6: revoke must cut a connected tablet off right
+        // away, not at its next reconnect. The store removes the entry
+        // (devices.rs), the hub closes that device's live sessions.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::devices::DeviceStore::load(dir.path().join("devices.json")).expect("store");
+        let (device, _token) = store.create("Tablet salon");
+
+        let hub = V2Hub::new();
+        let (tx_a, _rx_a) = mpsc::channel(4);
+        let (tx_b, _rx_b) = mpsc::channel(4);
+        let a = hub.create(tx_a);
+        let b = hub.create(tx_b);
+        hub.attach(&a);
+        hub.attach(&b);
+        a.set_device(device.clone());
+        b.set_device(DeviceEntry {
+            id: "other-device".into(),
+            name: "Other tablet".into(),
+            token: String::new(),
+            created: 0,
+            last_seen: 0,
+        });
+
+        // revoking an unknown device touches nobody
+        assert!(!store.revoke("missing"));
+        hub.close_device_sessions("missing");
+        assert_eq!(hub.count(), 2);
+
+        // the real revoke closes exactly that device's live session
+        assert!(store.revoke(&device.id));
+        hub.close_device_sessions(&device.id);
+        assert_eq!(
+            hub.count(),
+            1,
+            "only the revoked device's session is closed"
+        );
+        assert!(
+            *a.cancelled().borrow(),
+            "the revoked session's task must be cancelled"
+        );
+        assert!(
+            !*b.cancelled().borrow(),
+            "an unrelated session must keep running"
+        );
     }
 
     #[test]
@@ -337,5 +588,44 @@ mod tests {
         };
         assert!(text.contains("server.shutdown"));
         assert!(matches!(rx.blocking_recv().unwrap(), WsOut::Close));
+    }
+
+    #[test]
+    fn teardown_paths_cancel_the_session_task() {
+        let hub = V2Hub::new();
+        // overflow path
+        let (tx_full, _rx_full) = mpsc::channel(4);
+        let full = hub.create(tx_full);
+        hub.attach(&full);
+        let cancelled = full.cancelled();
+        assert!(!*cancelled.borrow(), "fresh session is not cancelled");
+        hub.remove(full.id);
+        assert!(
+            *cancelled.borrow(),
+            "hub-side removal must cancel the session task"
+        );
+
+        // reaper path
+        let (tx_stale, _rx_stale) = mpsc::channel(4);
+        let stale = hub.create(tx_stale);
+        hub.attach(&stale);
+        let cancelled = stale.cancelled();
+        stale.age_last_seen_by(10 * 60_000);
+        hub.reap_silent(180_000);
+        assert!(
+            *cancelled.borrow(),
+            "the reaper must cancel the session task"
+        );
+
+        // server exit path
+        let (tx_exit, _rx_exit) = mpsc::channel(8);
+        let exit = hub.create(tx_exit);
+        hub.attach(&exit);
+        let cancelled = exit.cancelled();
+        hub.shutdown();
+        assert!(
+            *cancelled.borrow(),
+            "server exit must cancel the session task"
+        );
     }
 }

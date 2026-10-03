@@ -20,6 +20,7 @@ import app.pulpit.mobile.proto.InteractionPayload
 import app.pulpit.mobile.proto.StateSync
 import app.pulpit.mobile.proto.V2
 import app.pulpit.mobile.proto.Welcome
+import app.pulpit.mobile.proto.decodeDeltaOps
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.json.Json
@@ -41,11 +42,38 @@ sealed class ConnState {
     data object Disconnected : ConnState()
     data class Connecting(val host: String, val port: Int) : ConnState()
     data class Connected(val host: String, val port: Int) : ConnState()
-    data class Failed(val reason: String) : ConnState()
+    /** [retryable] = false: the desktop refused this device or app for
+     *  good (unknown token, bad pairing code, outdated client). The same
+     *  credentials can never succeed, so nothing reconnects on its own. */
+    data class Failed(val reason: String, val retryable: Boolean = true) : ConnState()
     /** The server sent `server.shutdown`: the exit is deliberate, and
      *  reconnecting would be pointless until it comes back. */
     data object ServerDown : ConnState()
 }
+
+/** Terminal states outlive the close/failure callbacks that follow them. */
+fun ConnState.isTerminal(): Boolean =
+    this is ConnState.ServerDown || (this is ConnState.Failed && !retryable)
+
+/** User-facing text for a fatal refusal (an error-frame code, or
+ *  "unauthorized" for the upgrade's HTTP 401). */
+fun fatalReason(code: String): String = when (code) {
+    "pair-invalid" -> "invalid pairing code - generate a new one on the desktop"
+    "pair-expired" -> "pairing code expired - generate a new one on the desktop"
+    "unauthorized" -> "device revoked on the desktop - pair again"
+    "outdated-client" -> "this app is too old for the desktop - update it"
+    else -> "the desktop refused the connection ($code)"
+}
+
+/** State for a socket failure. The `/v2/ws` upgrade answers 401 for an
+ *  unknown or revoked token (crates/v2/src/service.rs), and retrying
+ *  the same token cannot work. Everything else is a transient drop. */
+internal fun failureState(httpCode: Int?, message: String?): ConnState.Failed =
+    if (httpCode == 401) {
+        ConnState.Failed(fatalReason("unauthorized"), retryable = false)
+    } else {
+        ConnState.Failed(message ?: "connection failed")
+    }
 
 /** One decoded server frame, ready for the ViewModel. */
 sealed class V2Event {
@@ -130,6 +158,12 @@ class V2Client(
         sendInteraction(boardId, tileId, V2.INT_SLIDE, InteractionArgs(value = value.toDouble()))
     }
 
+    /** M5 custom gestures ride the ordinary interaction frame; the
+     *  ViewModel gates on the tile's declared interactions. */
+    fun gesture(boardId: Long, tileId: Long, name: String) {
+        sendInteraction(boardId, tileId, name, null)
+    }
+
     private fun sendInteraction(boardId: Long, tileId: Long, interaction: String, args: InteractionArgs?) {
         val payload = InteractionPayload(
             board = boardId,
@@ -177,7 +211,12 @@ class V2Client(
                     type = V2.TYPE_HELLO,
                     payload = json.encodeToJsonElement(
                         Hello.serializer(),
-                        Hello(client = CLIENT, version = VERSION, name = deviceName.ifBlank { null }),
+                        Hello(
+                            client = CLIENT,
+                            version = VERSION,
+                            name = deviceName.ifBlank { null },
+                            capabilities = CLIENT_CAPABILITIES,
+                        ),
                     ),
                 ),
             )
@@ -190,20 +229,20 @@ class V2Client(
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.i(TAG, "closed: $reason")
-            setStateUnlessServerDown(ConnState.Disconnected)
+            setStateUnlessTerminal(ConnState.Disconnected)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            Log.w(TAG, "failure: ${t.message}")
-            setStateUnlessServerDown(ConnState.Failed(t.message ?: "connection failed"))
+            Log.w(TAG, "failure: ${t.message} (http ${response?.code})")
+            setStateUnlessTerminal(failureState(response?.code, t.message))
         }
     }
 
-    /** The terminal `ServerDown` state survives the close or failure that
-     *  follows it: the socket going away is the expected aftermath of the
-     *  goodbye, not a retryable drop. */
-    private fun setStateUnlessServerDown(state: ConnState) {
-        if (_state.value !is ConnState.ServerDown) {
+    /** Terminal states (the goodbye, or a refusal) survive the close or
+     *  failure that follows them: the socket going away is the expected
+     *  aftermath, not a retryable drop. */
+    private fun setStateUnlessTerminal(state: ConnState) {
+        if (!_state.value.isTerminal()) {
             _state.value = state
         }
     }
@@ -232,7 +271,16 @@ class V2Client(
             }
             V2.TYPE_BOARDS_DELTA -> {
                 val delta = json.decodeFromJsonElement(BoardsDelta.serializer(), payload)
-                val ops = delta.ops.mapNotNull { BoardOp.from(it, json) }
+                val ops = decodeDeltaOps(delta.ops, json)
+                if (ops == null) {
+                    // One op this client cannot parse: the local board
+                    // snapshot is no longer trustworthy. Close the socket
+                    // so the reconnect path fetches a fresh boards.sync -
+                    // staying would drift silently from the desktop.
+                    Log.w(TAG, "rejected boards.delta op - reconnecting for a fresh snapshot")
+                    webSocket?.close(1000, "delta op rejected")
+                    return
+                }
                 _events.trySend(V2Event.Delta(delta.generation, ops))
             }
             V2.TYPE_BOARD_OPEN -> {
@@ -253,8 +301,14 @@ class V2Client(
             V2.TYPE_ERROR -> {
                 val error = json.decodeFromJsonElement(ErrorPayload.serializer(), payload)
                 Log.w(TAG, "server error: ${error.code} ${error.message.orEmpty()}")
+                val fatal = FATAL_CODES.contains(error.code)
+                if (fatal) {
+                    // Terminal before the event and the close, so the
+                    // onClosed that follows cannot downgrade it.
+                    setStateUnlessTerminal(ConnState.Failed(fatalReason(error.code), retryable = false))
+                }
                 _events.trySend(V2Event.ServerError(error.code, error.message))
-                if (FATAL_CODES.contains(error.code)) {
+                if (fatal) {
                     webSocket?.close(1000, error.code)
                 }
             }
@@ -284,7 +338,32 @@ class V2Client(
             .pingInterval(KEEPALIVE_SECONDS, TimeUnit.SECONDS)
             .build()
         const val CLIENT = "pulpit-mobile"
-        const val VERSION = "0.2.0"
+
+        /** M5 capability negotiation: what this client renders/accepts,
+         *  declared in every hello. The list mirrors the UI's actual
+         *  surface (widget kinds, live-state features, gestures); new
+         *  capabilities join when the client really implements them. */
+        val CLIENT_CAPABILITIES = listOf(
+            "kinds:button",
+            "kinds:toggle",
+            "kinds:slider",
+            "kinds:knob",
+            "kinds:graph",
+            "kinds:list",
+            "series",
+            "state.patch",
+            "assets",
+            "assets2",
+            "gestures:long-press",
+            "gestures:double-tap",
+            "gestures:swipe-left",
+            "gestures:swipe-right",
+        )
+        /** Client version reported in hello. Derived from versionName,
+         *  which build.gradle.kts reads out of the workspace Cargo.toml -
+         *  the single version source (this used to be a drifting
+         *  literal). */
+        val VERSION = app.pulpit.mobile.BuildConfig.VERSION_NAME
         /** OkHttp ping interval; a missing pong fails the socket. */
         const val KEEPALIVE_SECONDS = 30L
         /** Fatal errors close the socket; no point retrying with the same auth. */

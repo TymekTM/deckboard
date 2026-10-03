@@ -116,6 +116,19 @@ fn boards_sync() {
     let slider = &board.tiles[1];
     assert_eq!(slider.manifest.kind, WidgetKind::Slider);
     assert_eq!(slider.manifest.interactions, vec![Interaction::Slide]);
+    // style parity fields (012 C5): border/icon/title colors travel as
+    // optional pairs; state 2 falls back to state 1 per field client-side
+    let style = button.manifest.style.as_ref().unwrap();
+    assert_eq!(style.border_color.as_deref(), Some("#101010"));
+    assert_eq!(style.border_color2.as_deref(), Some("#f0f0f0"));
+    assert_eq!(style.icon_color.as_deref(), Some("#ffe0e0"));
+    assert_eq!(style.icon_color2.as_deref(), Some("#1db954"));
+    assert_eq!(style.title_color.as_deref(), Some("#ffcc00"));
+    assert_eq!(style.title_color2.as_deref(), Some("#00ffcc"));
+    assert_eq!(style.color2.as_deref(), Some("#ED4245"));
+    assert_eq!(style.icon2.as_deref(), Some("\u{f028}"));
+    let hash2 = button.manifest.asset_hash2.as_deref().expect("img2 hash");
+    assert_eq!(hash2.len(), 64);
 }
 
 #[test]
@@ -170,6 +183,16 @@ fn interaction() {
     assert_eq!((i.board, i.tile), (3, 21));
     assert_eq!(i.interaction, Interaction::Slide);
     assert_eq!(i.args.value, Some(0.5));
+}
+
+/// M5 custom gestures ride the ordinary interaction frame; the fixture
+/// pins the wire shape of a declared gesture (empty args, kebab name).
+#[test]
+fn interaction_longpress() {
+    let (frame, i) = pinned::<InteractionPayload>("interaction-longpress", TYPE_INTERACTION);
+    assert_eq!(frame.id.as_deref(), Some("i10"));
+    assert_eq!(i.interaction, Interaction::LongPress);
+    assert_eq!(i.args, InteractionArgs::default());
 }
 
 #[test]

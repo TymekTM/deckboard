@@ -43,7 +43,7 @@ as a Rust rewrite of Deckboard 3.x; owns its identity and data directory
       (`CoInitializeEx` S_FALSE means a pre-existing MTA we must not
       `CoUninitialize`). Linux support: the `Speaker` trait is
       the seam - swap in an ALSA/PipeWire implementation.
-- [ ] **M3 - Desktop editor (MVP gate)**: Tauri 2 + Vue 3 editor: boards,
+- [x] **M3 - Desktop editor (MVP gate)**: Tauri 2 + Vue 3 editor: boards,
       buttons, sliders CRUD, drag/resize, dual-state, `.boardjson`
       import/export (format-compatible), touch mode, tray, hotkeys,
       autolaunch. **Definition of MVP: full behavioral parity with the
@@ -72,12 +72,37 @@ as a Rust rewrite of Deckboard 3.x; owns its identity and data directory
       today and a rolling hour with per-provider tap-through. See
       docs/aidev.md. Pushed on the normal APP_CUSTOM_VALUE channel and as
       v2 `ext.ai-*` channels (status maps to WidgetKind::List).
-- [ ] **M4 - Kotlin/Compose client MVP**: boards/buttons/sliders/toggles,
+      Gate check (2026-10-03): every box above ships - CRUD, drag/resize,
+      dual-state, `.boardjson` round-trip, touch mode, tray, hotkey,
+      autolaunch - and the parity acceptance (stock Deckboard client on
+      the live server) passed in the 012-B1 exercises (Deckboard PRO
+      3.2.0 connects and renders; the stock Free build was not re-tested
+      on hardware after the rework, but it speaks the same legacy wire).
+- [x] **M4 - Kotlin/Compose client MVP**: boards/buttons/sliders/toggles,
       live state, offline cache, QR/USB pairing. Includes Android plumbing:
       foreground service + battery-optimization exemption prompt (WS dies
-      in Doze otherwise), structured logging.
-- [ ] **M5 - Widget kit**: knob/list/graph/interactive templates, custom
+      in Doze otherwise), structured logging. Shipped (2026-10-03): v2
+      client renders boards/tiles with live state, QR + code pairing with
+      device trust (012-B2), Keystore token storage (ADR-008). The M4
+      plumbing: `LinkService` foreground keep-alive holds the process (and
+      the link) through screen-off/Doze, with the battery-exemption prompt
+      on the connect screen; the plan-008 close-link-on-background remains
+      as the fallback once the service stops ("Rozłącz" notification
+      action, unpair, task swipe). Offline cache is display-only
+      (`BoardCache`): the last snapshot paints a cold launch while the
+      reconnect runs, and every connect overwrites it wholesale. USB
+      pairing = `adb reverse tcp:8500 tcp:8500` + the connect screen's
+      loopback shortcut. Structured logging: `Plog` (logcat + rotating
+      filesDir/logs, pure formatter/rotation unit-tested).
+- [x] **M5 - Widget kit**: knob/list/graph/interactive templates, custom
       gestures, widget manifest + client capabilities negotiation.
+      Shipped (2026-10-03, plan 013): hello/welcome capabilities
+      (declared + logged + echoed, nothing gated yet), custom gestures
+      (long-press, double-tap, swipe-left/right declared per tile via
+      `gestures` in options, server dispatch + Android detection),
+      knob/list/graph templates already rendered + interacted since the
+      aidev work. Gesture authoring is hand-edited options JSON until
+      the editor grows UI for it.
 - [ ] **M6 - Web widgets + media** (gated on M0-M5 surviving in daily use):
       board-scoped WebView layer, widget SDK (state/interact/fetch
       proxy/assets), media library with hash-based asset serving, photo/video

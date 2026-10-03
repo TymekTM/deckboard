@@ -112,7 +112,8 @@ QR payload: `pulpit://<host>:<port>?pair=<CODE>`.
 ```json
 { "v": 2, "id": "h1", "type": "hello",
   "payload": { "client": "pulpit-mobile", "version": "0.2.0",
-               "name": "Tablet salon", "capabilities": [] } }
+               "name": "Tablet salon",
+               "capabilities": ["kinds:button", "series", "gestures:long-press"] } }
 ```
 
 `welcome` (server → client, replies to `hello`):
@@ -123,7 +124,8 @@ QR payload: `pulpit://<host>:<port>?pair=<CODE>`.
                "min_client": "0.0.0", "generation": 7,
                "device": { "id": "9ab...", "name": "Tablet salon" },
                "token": "64-hex-chars...",
-               "channels": { "ext.si-cpu-usage": { "shape": "series", "cap": 120 } } } }
+               "channels": { "ext.si-cpu-usage": { "shape": "series", "cap": 120 } },
+               "capabilities": ["series", "state.patch", "assets", "assets2", "gestures"] } }
 ```
 
 - `channels` is the full catalog of live state channels: name →
@@ -132,10 +134,40 @@ QR payload: `pulpit://<host>:<port>?pair=<CODE>`.
   `outdated-client` after `hello` (enforcement is a server config; M1
   ships `0.0.0` = never block - we publish both ends).
 - Version mismatch without a block: degrade by capability, never guess.
+- Capabilities (M5): free-form `name` or `name:value` strings. The
+  client declares what it renders/accepts (`kinds:*`, `series`,
+  `state.patch`, `assets`, `assets2`, `gestures:*`), the server echoes
+  its own set in `welcome.capabilities`. Both sides log the sets; no
+  behavior is gated on them yet. Old servers never send the field, old
+  clients ignore it.
 
 After `welcome` the server immediately pushes `boards.sync` and then
 `state.sync` (sections 4-5). There is no client-pull variant; a confused
 client reconnects.
+
+### Pair-request (M8, Bluetooth-style)
+
+For a tablet that discovered the desktop over mDNS (`_pulpit._tcp.`,
+advertised while the server runs; TXT `proto=v2`, `version`, `host`):
+
+1. `POST /v2/pair-request` `{"name": "SM-T561"}` - LAN only, loopback is
+   refused (the desktop has its own dialog), browser `Origin` refused
+   like everywhere (B1). One request may be live at a time (else `409`).
+   The response carries the **verification code**
+   `{"request_id", "code", "expires_in_secs"}` - the tablet displays it.
+2. The desktop shows its gate dialog with the SAME code
+   (`pairing.set_pair_request_gate`); approving marks the code
+   pre-approved (single-use), denying sets a rejection.
+3. The tablet polls `GET /v2/pair-request/:id` -
+   `{"status": "pending" | "approved" | "rejected" | "expired"}`.
+   On `approved` it opens `/v2/ws?pair=<code>` + `hello` as usual; the
+   pre-approval replaces the operator dialog on that path, the code
+   burns, the token is issued in `welcome.token`.
+
+The verification code is a numeric-comparison: pairing completes only
+when the same number is visible on both screens and a human on each side
+proceeds. Headless builds (no gate) auto-accept with a warning log.
+Manual pairing (desktop mints, tablet types) keeps working unchanged.
 
 ## 4. Boards
 
@@ -148,7 +180,11 @@ Boards are data. One board:
                "kind": "button", "params": {},
                "state": { "channel": "ext.speaker-muted", "shape": "scalar" },
                "interactions": ["tap"],
-               "style": { "color": "#F5AB35", "icon": "\uf026", "title": "Mute" } } ] }
+               "style": { "color": "#F5AB35", "color2": "#ED4245",
+                          "icon": "\uf026", "icon2": "\uf028", "icon_family": "fas",
+                          "title": "Mute", "title_color": "#ffcc00",
+                          "border_color": "#101010", "icon_color": "#ffe0e0" },
+               "asset_hash": "<sha-256 hex>", "asset_hash2": "<sha-256 hex>" } ] }
 ```
 
 - Placement is on the 96px cell grid (`x`,`y`,`w`,`h`, integers), tiles may
@@ -160,12 +196,26 @@ Boards are data. One board:
   photo, video). Legacy `img`/`img2` data URLs are converted to store
   entries on the fly when the server builds a sync; tiles whose image
   cannot be converted simply omit it.
+- `asset_hash2`: content hash of the active-state image (legacy `img2`),
+  shown instead of `asset_hash` while the tile's channel reports its
+  active value. Optional; absent means the tile has no second image.
 - `style`: `color`/`color2`/`icon`/`icon2`/`icon_family` (`fas`|`fab`,
   resolved glyph fonts)/`title`/`shape` - all optional, resolved
   server-side the same way the legacy mapper resolves them (DB value →
   type default → fallback). `color2`/`icon2` are the active-state pair:
   the client swaps to them while the tile's channel reports its active
   value (e.g. `"ON"`).
+- Style parity fields (added 2026-10, 012 C5): `border_color`,
+  `icon_color`, `title_color` and their `*_color2` active-state pairs.
+  All optional; a client that does not know them keeps its defaults
+  (no border, white glyph/title).
+- **State-2 fallback rule (one rule for every field)**: while the tile
+  is in its active state, each state-2 field (`color2`, `icon2`,
+  `border_color2`, `icon_color2`, `title_color2`, `asset_hash2`, ...)
+  falls back to its state-1 counterpart **per field** when absent -
+  `active ? (field2 || field1) : field1`. A fully absent state-2 set
+  leaves the tile visually unchanged between states; a partially set
+  one changes only the fields that are set.
 - `interactions` lists the gestures the tile accepts (section 6).
 
 ### boards.sync (server → client, full snapshot)
@@ -252,14 +302,22 @@ Client → server, one frame per user gesture:
 ```
 
 - Kinds: `tap`, `press-start`, `press-end`, `slide` (`args.value`, 0..1),
-  `wheel` (`args.delta`), `drag` (`args.dx`, `args.dy`). `press-start` /
-  `press-end` replace the legacy `isTapStart` bool pair.
+  `long-press`, `double-tap`, `swipe-left`, `swipe-right` (M5 custom
+  gestures, no args), `wheel` (`args.delta`), `drag` (`args.dx`,
+  `args.dy`). `press-start` / `press-end` replace the legacy `isTapStart`
+  bool pair.
 - Clients send only gestures the tile declares in `interactions`.
   Declarations: plain buttons declare `tap` (fire once on release);
   key-style commands and tiles with `params.hold.repeat` declare
   `tap` + `press-start` + `press-end` (down/up semantics, hold-to-repeat);
-  sliders/knobs declare `slide`; displays declare none. The server
-  rejects undeclared gestures with `unsupported-interaction`.
+  sliders/knobs declare `slide`; displays declare none. A tile may add
+  M5 custom gestures through its options JSON:
+  `{"gestures": ["long-press", "double-tap", "swipe-left", "swipe-right"]}` -
+  the closed set travels into `interactions` and each declared gesture
+  fires the tile's action once on completion (alternative triggers, not
+  press modes: no key-hold, no repeat; never on slider/knob, where the
+  drag surface belongs to the value). The server rejects undeclared
+  gestures with `unsupported-interaction`.
 - The server validates the tile exists and answers
   `ack {ok: true}` (payload `{}`) or `error` (`unknown-tile`,
   `unsupported-interaction` for gestures the tile/backend cannot serve,
@@ -327,6 +385,11 @@ disconnect and retries as usual.
   dropped, unknown enum values degrade (`WidgetKind::Other`,
   `StateShape::Other`).
 - `PROTOCOL_VERSION` bumps only for breaking envelope changes.
+- Change log: 2026-10 (012 C5) added the optional style parity fields
+  `border_color`/`icon_color`/`title_color` (+ `*_color2` pairs) to
+  `style` and `asset_hash2` to the tile manifest. Purely additive: old
+  servers never send them and old clients drop unknown keys, so `v`
+  stays 2.
 - Wire compatibility is pinned by golden fixtures
   (`crates/proto/tests/fixtures/*.json`): Rust round-trips them and the
   Kotlin unit test parses the same files. Both must stay green.

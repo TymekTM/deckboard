@@ -244,16 +244,29 @@ impl Db {
         }
     }
 
-    /// Open the database for reading and writing. The caller becomes the
-    /// single writer - the original desktop app must not have the file open
-    /// (docs/decisions.md ADR-001).
+    /// Open the database for reading and writing, creating an empty
+    /// schema when the file does not exist (a clean install has no legacy
+    /// copy to migrate). The caller becomes the single writer - the
+    /// original desktop app must not have the file open (docs/decisions.md
+    /// ADR-001).
     pub fn open_read_write(path: Option<&Path>) -> Result<Db> {
         let path = match path {
             Some(p) => p.to_path_buf(),
             None => default_db_path(),
         };
         if !path.exists() {
-            return Err(DbError::NotFound(path));
+            // sqlite creates the file but not its parent directories
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let conn = Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+            )?;
+            create_schema(&conn)?;
+            tracing::info!(path = %path.display(), "created empty pulpitApp database");
+            return Ok(Db { conn });
         }
         let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         tracing::info!(path = %path.display(), "opened pulpitApp database (read-write)");
@@ -322,13 +335,15 @@ impl Db {
     }
 
     /// Delete the board together with its shortcuts (the original leaves
-    /// orphans behind; we prefer the clean invariant).
+    /// orphans behind; we prefer the clean invariant). One transaction, so
+    /// a failure mid-way never strands the shortcuts of a live board.
     pub fn delete_board(&self, id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM Shortcuts WHERE board_id = ?1", [id])?;
-        self.conn
-            .execute("DELETE FROM Boards WHERE id = ?1", [id])?;
-        Ok(())
+        self.with_transaction(|tx| {
+            tx.conn
+                .execute("DELETE FROM Shortcuts WHERE board_id = ?1", [id])?;
+            tx.conn.execute("DELETE FROM Boards WHERE id = ?1", [id])?;
+            Ok(())
+        })
     }
 
     /// Insert a button row; `row.id` is ignored and the new id returned.
@@ -424,18 +439,18 @@ fn map_board_row(row: &rusqlite::Row<'_>) -> std::result::Result<BoardRow, rusql
         id: row.get(0)?,
         name: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
         background: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        layout: row.get::<_, Option<i64>>(3)?.unwrap_or(6),
+        layout: row_int(row, 3, 6)?,
         image: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         // legacy `sort` column has a '' default; coerce non-numeric to 0
-        sort: row.get::<_, Option<i64>>(5).unwrap_or(None).unwrap_or(0),
+        sort: row_int(row, 5, 0)?,
         kind: row
             .get::<_, Option<String>>(6)?
             .unwrap_or_else(|| "buttons".into()),
         args: row.get(7)?,
-        order: row.get(8)?,
-        width: row.get::<_, Option<i64>>(9)?.unwrap_or(4),
-        height: row.get::<_, Option<i64>>(10)?.unwrap_or(3),
-        converted: row.get::<_, Option<i64>>(11)?.unwrap_or(1),
+        order: row_int(row, 8, 0)?,
+        width: row_int(row, 9, 4)?,
+        height: row_int(row, 10, 3)?,
+        converted: row_int(row, 11, 1)?,
     })
 }
 
@@ -643,6 +658,41 @@ fn create_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Write `bytes` to `path` atomically: the data lands in a sibling
+/// `<path>.tmp` file, which is flushed and then renamed over the
+/// destination. A crash mid-write leaves the previous file intact
+/// instead of a torn or empty one. Used for every JSON config the app
+/// rewrites in place (settings.json, editor.json).
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let tmp = temp_sibling(path);
+    let attempt = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    };
+    match attempt() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // never leave a stray .tmp behind on failure
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// `<path>.tmp` in the same directory, so the rename stays on one volume.
+fn temp_sibling(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
 /// `~/pulpitApp/database.db`; on first use this is a copy of the original
 /// Deckboard app's database (see [`data_dir`]).
 pub fn default_db_path() -> PathBuf {
@@ -668,40 +718,90 @@ const LEGACY_FILES: &[&str] = &[
 const LEGACY_DIRS: &[&str] = &["extensions", "assets"];
 
 /// One-time, best-effort copy from the original Deckboard data directory.
-/// No-op unless the legacy dir exists and the target does not; per-item
-/// skips let a partial migration resume on the next run. `logs/` is
+/// The full copy is staged in a sibling `<target>.migrating` directory and
+/// renamed into place in one step, so a crash mid-copy never leaves a
+/// half-populated `~/pulpitApp`: the next run per-item skips what already
+/// landed in the staging dir and finishes the job (ADR-011). `logs/` is
 /// intentionally not carried over.
 fn migrate_legacy_data(legacy: &Path, target: &Path) {
     if target.exists() || !legacy.is_dir() {
         return;
     }
-    if let Err(e) = std::fs::create_dir_all(target) {
-        tracing::warn!(error = %e, "cannot create data directory, skipping legacy migration");
+    let staging = migrating_sibling(target);
+    if let Err(e) = std::fs::create_dir_all(&staging) {
+        tracing::warn!(
+            error = %e,
+            "cannot create migration staging directory, skipping legacy migration"
+        );
         return;
     }
     let mut copied: Vec<&str> = Vec::new();
-    for name in LEGACY_FILES.iter().chain(LEGACY_DIRS) {
+    for name in LEGACY_FILES
+        .iter()
+        .copied()
+        .chain(LEGACY_DIRS.iter().copied())
+    {
         let from = legacy.join(name);
-        let to = target.join(name);
+        let to = staging.join(name);
+        if to.exists() {
+            continue; // landed before a previous crash; resume
+        }
         let copied_ok = if from.is_dir() {
-            !to.exists() && copy_tree(&from, &to).is_ok()
+            copy_tree(&from, &to).is_ok()
         } else if from.is_file() {
-            !to.exists() && std::fs::copy(&from, &to).is_ok()
+            std::fs::copy(&from, &to).is_ok()
         } else {
             false
         };
         if copied_ok {
             copied.push(name);
+        } else if from.exists() {
+            // the item stays missing but must not block the rename forever
+            tracing::warn!(item = name, "legacy migration could not copy item");
         }
     }
-    if !copied.is_empty() {
-        tracing::info!(
-            from = %legacy.display(),
-            to = %target.display(),
-            migrated = ?copied,
-            "migrated data from the original Deckboard app"
-        );
+    copy_db_sidecars(legacy, &staging);
+    // either the rename lands the whole directory at once, or the target
+    // stays absent and the next run resumes from the staging dir
+    match std::fs::rename(&staging, target) {
+        Ok(()) => {
+            tracing::info!(
+                from = %legacy.display(),
+                to = %target.display(),
+                migrated = ?copied,
+                "migrated data from the original Deckboard app"
+            );
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            "cannot finalize legacy migration; it will resume on the next start"
+        ),
     }
+}
+
+/// `database.db` may carry un-checkpointed commits in its WAL sidecars;
+/// copying them keeps recent writes from the original app (best-effort,
+/// skipped when already present so a resumed run stays idempotent).
+fn copy_db_sidecars(legacy: &Path, staging: &Path) {
+    for suffix in ["-wal", "-shm"] {
+        let from = legacy.join(format!("database.db{suffix}"));
+        let to = staging.join(format!("database.db{suffix}"));
+        if from.is_file() && !to.exists() {
+            if let Err(e) = std::fs::copy(&from, &to) {
+                tracing::warn!(error = %e, sidecar = suffix, "could not copy database sidecar");
+            }
+        }
+    }
+}
+
+/// Sibling directory the migration stages into before the final rename.
+fn migrating_sibling(target: &Path) -> PathBuf {
+    let mut name = target
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".migrating");
+    target.with_file_name(name)
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -756,6 +856,62 @@ mod tests {
         let target = home.path().join("pulpitApp");
         migrate_legacy_data(&home.path().join("deckboard"), &target);
         assert!(!target.exists(), "nothing to migrate, nothing created");
+    }
+
+    #[test]
+    fn legacy_migration_resumes_from_a_crashed_partial_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = home.path().join("deckboard");
+        let target = home.path().join("pulpitApp");
+        let staging = home.path().join("pulpitApp.migrating");
+        std::fs::create_dir_all(legacy.join("extensions/pkg")).unwrap();
+        std::fs::write(legacy.join("database.db"), b"db").unwrap();
+        std::fs::write(legacy.join("settings.json"), b"{}").unwrap();
+        std::fs::write(legacy.join("editor.json"), b"{}").unwrap();
+        std::fs::write(legacy.join("devices.json"), b"[]").unwrap();
+        std::fs::write(legacy.join("extensions/pkg/index.js"), b"module.exports").unwrap();
+
+        // simulate a crash after only database.db landed: the staging dir
+        // exists, half-populated, and the target was never created
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::copy(legacy.join("database.db"), staging.join("database.db")).unwrap();
+
+        migrate_legacy_data(&legacy, &target);
+
+        // the rerun resumes per-item and completes the migration
+        assert_eq!(std::fs::read(target.join("database.db")).unwrap(), b"db");
+        assert_eq!(std::fs::read(target.join("settings.json")).unwrap(), b"{}");
+        assert_eq!(
+            std::fs::read(target.join("extensions/pkg/index.js")).unwrap(),
+            b"module.exports"
+        );
+        assert!(
+            !staging.exists(),
+            "the staging dir is renamed away, not kept"
+        );
+    }
+
+    #[test]
+    fn legacy_migration_carries_database_wal_sidecars() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = home.path().join("deckboard");
+        let target = home.path().join("pulpitApp");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("database.db"), b"db").unwrap();
+        // an un-checkpointed original app leaves its recent commits here
+        std::fs::write(legacy.join("database.db-wal"), b"wal").unwrap();
+        std::fs::write(legacy.join("database.db-shm"), b"shm").unwrap();
+
+        migrate_legacy_data(&legacy, &target);
+
+        assert_eq!(
+            std::fs::read(target.join("database.db-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(
+            std::fs::read(target.join("database.db-shm")).unwrap(),
+            b"shm"
+        );
     }
 
     #[test]
@@ -866,6 +1022,43 @@ mod tests {
     }
 
     #[test]
+    fn delete_board_is_atomic_when_the_board_row_delete_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+        let a = db.insert_board("A", "#2c3e50", 4, 3).unwrap();
+        let b = db.insert_board("B", "#2c3e50", 4, 3).unwrap();
+        db.insert_button(&sample_button(a, 0, 0)).unwrap();
+        db.insert_button(&sample_button(a, 1, 0)).unwrap();
+        db.insert_button(&sample_button(b, 0, 0)).unwrap();
+
+        // veto the Boards delete only: if the two statements are not one
+        // transaction, the Shortcuts delete stays committed (orphaned rows)
+        db.conn
+            .execute(
+                "CREATE TRIGGER veto_board_delete BEFORE DELETE ON Boards
+                 BEGIN SELECT RAISE(ABORT, 'veto'); END",
+                [],
+            )
+            .unwrap();
+        let result = db.delete_board(a);
+        db.conn
+            .execute("DROP TRIGGER veto_board_delete", [])
+            .unwrap();
+
+        assert!(result.is_err(), "the vetoed delete must fail");
+        assert!(
+            db.get_boards().unwrap().iter().any(|row| row.id == a),
+            "the board row must survive the failed delete"
+        );
+        assert_eq!(
+            db.get_buttons_by_board(a).unwrap().len(),
+            2,
+            "its shortcuts must be restored with it, not orphaned"
+        );
+        assert_eq!(db.get_buttons_by_board(b).unwrap().len(), 1);
+    }
+
+    #[test]
     fn button_crud_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
@@ -946,6 +1139,40 @@ mod tests {
     }
 
     #[test]
+    fn lenient_board_columns_accept_legacy_text_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+
+        // legacy boards carry '' in integer columns (knex defaults); a
+        // strict read fails the whole SELECT and empties the board list
+        db.conn
+            .execute(
+                "INSERT INTO Boards (name, background, layout, image, sort, type, \"order\", \
+                     width, height, converted)
+                 VALUES ('Junk', '#2c3e50', '', '', '7', 'buttons', '', '', '', '')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute("INSERT INTO Boards (name) VALUES ('Clean')", [])
+            .unwrap();
+
+        let boards = db.get_boards().unwrap();
+        assert_eq!(boards.len(), 2, "one bad row must not empty the list");
+        let junk = boards.iter().find(|b| b.name == "Junk").unwrap();
+        assert_eq!(junk.layout, 6);
+        assert_eq!((junk.width, junk.height), (4, 3));
+        assert_eq!(junk.order, 0);
+        assert_eq!(junk.converted, 1);
+        assert_eq!(junk.sort, 7, "numeric text parses, like the Shortcuts path");
+
+        // single-board reads are lenient the same way
+        let by_id = db.get_board(junk.id).unwrap().unwrap();
+        assert_eq!(by_id.layout, 6);
+        assert_eq!((by_id.width, by_id.height), (4, 3));
+    }
+
+    #[test]
     fn clear_board_removes_only_that_boards_buttons() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
@@ -992,9 +1219,51 @@ mod tests {
     }
 
     #[test]
-    fn open_read_write_rejects_missing_file() {
+    fn open_read_write_creates_missing_database_with_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("fresh/pulpitApp");
+        let path = nested.join("database.db");
+
+        // a clean install has no legacy copy to migrate; the writer must
+        // still get a database instead of a NotFound dead end
+        let db = Db::open_read_write(Some(&path)).unwrap();
+
+        assert!(path.exists(), "the database file is created");
+        assert!(db.get_boards().unwrap().is_empty());
+        let id = db.insert_board("First", "#2c3e50", 4, 3).unwrap();
+        assert!(db.get_board(id).unwrap().is_some());
+
+        // reopening never clobbers what is already there
+        drop(db);
+        let db = Db::open_read_write(Some(&path)).unwrap();
+        assert_eq!(db.get_boards().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn open_read_write_still_errors_on_an_unwritable_path() {
+        // creation cannot rescue a path whose parent cannot exist
         let err = Db::open_read_write(Some(Path::new("Z:/nope/pulpit.db"))).unwrap_err();
-        assert!(matches!(err, DbError::NotFound(_)));
+        assert!(matches!(err, DbError::Sqlite(_)));
+    }
+
+    #[test]
+    fn write_atomic_replaces_content_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, b"previous").unwrap();
+
+        write_atomic(&path, b"fresh bytes").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"fresh bytes");
+        assert!(
+            !dir.path().join("settings.json.tmp").exists(),
+            "the temp sibling must be renamed away, not left behind"
+        );
+
+        // a path with no existing file is created directly
+        let fresh = dir.path().join("editor.json");
+        write_atomic(&fresh, b"{}").unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"{}");
     }
 
     #[test]

@@ -4,4 +4,4 @@
  * User interactions a widget accepts (declared in the manifest so the
  * client knows which gestures to grab).
  */
-export type Interaction = "tap" | "press-start" | "press-end" | "slide" | "wheel" | "drag" | "other";
+export type Interaction = "tap" | "press-start" | "press-end" | "slide" | "long-press" | "double-tap" | "swipe-left" | "swipe-right" | "wheel" | "drag" | "other";

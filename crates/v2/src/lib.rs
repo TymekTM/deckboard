@@ -4,8 +4,9 @@
 //! `pulpit-legacy` - this crate only adds.
 
 mod assets;
-mod boards;
+pub mod boards;
 mod devices;
+pub mod discovery;
 mod hub;
 mod service;
 mod session;
@@ -18,6 +19,7 @@ use std::time::Duration;
 use pulpit_proto::{Frame, StatePatch, TYPE_STATE_PATCH};
 
 pub use assets::AssetStore;
+pub use boards::build_tile;
 pub use devices::{DeviceEntry, DeviceStore, PairError, Pairing};
 pub use hub::V2Hub;
 pub use service::{router, Auth, V2Config, V2State};
@@ -61,10 +63,19 @@ pub async fn run_flusher(engine: Arc<StateEngine>, hub: Arc<V2Hub>, interval: Du
         tick.tick().await;
         let changes = engine.drain_dirty();
         if !changes.is_empty() {
-            hub.broadcast_frame(&Frame::push_typed(
+            let frame = Frame::push_typed(
                 TYPE_STATE_PATCH,
-                &StatePatch { changes },
-            ));
+                &StatePatch {
+                    changes: changes.clone(),
+                },
+            );
+            // A session mid-handshake must not see a patch before its
+            // welcome; withhold it and re-arm the channels - the full
+            // state.sync queued at welcome covers changes drained in
+            // that window, later ones arrive with the next flush.
+            if hub.broadcast_patch_to_welcomed(&frame) {
+                engine.mark_dirty(changes.iter().map(|c| c.channel.as_str()));
+            }
         }
     }
 }

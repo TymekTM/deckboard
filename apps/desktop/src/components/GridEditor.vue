@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
-import { CELL_W, ROW_H } from "../catalog";
+import { CELL_W, ROW_H, MAX_BOARD_DIM } from "../catalog";
 import TileCell from "./TileCell.vue";
 
 // Edit-mode grid: drag to move, corner handle to resize, double-click to
@@ -48,8 +48,9 @@ function tileStyle(tile) {
   const w = d && d.mode === "resize" ? Math.max(1, tile.w + d.cw) : tile.w;
   const h = d && d.mode === "resize" ? Math.max(1, tile.h + d.ch) : tile.h;
   return {
-    left: `${clamp(x, 0, props.board.width - 1) * cell.value}px`,
-    top: `${clamp(y, 0, props.board.height - 1) * row.value}px`,
+    // clamp to W-w / H-h so a multi-cell tile never hangs over the edge
+    left: `${clamp(x, 0, Math.max(0, props.board.width - w)) * cell.value}px`,
+    top: `${clamp(y, 0, Math.max(0, props.board.height - h)) * row.value}px`,
     width: `${clamp(w, 1, props.board.width) * cell.value}px`,
     height: `${clamp(h, 1, props.board.height) * row.value}px`,
     zIndex: d ? 10 : 1,
@@ -64,17 +65,28 @@ function clamp(v, min, max) {
 // original editor; touch mode skips them entirely - they are edit
 // affordances, and the CSS used to merely hide them
 const emptyCells = computed(() => {
+  const w = Number(props.board.width);
+  const h = Number(props.board.height);
+  // allocation guard (012 C4): a junk board (import/hand-edit) with huge
+  // or fractional dimensions must not allocate W*H cells; bounds match
+  // the backend's MAX_BOARD_DIM
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1) return [];
+  if (w > MAX_BOARD_DIM || h > MAX_BOARD_DIM) return [];
   const occupied = new Set();
   for (const t of props.board.buttons) {
-    for (let dy = 0; dy < Math.max(1, t.h); dy++) {
-      for (let dx = 0; dx < Math.max(1, t.w); dx++) {
-        occupied.add(`${t.x + dx},${t.y + dy}`);
+    // per-tile loops are bounded to the grid as well - junk tile w/h
+    // must not blow the set up either
+    const tw = Math.max(1, Math.min(Number(t.w) || 1, w));
+    const th = Math.max(1, Math.min(Number(t.h) || 1, h));
+    for (let dy = 0; dy < th && t.y + dy < h; dy++) {
+      for (let dx = 0; dx < tw && t.x + dx < w; dx++) {
+        if (t.x + dx >= 0 && t.y + dy >= 0) occupied.add(`${t.x + dx},${t.y + dy}`);
       }
     }
   }
   const cells = [];
-  for (let y = 0; y < props.board.height; y++) {
-    for (let x = 0; x < props.board.width; x++) {
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
       if (!occupied.has(`${x},${y}`)) cells.push({ x, y });
     }
   }
@@ -115,8 +127,10 @@ function startDrag(tile, mode, event) {
     drag.value = null;
     if (!d) return;
     if (d.mode === "move") {
-      const x = clamp(tile.x + d.cx, 0, props.board.width - 1);
-      const y = clamp(tile.y + d.cy, 0, props.board.height - 1);
+      // clamp to W-w / H-h (012 C4): the top-left cell alone must stay in
+      // bounds even for multi-cell tiles
+      const x = clamp(tile.x + d.cx, 0, Math.max(0, props.board.width - tile.w));
+      const y = clamp(tile.y + d.cy, 0, Math.max(0, props.board.height - tile.h));
       if (x !== tile.x || y !== tile.y) emit("tile-moved", tile, x, y, tile.w, tile.h);
     } else {
       const w = clamp(tile.w + d.cw, 1, props.board.width - tile.x);

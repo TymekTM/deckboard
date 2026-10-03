@@ -423,17 +423,28 @@ export function findTypeMeta(type) {
 }
 
 // State bindings, ported from the original's buttonStyles + TOGGLE_BUTTONS
-// tables: which live value decides whether a tile shows its second state.
-// `watch` keys into customValues (APP_CUSTOM_VALUE pushes), `app`/`key`
-// into per-app state (APP_OBS etc.). Tiles without a binding fall back to
-// the tap flip.
-const STATE_BINDINGS = {
+// tables (crates/legacy/assets/buttonprops.json is the authoritative copy
+// of the toggle keys): which live value decides whether a tile shows its
+// second state. `watch` keys into customValues (APP_CUSTOM_VALUE pushes),
+// `app`/`key` into per-app state (APP_OBS etc.), optional `cmd` names the
+// command-JSON field compared against the pushed value (defaults to `key`).
+// Every dual-flagged catalog entry MUST have a binding here - the empty
+// binding is a conscious "tap flip until the integration pushes state"
+// decision, and scripts/check-catalog.mjs enforces the pairing.
+export const STATE_BINDINGS = {
   "speaker-device": { watch: "speaker-device", key: "speaker" },
+  // OBS truthiness fix (012 C5): these used to read the whole app state
+  // object, so any push lit every OBS tile (Boolean({}) === true); they
+  // compare their own key now, like the original's toggle_key table.
   "obs-studio-mode": { app: "obs", key: "studioMode" },
-  "obs-scene": { app: "obs" },
-  "obs-source": { app: "obs" },
-  "obs-device-audio": { app: "obs" },
-  "obs-filter": { app: "obs" },
+  "obs-scene": { app: "obs", key: "activeScene", cmd: "scene" },
+  "obs-source": { app: "obs", key: "activeSources", cmd: "source" },
+  "obs-device-audio": { app: "obs", key: "activeDevices", cmd: "device" },
+  "obs-filter": { app: "obs", key: "activeFilters", cmd: "filter" },
+  "slobs-scene": { app: "slobs", key: "activeScene", cmd: "scene" },
+  "slobs-source": { app: "slobs", key: "activeSources", cmd: "source" },
+  "slobs-device-audio": { app: "slobs", key: "activeDevices", cmd: "device" },
+  "xsplit-scene": { app: "xsplit", key: "activeScene", cmd: "scene" },
   "twitch-slow": { app: "twitch", key: "slow" },
   "twitch-follow-only": { app: "twitch", key: "followerOnly" },
   "twitch-subs-only": { app: "twitch", key: "subscriberOnly" },
@@ -444,6 +455,11 @@ const STATE_BINDINGS = {
   "vmod-voice": { app: "vmod", key: "voice" },
   "vmod-hearmyself": { app: "vmod", key: "hearmyself" },
   "vmod-voicechanger": { app: "vmod", key: "voicechanger" },
+  // Voicemeeter strip/bus parameter toggles have no live push yet
+  // (pulpit_vm is fire-and-forget), so the tap flip decides until a
+  // state source exists - an empty binding records that decision.
+  "vm-toggle-strip": {},
+  "vm-toggle-bus": {},
 };
 
 // null = the live state is unknown (nothing pushed yet), so the tile keeps
@@ -469,13 +485,31 @@ export function stateActive(tile, cmd, customValues, appStates, typeMeta) {
   } else {
     return null;
   }
+  // the command field to compare lives under `cmd` when the state key
+  // differs from it (obs-scene: activeScene vs command {scene: ...})
+  const cmdValue = cmd[binding?.cmd || binding?.key];
   if (typeof value === "boolean") return value;
   if (value == null || value === false || value === "") return null;
-  if (Array.isArray(value)) return value.includes(cmd[binding.key]);
-  if (typeof value === "string") return value === cmd[binding.key];
+  if (Array.isArray(value)) return value.includes(cmdValue);
+  if (typeof value === "string") return value === cmdValue;
   return Boolean(value);
 }
 
 // Grid geometry of the original editor: 96 px cell, 100 px row.
 export const CELL_W = 96;
 export const ROW_H = 100;
+
+// Board width/height cap (012 C4). Matches the backend's
+// MAX_BOARD_DIM = 32 bound on board dimensions (the Rust import-side
+// bounds live in the backend crate); keep the two in sync so the editor
+// can never create a board the backend would reject.
+export const MAX_BOARD_DIM = 32;
+
+// Clamp a board dimension input to the backend's integer bounds; the
+// fallback (the form's own default for that field) applies only when the
+// input is not a number at all.
+export function boardDim(value, fallback) {
+  const n = Math.trunc(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(MAX_BOARD_DIM, Math.max(1, n));
+}

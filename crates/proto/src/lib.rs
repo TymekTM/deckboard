@@ -173,7 +173,16 @@ pub struct Welcome {
     /// it already.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// M5 capability negotiation: what this server supports. The client
+    /// declares its own set in `hello.capabilities`; neither side gates
+    /// behavior on the sets yet (declared + logged + echoed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
+
+/// The server's own capability set, echoed in every `welcome` (M5).
+pub const SERVER_CAPABILITIES: &[&str] =
+    &["series", "state.patch", "assets", "assets2", "gestures"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
@@ -344,6 +353,13 @@ pub enum Interaction {
     PressStart,
     PressEnd,
     Slide,
+    /// M5 custom gestures: declared per tile (`gestures` in the options
+    /// JSON); each fires the tile's action once on completion - they are
+    /// alternative triggers, not press modes (no key-hold, no repeat).
+    LongPress,
+    DoubleTap,
+    SwipeLeft,
+    SwipeRight,
     Wheel,
     Drag,
     /// Custom gesture only known to newer clients; ignored otherwise.
@@ -372,6 +388,10 @@ pub struct WidgetManifest {
     /// video), served from `/assets/<hash>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asset_hash: Option<String>,
+    /// Active-state image (legacy `img2`); shown instead of `asset_hash`
+    /// while the tile's channel reports its active value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_hash2: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -416,6 +436,24 @@ pub struct Style {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
+    /// Tile border color; clients render a hairline border when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<String>,
+    /// Active-state border (per-field fallback to `border_color`, §4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color2: Option<String>,
+    /// Glyph color; defaults to white client-side when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_color: Option<String>,
+    /// Active-state glyph color (per-field fallback to `icon_color`, §4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_color2: Option<String>,
+    /// Title text color; defaults to white client-side when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_color: Option<String>,
+    /// Active-state title color (per-field fallback to `title_color`, §4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_color2: Option<String>,
 }
 
 /// Free placement inside a board grid (pixel-space of the 96px cell grid).
@@ -539,6 +577,7 @@ mod tests {
                 style: None,
                 web_package: None,
                 asset_hash: None,
+                asset_hash2: None,
             },
         };
         let v = serde_json::to_value(&tile).unwrap();
