@@ -73,6 +73,23 @@ import kotlin.math.sin
 private fun parse(value: Double?): String =
     if (value == null) "" else if (value == ceil(value)) value.toInt().toString() else "%.1f".format(value)
 
+/** Static busy ring, shared by the board overlay and the connect
+ *  screen: deck tablets often run with animator scales off, which
+ *  freezes an indeterminate spinner into an invisible dot. A fixed
+ *  300-degree arc reads as "busy" on every device (round 4, MOB-04). */
+@Composable
+fun RingSpinner(modifier: Modifier = Modifier) {
+    Canvas(modifier.size(34.dp)) {
+        drawArc(
+            color = Color.White,
+            startAngle = -90f,
+            sweepAngle = 300f,
+            useCenter = false,
+            style = Stroke(width = 6f, cap = StrokeCap.Round),
+        )
+    }
+}
+
 /** Clock visual styles. Tapping the tile cycles to the next entry and
  *  the choice persists per tile id in shared preferences. */
 val CLOCK_STYLES = listOf("icon", "big", "analog", "date")

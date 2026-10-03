@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -242,7 +241,10 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.padding(16.dp),
                 ) {
-                    CircularProgressIndicator()
+                    // the same fixed-arc ring as the board overlay: the
+                    // deck's animator scale is off, a Material
+                    // indeterminate spinner would freeze into a dot
+                    RingSpinner()
                     Text(
                         text = "Connecting to ${cfg.host}:${cfg.port}...",
                         color = Color.White.copy(alpha = 0.7f),
