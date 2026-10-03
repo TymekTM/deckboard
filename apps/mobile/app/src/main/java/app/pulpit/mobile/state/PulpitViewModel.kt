@@ -154,11 +154,13 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     // -- M8 discovery pairing (Bluetooth-style, plan 014) -------------------
 
     /** Live pair-request: the verification code both screens show, plus
-     *  where the request went. */
+     *  where the request went (and the hello name to persist on
+     *  approval - the desktop's request log shows the same name). */
     data class PairRequestUi(
         val host: String,
         val port: Int,
         val code: String,
+        val deviceName: String,
     )
 
     private val _pairRequest = MutableStateFlow<PairRequestUi?>(null)
@@ -173,7 +175,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         scope.launch {
             try {
                 val created = createPairRequest(sharedHttp, host, port, deviceName)
-                _pairRequest.value = PairRequestUi(host, port, created.code)
+                _pairRequest.value = PairRequestUi(host, port, created.code, deviceName)
                 pollPairDecision(host, port, created.request_id, created.expires_in_secs)
             } catch (e: Exception) {
                 _pairRequest.value = null
@@ -206,7 +208,13 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
                     _pairRequest.value = null
                     if (ui != null) {
                         withContext(Dispatchers.Main.immediate) {
-                            saveConfig(_config.value.copy(host = ui.host, port = ui.port))
+                            saveConfig(
+                                _config.value.copy(
+                                    host = ui.host,
+                                    port = ui.port,
+                                    name = ui.deviceName,
+                                ),
+                            )
                             connectWithPairCode(ui.code)
                         }
                     }
