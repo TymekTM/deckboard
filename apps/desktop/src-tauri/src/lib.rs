@@ -1410,7 +1410,9 @@ async fn set_touch_mode_hotkey(
 
     if let Some(path) = &state.settings_path {
         let json = serde_json::json!({ "hotkey": combo }).to_string();
-        if let Err(e) = std::fs::write(path, json) {
+        // atomic like every other JSON config rewrite (012 A5): a crash
+        // mid-write must not tear editor.json
+        if let Err(e) = pulpit_db::write_atomic(path, json.as_bytes()) {
             tracing::warn!(error = %e, "could not persist hotkey");
         }
     }
