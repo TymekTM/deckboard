@@ -44,7 +44,7 @@ import app.pulpit.mobile.net.NsdDiscovery
 import app.pulpit.mobile.state.PulpitViewModel
 
 @Composable
-fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
+fun ConnectScreen(vm: PulpitViewModel) {
     val cfg by vm.config.collectAsState()
     val conn by vm.connState.collectAsState()
     val context = LocalContext.current
@@ -295,7 +295,6 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
                     } else {
                         vm.connectWithPairCode(pairCode)
                     }
-                    onConnected()
                 },
                 modifier = Modifier.padding(top = 16.dp).fillMaxWidth(),
             ) {

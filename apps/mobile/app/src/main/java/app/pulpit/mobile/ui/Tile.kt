@@ -221,7 +221,7 @@ fun Tile(
             }
             when (template) {
                 "slider" -> SliderTile(tile, color, icon, iconFamily, iconColor, liveValue, onSlider)
-                "knob" -> KnobTile(tile, titleColor, iconColor, titleColor, liveValue, onSlider)
+                "knob" -> KnobTile(tile, iconColor, titleColor, liveValue, onSlider)
                 "graph" -> GraphTile(tile, series, liveText, channel, titleColor)
                 "clock" -> ClockTile(tile, icon, iconFamily, titleColor)
                 "list" ->
@@ -414,7 +414,7 @@ private fun ButtonTile(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             if (image == null && unicode.isNotEmpty()) {
                 Text(
-                    text = faChar(unicode),
+                    text = unicode,
                     fontFamily = iconFamily,
                     fontSize = 26.sp,
                     color = iconColor,
@@ -494,7 +494,7 @@ private fun SliderTile(
         )
         if (icon.isNotEmpty()) {
             Text(
-                text = faChar(icon),
+                text = icon,
                 fontFamily = iconFamily,
                 fontSize = 22.sp,
                 color = iconColor,
@@ -503,5 +503,3 @@ private fun SliderTile(
     }
 }
 
-// the payload already carries the actual glyph character
-fun faChar(unicode: String): String = unicode

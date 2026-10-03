@@ -62,7 +62,7 @@ class MainActivity : ComponentActivity() {
                     // the connect screen only owns the no-data and refused
                     // states.
                     board -> BoardScreen(vm)
-                    else -> ConnectScreen(vm, onConnected = {})
+                    else -> ConnectScreen(vm)
                 }
             }
         }
