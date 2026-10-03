@@ -38,9 +38,10 @@ const VM_BUS_INDEX = [
 ].map((label, i) => ({ value: i, label }));
 
 // Voicemeeter gain fader range in dB; vm sliders map 0..1 onto it. Must
-// match pulpit_vm::GAIN_MIN / GAIN_MAX on the backend.
-export const VM_GAIN_MIN = -60;
-export const VM_GAIN_MAX = 12;
+// match pulpit_vm::GAIN_MIN / GAIN_MAX on the backend. Only the reset
+// position below leaves this file.
+const VM_GAIN_MIN = -60;
+const VM_GAIN_MAX = 12;
 // double-tap reset position: 0 dB unity gain on the fader
 export const VM_SLIDER_RESET = (0 - VM_GAIN_MIN) / (VM_GAIN_MAX - VM_GAIN_MIN);
 
@@ -415,12 +416,6 @@ export const CATALOG = [
     dual: true,
   },
 ];
-
-// Fallback style/config for a tile type (static catalog only; extension
-// inputs are merged at runtime via list_known_inputs).
-export function findTypeMeta(type) {
-  return CATALOG.find((c) => c.value === type) || null;
-}
 
 // State bindings, ported from the original's buttonStyles + TOGGLE_BUTTONS
 // tables (crates/legacy/assets/buttonprops.json is the authoritative copy

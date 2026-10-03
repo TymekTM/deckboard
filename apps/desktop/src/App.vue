@@ -924,7 +924,6 @@ function onKeydown(event) {
 }
 .pop-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13.5px; }
 .pop-row.strong { font-weight: 500; }
-.pop-row.muted { color: var(--modal-muted); font-size: 12.5px; margin-top: 6px; }
 .pop-sep { border-top: 1px solid var(--modal-line); margin: 8px 0; }
 .mini {
   font-size: 12.5px;
