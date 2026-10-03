@@ -12,6 +12,7 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use pulpit_actions::EventSink;
@@ -31,6 +32,9 @@ struct MockBackend {
     buttons: Vec<ButtonRow>,
     execs: Arc<Mutex<Vec<(i64, bool)>>>,
     sliders: Arc<Mutex<Vec<(i64, f64)>>>,
+    /// Artificial exec latency for the starvation test; zero in every
+    /// other fixture.
+    exec_delay: Duration,
 }
 
 impl MockBackend {
@@ -57,6 +61,9 @@ impl Backend for MockBackend {
         self.buttons.iter().find(|b| b.id == id).cloned()
     }
     fn exec(&self, button: ButtonRow, is_tap_start: bool, sink: &mut dyn EventSink) {
+        if !self.exec_delay.is_zero() {
+            std::thread::sleep(self.exec_delay);
+        }
         self.execs.lock().unwrap().push((button.id, is_tap_start));
         if button.kind == "board" {
             sink.change_board(9);
@@ -153,6 +160,14 @@ fn test_state(
     backend: MockBackend,
     tune: impl FnOnce(&mut V2Config),
 ) -> (Arc<V2State>, tempfile::TempDir) {
+    test_state_with_pairing(backend, Arc::new(Pairing::new()), tune)
+}
+
+fn test_state_with_pairing(
+    backend: MockBackend,
+    pairing: Arc<Pairing>,
+    tune: impl FnOnce(&mut V2Config),
+) -> (Arc<V2State>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut config = V2Config {
         patch_interval: Duration::from_millis(20),
@@ -165,7 +180,7 @@ fn test_state(
         hub: Arc::new(V2Hub::new()),
         backend: Arc::new(backend),
         devices: Arc::new(DeviceStore::load(dir.path().join("devices.json")).unwrap()),
-        pairing: Arc::new(Pairing::new()),
+        pairing,
         assets: Arc::new(AssetStore::open(dir.path().join("assets")).unwrap()),
         engine: Arc::new(StateEngine::new(120)),
         generation: Generation::starting_at(1),
@@ -176,13 +191,17 @@ fn test_state(
 }
 
 async fn spawn_server(state: Arc<V2State>) -> SocketAddr {
+    spawn_server_on(state, "127.0.0.1:0").await
+}
+
+async fn spawn_server_on(state: Arc<V2State>, bind: &str) -> SocketAddr {
     tokio::spawn(pulpit_v2::run_flusher(
         state.engine.clone(),
         state.hub.clone(),
         state.config.patch_interval,
     ));
     let app = pulpit_v2::router(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind(bind).await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(
@@ -278,7 +297,23 @@ async fn http_request(
 async fn http_get(addr: SocketAddr, path: &str) -> (u16, HashMap<String, String>, Vec<u8>) {
     http_request(
         addr,
-        format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"),
+        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .await
+}
+
+async fn http_get_with_headers(
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (u16, HashMap<String, String>, Vec<u8>) {
+    let extra: String = headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
+    http_request(
+        addr,
+        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}Connection: close\r\n\r\n"),
     )
     .await
 }
@@ -288,10 +323,23 @@ async fn http_post_json(
     path: &str,
     body: &str,
 ) -> (u16, HashMap<String, String>, Vec<u8>) {
+    http_post_json_with_headers(addr, path, body, &[]).await
+}
+
+async fn http_post_json_with_headers(
+    addr: SocketAddr,
+    path: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> (u16, HashMap<String, String>, Vec<u8>) {
+    let extra: String = headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
     http_request(
         addr,
         format!(
-            "POST {path} HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         ),
     )
@@ -300,6 +348,271 @@ async fn http_post_json(
 
 // ---------------------------------------------------------------------------
 // tests
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_requests_are_rejected_on_the_sockets() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let (_device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+
+    // Websocket upgrade with a foreign Origin: a web page open on this
+    // machine must not reach the socket. Browsers cannot drop the
+    // Origin header, native clients do not send one.
+    let request = (&format!("ws://{addr}/v2/ws?token={}", token))
+        .into_client_request()
+        .unwrap();
+    let mut request = request;
+    request
+        .headers_mut()
+        .insert("Origin", "http://evil.example".parse().unwrap());
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(result.is_err(), "foreign-Origin upgrade must be rejected");
+
+    // Same-origin (a loopback page served by this very server): allowed.
+    let mut request = (&format!("ws://{addr}/v2/ws?token={}", token))
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Origin", format!("http://{addr}").parse().unwrap());
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(result.is_ok(), "same-host Origin must be allowed");
+
+    // Pairing mint with a foreign Origin: 403 even from loopback.
+    let (status, _, _) =
+        http_post_json_with_headers(addr, "/v2/pair", "{}", &[("Origin", "http://evil.example")])
+            .await;
+    assert_eq!(status, 403, "pairing must refuse browser pages");
+
+    // A non-literal Host is what DNS rebinding produces: rejected even
+    // without an Origin header.
+    let (status, _, _) = http_request(
+        addr,
+        "POST /v2/pair HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+            .to_string(),
+    )
+    .await;
+    assert_eq!(status, 403, "rebound Host must be rejected");
+
+    // No Origin header at all: the native tablet client's normal shape.
+    let request = (&format!("ws://{addr}/v2/ws?token={}", token))
+        .into_client_request()
+        .unwrap();
+    assert!(
+        !request.headers().contains_key("Origin"),
+        "test setup: this upgrade must be Origin-less"
+    );
+    let result = tokio_tungstenite::connect_async(request).await;
+    assert!(result.is_ok(), "Origin-less native requests must work");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pair_route_refuses_non_loopback_callers() {
+    // Derive a non-loopback local address the way the OS would route
+    // it (UDP connect picks the source interface; no packet is sent).
+    // Hosts without an external route cannot exercise this guard -
+    // skip rather than flake there.
+    let probe = (|| -> Option<std::net::UdpSocket> {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        s.connect("8.8.8.8:80").ok()?;
+        Some(s)
+    })();
+    let probe = match probe {
+        Some(s) => s,
+        None => {
+            eprintln!("skipping: no external route to derive a LAN address");
+            return;
+        }
+    };
+    let lan_ip = probe.local_addr().unwrap().ip();
+    if lan_ip.is_loopback() {
+        eprintln!("skipping: no non-loopback address on this host");
+        return;
+    }
+
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let lan_addr = spawn_server_on(state.clone(), &format!("{lan_ip}:0")).await;
+    let loopback_addr = spawn_server_on(state, "127.0.0.1:0").await;
+
+    let (status, _, _) = http_post_json(lan_addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 403, "pairing must be mintable from loopback only");
+    let (status, _, _) = http_post_json(loopback_addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 200, "loopback callers still mint");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn expired_code_gets_pair_expired_over_the_socket() {
+    let (state, _dir) = test_state_with_pairing(
+        sample_backend(),
+        Arc::new(Pairing::with_ttl(Duration::from_millis(40))),
+        |_| {},
+    );
+    let addr = spawn_server(state).await;
+
+    let (status, _, body) = http_post_json(addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 200);
+    let code = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h1",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0"}),
+        ),
+    )
+    .await;
+    let err = next_frame(&mut ws).await;
+    assert_eq!(err.ack.as_deref(), Some("h1"));
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(
+        payload.code,
+        error_code::PAIR_EXPIRED,
+        "an expired code must be told apart from an unknown one"
+    );
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "socket must close after pair-expired");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn silent_hello_times_out_and_closes() {
+    let (state, _dir) = test_state(sample_backend(), |cfg| {
+        cfg.hello_timeout = Duration::from_millis(150);
+    });
+    let (_device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+
+    // Valid token, but the client never speaks: the hello window ends
+    // the session with the typed error instead of parking forever.
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={token}")).await;
+    let err = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let frame = next_frame(&mut ws).await;
+            if frame.kind == TYPE_ERROR {
+                break frame;
+            }
+        }
+    })
+    .await
+    .expect("hello timeout error within the window");
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(payload.code, error_code::BAD_FRAME);
+    assert_eq!(payload.message.as_deref(), Some("hello timeout"));
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "socket must close after the hello timeout");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_and_revoked_tokens_are_refused_at_the_upgrade() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let (device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+
+    // Unknown token: HTTP 401, no upgrade.
+    let bogus =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/v2/ws?token=not-a-token")).await;
+    assert!(bogus.is_err(), "unknown token must not upgrade");
+
+    // A real token works, then revocation must close that door.
+    let ok = tokio_tungstenite::connect_async(format!("ws://{addr}/v2/ws?token={token}")).await;
+    assert!(ok.is_ok(), "valid token upgrades");
+    assert!(state.devices.revoke(&device.id));
+    let revoked =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/v2/ws?token={token}")).await;
+    assert!(revoked.is_err(), "revoked device's token must not upgrade");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pairing_codes_never_reach_the_log() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let addr = spawn_server(state).await;
+
+    let captured = capture_all_tracing_events();
+    let (status, _, body) = http_post_json(addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 200);
+    let pair: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let code = pair["code"].as_str().unwrap().to_string();
+    assert_eq!(code.len(), 8);
+
+    // The mint log line fires inside the handler, before the response;
+    // the pause only lets any straggler event land before the scan.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let events = captured.lock().unwrap().clone();
+    assert!(
+        !events.is_empty(),
+        "expected at least the mint log line to be captured"
+    );
+    let leakers: Vec<String> = events
+        .iter()
+        .filter(|e| e.contains(&code))
+        .cloned()
+        .collect();
+    assert!(
+        leakers.is_empty(),
+        "pairing code leaked into the log: {leakers:?}"
+    );
+}
+
+/// Installs a process-wide capturing tracing layer and returns the
+/// recorded event texts (message + field values). Global, not
+/// thread-local: the axum handlers log on worker threads.
+fn capture_all_tracing_events() -> Arc<Mutex<Vec<String>>> {
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            use tracing::field::Visit;
+            struct Fields(Vec<String>);
+            impl Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push(format!("{}={:?}", field.name(), value));
+                }
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0.push(format!("{}={}", field.name(), value));
+                }
+            }
+            let mut fields = Fields(Vec::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0.join(" "));
+        }
+    }
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    use tracing_subscriber::prelude::*;
+    let registry = tracing_subscriber::registry().with(Capture(captured.clone()));
+    // Fails (and is ignored) if some other test already installed one;
+    // the emptiness assert in the caller then fails loudly instead of
+    // silently passing.
+    let _ = tracing::subscriber::set_global_default(registry);
+    captured
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unauthenticated_ws_is_rejected() {
@@ -431,17 +744,114 @@ async fn pairing_flow_mints_welcome_and_device() {
         .any(|d| d.id == welcome.device.id));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn hello_names_are_sanitized_before_persisting() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let (_device, token) = state.devices.create("Old name");
+    let addr = spawn_server(state.clone()).await;
+
+    // A hostile hello.name: control characters, padding and 100 chars.
+    // The welcome, the registry and the logs must only ever see the
+    // trimmed, control-free, 64-char-capped form.
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
+    let junk = format!(" {} \u{7}\u{0} ", "N".repeat(100));
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h1",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0", "name": junk}),
+        ),
+    )
+    .await;
+    let welcome: Welcome = typed(next_frame(&mut ws).await, TYPE_WELCOME);
+    let expected = "N".repeat(64);
+    assert_eq!(welcome.device.name, expected);
+    assert_eq!(state.devices.list()[0].name, expected);
+
+    // A blank/junk-only name must not wipe the stored name: sanitize to
+    // None means "keep what the registry has".
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h2",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0", "name": " \u{1}\t "}),
+        ),
+    )
+    .await;
+    let welcome: Welcome = typed(next_frame(&mut ws).await, TYPE_WELCOME);
+    assert_eq!(welcome.device.name, expected, "blank names must not rename");
+
+    // Pairing with no usable name falls back to "Device".
+    let (status, _, body) = http_post_json(addr, "/v2/pair", "{}").await;
+    assert_eq!(status, 200);
+    let code = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h3",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0", "name": "\u{2}"}),
+        ),
+    )
+    .await;
+    let welcome: Welcome = typed(next_frame(&mut ws).await, TYPE_WELCOME);
+    assert_eq!(welcome.device.name, "Device");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn device_revoked_mid_handshake_is_unauthorized() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let (device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+
+    // The upgrade verifies the token, then the device is revoked before
+    // hello arrives. touch/rename now return None; the session must die
+    // with `unauthorized` instead of serving the stale pre-auth entry.
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
+    assert!(state.devices.revoke(&device.id));
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h1",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0"}),
+        ),
+    )
+    .await;
+    let err = next_frame(&mut ws).await;
+    assert_eq!(err.ack.as_deref(), Some("h1"));
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(payload.code, error_code::UNAUTHORIZED);
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "revoked device's socket must close");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn token_connect_delivers_full_snapshot() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Tablet salon");
+    let (device, token) = state.devices.create("Tablet salon");
     state
         .engine
         .set("ext.speaker-muted", serde_json::json!("OFF"));
     state.engine.set("ext.si-cpu", serde_json::json!(0.5));
     let addr = spawn_server(state.clone()).await;
 
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     let (welcome, sync, state_sync) = handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
     assert_eq!(welcome.device.id, device.id);
     assert_eq!(welcome.generation, 1);
@@ -479,12 +889,12 @@ async fn token_connect_delivers_full_snapshot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn hello_rename_lands_in_welcome_and_registry() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Old name");
+    let (_device, token) = state.devices.create("Old name");
     let addr = spawn_server(state.clone()).await;
 
     // hello.name renames the paired device; the welcome of THIS connection
     // must already carry the new name, and so must the persisted registry.
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     let (welcome, _sync, _state_sync) = handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
     assert_eq!(
         welcome.device.name, "Test tablet",
@@ -496,9 +906,9 @@ async fn hello_rename_lands_in_welcome_and_registry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn state_changes_flow_as_patches() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     state.engine.set("ext.late", serde_json::json!("hello"));
@@ -521,9 +931,9 @@ async fn state_changes_flow_as_patches() {
 async fn interaction_acks_execs_and_reports_unknown_tiles() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     // Tap: ack with the request id, then the exec lands in the backend.
@@ -574,13 +984,13 @@ async fn interaction_acks_execs_and_reports_unknown_tiles() {
     assert_eq!(payload.code, error_code::UNSUPPORTED_INTERACTION);
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn hold_repeat_runs_until_press_end() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     send_frame(
@@ -617,13 +1027,13 @@ async fn hold_repeat_runs_until_press_end() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn duplicate_press_start_does_not_leak_a_repeat_loop() {
     let backend = sample_backend();
     let (state, _dir) = test_state(backend.clone(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     // Two press-starts for one tile: the second must replace (not join)
@@ -669,12 +1079,198 @@ async fn duplicate_press_start_does_not_leak_a_repeat_loop() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn slow_hold_actions_do_not_starve_other_sessions() {
+    // The headless server runtime is single-threaded; a hold tick that
+    // blocks inside the async task (instead of spawn_blocking) freezes
+    // every other session on the runtime - pings, reads, everything. A
+    // second WebSocket client driven from this same runtime would freeze
+    // with it, so the starvation is observed as timer drift: a 50 ms
+    // watchdog must never stall while a hold tick's slow action runs.
+    let mut backend = sample_backend();
+    backend.exec_delay = Duration::from_millis(1000);
+    let (state, _dir) = test_state(backend, |_| {});
+    let (_device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    let max_drift_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drift = max_drift_ms.clone();
+    let halted = stop.clone();
+    let watchdog = tokio::spawn(async move {
+        let mut last = std::time::Instant::now();
+        while !halted.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let elapsed = last.elapsed().as_millis() as u64;
+            last = std::time::Instant::now();
+            drift.fetch_max(elapsed, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+
+    // Hold the slow key tile: repeat ticks are due every 20 ms, but each
+    // action sleeps ~1 s.
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "s1",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    // Span at least one full slow tick, then let the press go.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "s2",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-end"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = tokio::time::timeout(Duration::from_secs(2), watchdog).await;
+
+    let drift = max_drift_ms.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        drift < 450,
+        "a slow hold tick froze the runtime for {drift} ms - ticks must run on the blocking pool"
+    );
+}
+
+async fn wait_for_exec(backend: &MockBackend, expected: (i64, bool)) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if backend.execs.lock().unwrap().contains(&expected) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "exec {expected:?} never landed: {:?}",
+            backend.execs.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn held_keys_release_when_the_socket_drops() {
+    let backend = sample_backend();
+    let (state, _dir) = test_state(backend.clone(), |_| {});
+    let (_device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    // press-start a key tile: the exec drives key-down (tap-start
+    // semantics). The socket then dies without a press-end - §6
+    // promises the key is released when the connection dies.
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "k1",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    wait_for_exec(&backend, (23, true)).await;
+    drop(ws);
+    wait_for_exec(&backend, (23, false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hub_teardown_ends_the_session_and_releases_held_keys() {
+    let backend = sample_backend();
+    let (state, _dir) = test_state(backend.clone(), |_| {});
+    let (_device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "k1",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    wait_for_exec(&backend, (23, true)).await;
+    // Stop reading (never poll the socket again) and flood it: the hub
+    // must tear the wedged session down. The key release only happens
+    // in the session task's tail, so observing it also proves the
+    // session task finished (no zombie read loop).
+    let _ws = ws;
+    let fat = Frame::push(
+        TYPE_STATE_PATCH,
+        serde_json::json!({"changes": [{"channel": "ext.flood", "value": "x".repeat(8192)}]}),
+    );
+    for _ in 0..600 {
+        state.hub.broadcast_frame(&fat);
+        if state.hub.count() == 0 {
+            break;
+        }
+    }
+    assert_eq!(state.hub.count(), 0, "wedged session must be torn down");
+    wait_for_exec(&backend, (23, false)).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reaped_silent_session_ends_and_releases_held_keys() {
+    let backend = sample_backend();
+    let (state, _dir) = test_state(backend.clone(), |_| {});
+    let (_device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={token}")).await;
+    handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    // Hold a key down, then go silent: the reaper (silence watchdog)
+    // tears the session down hub-side. The key release only runs in the
+    // session task's tail, so observing it also proves the task ran to
+    // completion instead of lingering as a zombie read loop (audit C2).
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_INTERACTION,
+            "r1",
+            serde_json::json!({"board": 3, "tile": 23, "interaction": "press-start"}),
+        ),
+    )
+    .await;
+    let _ack = next_frame(&mut ws).await;
+    wait_for_exec(&backend, (23, true)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    state.hub.reap_silent(0);
+    assert_eq!(state.hub.count(), 0, "silent session must be reaped");
+    wait_for_exec(&backend, (23, false)).await;
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "reaped client must see its socket close");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn undeclared_interactions_are_rejected() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     // The slider tile (21) declares only `slide`; press-start is not in
@@ -696,9 +1292,9 @@ async fn undeclared_interactions_are_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn board_switch_pushes_board_open() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     send_frame(
@@ -719,9 +1315,9 @@ async fn board_switch_pushes_board_open() {
 #[tokio::test(flavor = "multi_thread")]
 async fn published_deltas_reach_clients() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     let op = BoardOp::TileRemove { board: 3, tile: 21 };
@@ -738,7 +1334,7 @@ async fn published_deltas_reach_clients() {
 #[tokio::test(flavor = "multi_thread")]
 async fn assets_serve_with_token_and_cache_headers() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let png_url = format!(
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(b"raw-png-bytes")
@@ -751,11 +1347,10 @@ async fn assets_serve_with_token_and_cache_headers() {
     assert_eq!(status, 401);
     // Bad hash with a good token -> 404.
     let zeros = "0".repeat(64);
-    let (status, _, _) = http_get(addr, &format!("/assets/{zeros}?token={}", device.token)).await;
+    let (status, _, _) = http_get(addr, &format!("/assets/{zeros}?token={}", token)).await;
     assert_eq!(status, 404);
     // Happy path: bytes + immutable caching.
-    let (status, headers, body) =
-        http_get(addr, &format!("/assets/{hash}?token={}", device.token)).await;
+    let (status, headers, body) = http_get(addr, &format!("/assets/{hash}?token={}", token)).await;
     assert_eq!(status, 200);
     assert_eq!(body, b"raw-png-bytes");
     assert_eq!(headers["content-type"].as_str(), "image/png");
@@ -763,14 +1358,37 @@ async fn assets_serve_with_token_and_cache_headers() {
         headers["cache-control"].as_str(),
         "immutable, max-age=31536000"
     );
+    assert_eq!(headers["accept-ranges"].as_str(), "bytes");
+
+    // Satisfied range: 206 with the inclusive Content-Range window.
+    let (status, headers, body) = http_get_with_headers(
+        addr,
+        &format!("/assets/{hash}?token={}", token),
+        &[("Range", "bytes=4-7")],
+    )
+    .await;
+    assert_eq!(status, 206, "partial content must answer 206");
+    assert_eq!(headers["content-range"].as_str(), "bytes 4-7/13");
+    assert_eq!(body, b"png-");
+    assert_eq!(headers["accept-ranges"].as_str(), "bytes");
+
+    // Unsatisfiable range: 416 with the total-size form.
+    let (status, headers, _body) = http_get_with_headers(
+        addr,
+        &format!("/assets/{hash}?token={}", token),
+        &[("Range", "bytes=99-")],
+    )
+    .await;
+    assert_eq!(status, 416);
+    assert_eq!(headers["content-range"].as_str(), "bytes */13");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn server_pings_idle_clients() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     let ping = tokio::time::timeout(Duration::from_secs(2), async {
@@ -787,9 +1405,9 @@ async fn server_pings_idle_clients() {
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_frame_gets_typed_error_and_close() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     // 1 MiB + slack: above the protocol limit but below the wire cap, so
@@ -820,9 +1438,9 @@ async fn outdated_clients_are_closed_after_hello() {
     let (state, _dir) = test_state(sample_backend(), |cfg| {
         cfg.min_client = "9.9.9".into();
     });
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     send_frame(
         &mut ws,
         &Frame::request(
@@ -857,9 +1475,9 @@ async fn exec_side_values_land_on_ext_channels() {
         .buttons
         .push(button_row(25, "value-pusher", "button", None, None));
     let (state, _dir) = test_state(backend, |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     send_frame(
@@ -890,9 +1508,9 @@ async fn exec_side_values_land_on_ext_channels() {
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_goodbye_reaches_clients_then_closes() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
-    let device = state.devices.create("Tablet");
+    let (_device, token) = state.devices.create("Tablet");
     let addr = spawn_server(state.clone()).await;
-    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", device.token)).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
     handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
 
     // The desktop quit path verbatim: one goodbye frame per attached

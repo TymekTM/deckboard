@@ -15,6 +15,13 @@ use serde_json::Value;
 use crate::assets::AssetStore;
 use crate::state::{ext_channel, StateEngine};
 
+/// Defensive ceiling for board dimensions on the wire, matching
+/// `pulpit_backend::MAX_BOARD_DIM` (the import side's bound; a local
+/// constant because the backend crate is not a dependency here). v2
+/// clients lay out a W*H grid from these numbers, so a junk row must
+/// not reach them at stored size (audit C4).
+const MAX_BOARD_DIM: i64 = 32;
+
 /// All boards with their tiles, in legacy `order`.
 pub fn build_boards(
     backend: &dyn Backend,
@@ -49,8 +56,8 @@ pub fn build_board(
     Board {
         id: board.id,
         name: board.name.clone(),
-        width: board.width.max(1) as u32,
-        height: board.height.max(1) as u32,
+        width: board.width.clamp(1, MAX_BOARD_DIM) as u32,
+        height: board.height.clamp(1, MAX_BOARD_DIM) as u32,
         order: board.order.max(0) as u32,
         background: board_background(board, assets),
         tiles: buttons
@@ -461,6 +468,37 @@ mod tests {
             engine.catalog()["ext.ai-plan-limits"].shape,
             StateShape::Scalar
         );
+    }
+
+    #[test]
+    fn oversized_board_dimensions_are_clamped_on_the_wire() {
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let b = board_row(1_000_000, 1_000_000);
+        let board = build_board(&b, &[], &assets, &engine);
+        // v2 clients lay out a W*H grid from these numbers: a junk row
+        // must not reach them at full size (audit C4)
+        assert_eq!(board.width, 32);
+        assert_eq!(board.height, 32);
+        let degenerate = build_board(&board_row(-5, 0), &[], &assets, &engine);
+        assert_eq!((degenerate.width, degenerate.height), (1, 1));
+    }
+
+    fn board_row(width: i64, height: i64) -> pulpit_db::BoardRow {
+        pulpit_db::BoardRow {
+            id: 1,
+            name: "Big".into(),
+            background: "#2c3e50".into(),
+            layout: 6,
+            image: String::new(),
+            sort: 0,
+            kind: "buttons".into(),
+            args: None,
+            order: 0,
+            width,
+            height,
+            converted: 1,
+        }
     }
 
     fn asset_store() -> (AssetStore, tempfile::TempDir) {

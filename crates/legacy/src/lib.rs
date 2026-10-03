@@ -12,7 +12,7 @@ pub use editor::EditorBroadcaster;
 pub use hub::{Hub, Session, ACCESS_KEY_PRO};
 pub use mapping::Mapper;
 pub use props::StyleResolver;
-pub use service::{router, AppState, Backend};
+pub use service::{origin_host_allowed, router, AppState, Backend};
 
 /// The original answers `get_version` with a hardcoded version despite
 /// shipping 3.2.0 - replicated byte for byte (ADR-002).

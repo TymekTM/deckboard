@@ -27,9 +27,24 @@ impl AssetStore {
         let mut exts = HashMap::new();
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if let Some((hash, ext)) = split_stem(entry.file_name().to_string_lossy().as_ref())
-                {
-                    exts.insert(hash.to_string(), ext.to_string());
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                let Some((hash, ext)) = split_stem(&file_name) else {
+                    continue;
+                };
+                // Content-addressed means it: verify at open. A file
+                // whose bytes do not hash to its name is a torn write
+                // from a pre-rename crash or tampering; serving it under
+                // `immutable` cache headers would poison client caches
+                // for a year, so the entry is dropped and the file
+                // removed - a re-import of the honest bytes heals it.
+                match std::fs::read(entry.path()) {
+                    Ok(bytes) if hash == hex::encode(Sha256::digest(&bytes)) => {
+                        exts.insert(hash.to_string(), ext.to_string());
+                    }
+                    _ => {
+                        tracing::warn!(file = %file_name, "asset content does not match its hash name - dropping it");
+                        let _ = std::fs::remove_file(entry.path());
+                    }
                 }
             }
         }
@@ -41,13 +56,16 @@ impl AssetStore {
     }
 
     /// Stores bytes under their sha-256 and returns the hex hash. Existing
-    /// files with the same hash are left untouched.
+    /// files with the same hash are left untouched. Writes go to a temp
+    /// sibling + rename (shared `pulpit_db::write_atomic`): responses are
+    /// served `immutable`, so a torn write to the final name would be
+    /// cached forever by clients that happened to fetch it mid-write.
     pub fn import_bytes(&self, bytes: &[u8], ext: &str) -> std::io::Result<String> {
         let ext = normalize_ext(ext);
         let hash = hex::encode(Sha256::digest(bytes));
         let path = self.dir.join(format!("{hash}.{ext}"));
         if !path.exists() {
-            std::fs::write(&path, bytes)?;
+            pulpit_db::write_atomic(&path, bytes)?;
         }
         self.exts
             .lock()
@@ -360,6 +378,32 @@ mod tests {
         assert_eq!(parse_byte_range("bytes=5-2", 10), None);
         assert_eq!(parse_byte_range("items=0-1", 10), None);
         assert_eq!(parse_byte_range("bytes=0-1,3-4", 10), None); // multi-range: ignored
+    }
+
+    #[test]
+    fn corrupt_assets_are_purged_at_open_and_heal_on_import() {
+        let dir = tempfile::tempdir().unwrap();
+        // a file whose name claims a hash its content does not match:
+        // a torn write from a pre-rename crash, or tampering
+        let hash = hex::encode(Sha256::digest(b"good-bytes"));
+        let path = dir.path().join(format!("{hash}.png"));
+        std::fs::write(&path, b"truncated-or-tampered").unwrap();
+
+        let store = AssetStore::open(dir.path().to_path_buf()).unwrap();
+        assert!(
+            store.get(&hash).is_none(),
+            "corrupt entry must not be served"
+        );
+        assert!(store.content_type(&hash).is_none());
+        assert!(
+            !path.exists(),
+            "corrupt file is removed so a re-import can heal the entry"
+        );
+
+        // re-importing the honest content heals the entry
+        let healed = store.import_bytes(b"good-bytes", "png").unwrap();
+        assert_eq!(healed, hash);
+        assert_eq!(store.get(&hash).unwrap(), b"good-bytes");
     }
 
     #[test]

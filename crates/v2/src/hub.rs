@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use pulpit_db::ButtonRow;
 use pulpit_proto::Frame;
 use tokio::sync::mpsc;
 
@@ -31,6 +32,7 @@ impl V2Hub {
     /// hello/auth handshake succeeded. Until then broadcasts must skip the
     /// socket entirely - an unauthenticated peer must not receive pushes.
     pub fn create(&self, out: mpsc::Sender<super::session::WsOut>) -> Arc<V2Session> {
+        let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
         Arc::new(V2Session {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             out,
@@ -38,6 +40,8 @@ impl V2Hub {
             last_seen: AtomicU64::new(crate::unix_millis()),
             holds: Mutex::new(HashMap::new()),
             pump: Mutex::new(None),
+            cancel: cancel_tx,
+            held_keys: Mutex::new(HashMap::new()),
         })
     }
 
@@ -109,6 +113,8 @@ impl V2Hub {
     /// the frame is on the wire before the close - clients that understand
     /// it know the exit is deliberate, not a network drop. A wedged peer
     /// (full queue) misses the goodbye and just gets torn down at exit.
+    /// Every session is also cancelled so its task ends and releases any
+    /// keys it holds - the process dying would otherwise leave them down.
     pub fn shutdown(&self) {
         self.broadcast_frame(&Frame::bare(pulpit_proto::TYPE_SERVER_SHUTDOWN));
         let mut dead = Vec::new();
@@ -118,6 +124,7 @@ impl V2Hub {
                 if session.try_send(super::session::WsOut::Close).is_err() {
                     dead.push(session.id);
                 }
+                session.cancel_session();
             }
         }
         for id in dead {
@@ -137,6 +144,16 @@ pub struct V2Session {
     /// The connection's outbound pump; owned here so hub teardown can
     /// abort a pump stuck on a send that will never complete.
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Hub-side teardown signal (queue overflow, silence watchdog,
+    /// server exit): the session task selects on it so every teardown
+    /// path ends the task and runs its cleanup - a cancelled read loop
+    /// would otherwise linger as a zombie.
+    cancel: tokio::sync::watch::Sender<bool>,
+    /// Tiles with an un-ended key press-start. Only `key` tiles hold
+    /// anything down (tap-start is a no-op for every other kind), and
+    /// the release-phase exec must run on every teardown path
+    /// (docs/protocol-v2.md §6).
+    held_keys: Mutex<HashMap<i64, ButtonRow>>,
 }
 
 impl V2Session {
@@ -177,11 +194,52 @@ impl V2Session {
 
     /// Teardown from the hub side (queue overflow, silence watchdog):
     /// stop hold loops, ask the pump to close (a full queue means the
-    /// socket is wedged anyway) and abort the pump.
+    /// socket is wedged anyway), abort the pump and cancel the session
+    /// task so its tail cleanup always runs.
     pub fn shutdown(&self) {
         self.abort_holds();
         let _ = self.try_send(super::session::WsOut::Close);
         self.abort_pump();
+        self.cancel_session();
+    }
+
+    /// Fires the session task's cancellation signal. Safe to call from
+    /// anywhere, any number of times.
+    pub fn cancel_session(&self) {
+        self.cancel.send_replace(true);
+    }
+
+    /// A receiver that resolves once the session is cancelled. Fresh
+    /// subscriptions see a past cancellation immediately.
+    pub fn cancelled(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.cancel.subscribe()
+    }
+
+    /// Records a key press-start: the tile's release phase must run on
+    /// every teardown path if no `press-end` arrives.
+    pub fn key_pressed(&self, tile: i64, button: ButtonRow) {
+        self.held_keys
+            .lock()
+            .expect("session poisoned")
+            .insert(tile, button);
+    }
+
+    /// The matching `press-end` arrived: nothing left to release.
+    pub fn key_released(&self, tile: i64) {
+        self.held_keys
+            .lock()
+            .expect("session poisoned")
+            .remove(&tile);
+    }
+
+    /// Takes the tiles with un-ended key press-starts for release.
+    pub fn take_held_keys(&self) -> Vec<ButtonRow> {
+        self.held_keys
+            .lock()
+            .expect("session poisoned")
+            .drain()
+            .map(|(_, button)| button)
+            .collect()
     }
 
     pub fn set_device(&self, device: DeviceEntry) {
@@ -305,6 +363,13 @@ mod tests {
             }
         }
         assert_eq!(hub.count(), 0, "wedged session must be closed");
+        // The teardown must also end the session task: the cancel
+        // signal is what run() selects on (audit C2) - without it the
+        // read loop would linger as a zombie with no writer.
+        assert!(
+            *session.cancelled().borrow(),
+            "hub-side removal must cancel the session task"
+        );
     }
 
     #[test]
@@ -319,6 +384,16 @@ mod tests {
         stale.age_last_seen_by(10 * 60_000);
         hub.reap_silent(180_000);
         assert_eq!(hub.count(), 1, "fresh session survives the reap");
+        // the reaped session's task must end too (audit C2), and the
+        // survivor's must not
+        assert!(
+            *stale.cancelled().borrow(),
+            "the reaper must cancel the session task"
+        );
+        assert!(
+            !*fresh.cancelled().borrow(),
+            "the survivor must keep running"
+        );
         hub.broadcast_frame(&frame());
         assert_eq!(hub.count(), 1);
     }
@@ -337,5 +412,44 @@ mod tests {
         };
         assert!(text.contains("server.shutdown"));
         assert!(matches!(rx.blocking_recv().unwrap(), WsOut::Close));
+    }
+
+    #[test]
+    fn teardown_paths_cancel_the_session_task() {
+        let hub = V2Hub::new();
+        // overflow path
+        let (tx_full, _rx_full) = mpsc::channel(4);
+        let full = hub.create(tx_full);
+        hub.attach(&full);
+        let cancelled = full.cancelled();
+        assert!(!*cancelled.borrow(), "fresh session is not cancelled");
+        hub.remove(full.id);
+        assert!(
+            *cancelled.borrow(),
+            "hub-side removal must cancel the session task"
+        );
+
+        // reaper path
+        let (tx_stale, _rx_stale) = mpsc::channel(4);
+        let stale = hub.create(tx_stale);
+        hub.attach(&stale);
+        let cancelled = stale.cancelled();
+        stale.age_last_seen_by(10 * 60_000);
+        hub.reap_silent(180_000);
+        assert!(
+            *cancelled.borrow(),
+            "the reaper must cancel the session task"
+        );
+
+        // server exit path
+        let (tx_exit, _rx_exit) = mpsc::channel(8);
+        let exit = hub.create(tx_exit);
+        hub.attach(&exit);
+        let cancelled = exit.cancelled();
+        hub.shutdown();
+        assert!(
+            *cancelled.borrow(),
+            "server exit must cancel the session task"
+        );
     }
 }
