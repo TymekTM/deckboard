@@ -116,3 +116,18 @@ format, extension ids (`deckboard-system-info`, `deckboard-callurl`,
 (`DeckboardExtension`). The Tauri identifier change (`app.pulpit.desktop`)
 means the NSIS bundle installs next to, not over, the old build - a
 one-time manual uninstall.
+
+## ADR-012: Extensions are trusted user-installed code (stub)
+
+Status: stub recording current behavior, not a fresh decision. The
+extension host (crates/ext, ADR-011's copied `~/pulpitApp/extensions`)
+runs original-ecosystem packages with full user powers: unrestricted
+file reads/writes, `cmd` shell execution, arbitrary HTTP and `open`.
+There is no permission model and no sandbox; installing an extension is
+assumed to be as deliberate as installing any desktop app. This is a
+different trust boundary from ADR-005 (web widgets share one WebView but
+are proxy-gated); extensions are NOT proxy-gated. Hardening so far
+bounds robustness, not trust: per-call HTTP timeouts, load/dispatch
+timeouts for wedged packages, private per-open extraction dirs. If a
+third-party extension marketplace or sideloaded-package sharing ever
+lands, revisit with a permission model before that - not after.
