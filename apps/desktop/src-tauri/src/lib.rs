@@ -287,7 +287,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             port,
             pairing: None,
             v2: None,
-            hotkey: std::sync::Mutex::new("Ctrl+Alt+D".to_string()),
+            hotkey: std::sync::Mutex::new(DEFAULT_HOTKEY.to_string()),
             settings_path: None,
         };
     }
@@ -636,12 +636,19 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         }
     });
 
-    let hotkey = std::fs::read_to_string(&settings_path)
+    let mut hotkey = std::fs::read_to_string(&settings_path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("hotkey").and_then(|h| h.as_str()).map(str::to_string))
-        .unwrap_or_else(|| "Ctrl+Alt+D".to_string());
-    register_touch_mode_hotkey(&app, &hotkey);
+        .unwrap_or_else(|| DEFAULT_HOTKEY.to_string());
+    if let Err(e) = register_touch_mode_hotkey(&app, &hotkey) {
+        // fallback like the original: a stored combo another app now owns
+        // must not leave the user without any hotkey
+        tracing::warn!("stored hotkey unusable ({e}) - falling back to {DEFAULT_HOTKEY}");
+        if register_touch_mode_hotkey(&app, DEFAULT_HOTKEY).is_ok() {
+            hotkey = DEFAULT_HOTKEY.to_string();
+        }
+    }
 
     DesktopState {
         backend: Some(backend),
@@ -855,13 +862,14 @@ fn toggle_main_window(app: &AppHandle) {
 /// (`pulpitApp/editor.json`, default Ctrl+Alt+D - the original's
 /// `toggleTouchMode` concept); an unusable stored combo falls back to the
 /// default with a warning.
-fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) {
+fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
     let shortcut = match combo.parse::<tauri_plugin_global_shortcut::Shortcut>() {
         Ok(s) => s,
         Err(_) => {
-            tracing::warn!("invalid hotkey \"{combo}\" - touch-mode hotkey not registered");
-            return;
+            let msg = format!("invalid hotkey \"{combo}\" - use e.g. Ctrl+Alt+D");
+            tracing::warn!("{msg}");
+            return Err(msg);
         }
     };
     let result = app
@@ -871,8 +879,36 @@ fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) {
                 let _ = app.emit("toggle-touch-mode", ());
             }
         });
-    if let Err(e) = result {
-        tracing::warn!("could not register hotkey \"{combo}\": {e}");
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = format!("could not register hotkey \"{combo}\": {e}");
+            tracing::warn!("{msg}");
+            Err(msg)
+        }
+    }
+}
+
+/// The default touch-mode hotkey, used when a stored combo is unusable.
+const DEFAULT_HOTKEY: &str = "Ctrl+Alt+D";
+
+/// What a hotkey change (012 A4) has to do with (old, new): re-registering
+/// the combo that is already active would fail with "already registered",
+/// so an identical pair is a no-op; anything else registers the new combo
+/// first so a failure leaves the old one working. A stored combo that no
+/// longer parses must not block a change - there is nothing to lose.
+enum HotkeyPlan {
+    Noop,
+    Register,
+}
+
+fn hotkey_plan(old: &str, new: &str) -> Result<HotkeyPlan, String> {
+    let new_shortcut: tauri_plugin_global_shortcut::Shortcut = new
+        .parse()
+        .map_err(|_| format!("invalid shortcut \"{new}\" - use e.g. Ctrl+Alt+D"))?;
+    match old.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+        Ok(old_shortcut) if old_shortcut == new_shortcut => Ok(HotkeyPlan::Noop),
+        _ => Ok(HotkeyPlan::Register),
     }
 }
 
@@ -1120,6 +1156,34 @@ mod tests {
         let url = pairing_shape("192.168.0.97", 8500, "ABCD2345");
         assert_eq!(url, "pulpit://192.168.0.97:8500?pair=ABCD2345");
     }
+
+    #[test]
+    fn hotkey_plan_rejects_an_unparseable_new_combo() {
+        assert!(hotkey_plan("Ctrl+Alt+D", "Not+A+Combo").is_err());
+    }
+
+    #[test]
+    fn hotkey_plan_treats_re_saving_the_same_combo_as_a_noop() {
+        // re-registering the shortcut that is already registered would
+        // fail with "already registered" - the plan must say Noop
+        assert!(matches!(
+            hotkey_plan("Ctrl+Alt+D", "Ctrl+Alt+D"),
+            Ok(HotkeyPlan::Noop)
+        ));
+    }
+
+    #[test]
+    fn hotkey_plan_swaps_to_a_different_combo() {
+        assert!(matches!(
+            hotkey_plan("Ctrl+Alt+D", "Ctrl+Alt+P"),
+            Ok(HotkeyPlan::Register)
+        ));
+        // a stored combo that no longer parses must not block a change
+        assert!(matches!(
+            hotkey_plan("hand-edited junk", "Ctrl+Alt+P"),
+            Ok(HotkeyPlan::Register)
+        ));
+    }
 }
 
 /// The QR payload for pairing, kept separate so the command body stays
@@ -1320,25 +1384,28 @@ async fn get_settings(state: State<'_, DesktopState>) -> Result<serde_json::Valu
     Ok(serde_json::json!({ "hotkey": hotkey }))
 }
 
-/// Validate, register and persist a new touch-mode hotkey combo.
+/// Validate, register and persist a new touch-mode hotkey combo. The new
+/// combo is registered BEFORE the old one is unregistered (012 A4): a
+/// registration failure returns `Err` and leaves the previous hotkey
+/// working, persisted and shown, instead of leaving no hotkey at all.
 #[tauri::command]
 async fn set_touch_mode_hotkey(
     app: AppHandle,
     state: State<'_, DesktopState>,
     combo: String,
 ) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
-
-    // validation only: registration re-parses the combo
-    let _validated: Shortcut = combo
-        .parse()
-        .map_err(|_| format!("invalid shortcut \"{combo}\" - use e.g. Ctrl+Alt+D"))?;
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     let old = state.hotkey.lock().unwrap().clone();
-    if let Ok(old_shortcut) = old.parse::<Shortcut>() {
+    match hotkey_plan(&old, &combo)? {
+        HotkeyPlan::Noop => return Ok(()),
+        HotkeyPlan::Register => {}
+    }
+
+    register_touch_mode_hotkey(&app, &combo)?;
+    if let Ok(old_shortcut) = old.parse::<tauri_plugin_global_shortcut::Shortcut>() {
         let _ = app.global_shortcut().unregister(old_shortcut);
     }
-    register_touch_mode_hotkey(&app, &combo);
     *state.hotkey.lock().unwrap() = combo.clone();
 
     if let Some(path) = &state.settings_path {
