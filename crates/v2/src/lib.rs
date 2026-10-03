@@ -64,7 +64,9 @@ pub async fn run_flusher(engine: Arc<StateEngine>, hub: Arc<V2Hub>, interval: Du
         if !changes.is_empty() {
             let frame = Frame::push_typed(
                 TYPE_STATE_PATCH,
-                &StatePatch { changes: changes.clone() },
+                &StatePatch {
+                    changes: changes.clone(),
+                },
             );
             // A session mid-handshake must not see a patch before its
             // welcome; withhold it and re-arm the channels - the full

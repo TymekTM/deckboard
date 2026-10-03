@@ -47,7 +47,8 @@ impl V2Hub {
     }
 
     /// Adds an authenticated session to the broadcast fan-out.
-    pub fn attach(&self, session: &Arc<V2Session>) {        self.sessions
+    pub fn attach(&self, session: &Arc<V2Session>) {
+        self.sessions
             .lock()
             .expect("v2 hub poisoned")
             .insert(session.id, session.clone());

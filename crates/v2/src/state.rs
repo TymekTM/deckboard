@@ -235,7 +235,8 @@ impl StateEngine {
     }
 
     /// Latest value per changed channel; called by the flusher task.
-    pub fn drain_dirty(&self) -> Vec<ChannelValue> {        let mut inner = self.inner.lock().expect("state engine poisoned");
+    pub fn drain_dirty(&self) -> Vec<ChannelValue> {
+        let mut inner = self.inner.lock().expect("state engine poisoned");
         let dirty = std::mem::take(&mut inner.dirty);
         dirty
             .into_iter()
