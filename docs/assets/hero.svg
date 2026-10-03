@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">Pulpit: a desktop board editor mirrored on a tablet</title>
+  <desc id="hero-desc">A Windows desktop board editor with button, toggle, slider and live status tiles, connected over the local network to a tablet showing the same board.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0f14"/>
+      <stop offset="1" stop-color="#0f1624"/>
+    </linearGradient>
+    <radialGradient id="glowBlue" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#58a6ff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#58a6ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowGreen" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#3fb950" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#3fb950" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="16" height="16" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#21262d"/>
+    </pattern>
+    <filter id="blur" x="-30%" y="-60%" width="160%" height="220%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+
+    <!-- The board, drawn once and shown on the desktop and on the tablet. 360 x 232. -->
+    <g id="board" font-family="sans-serif" font-size="12">
+      <!-- tile A: button with a press glow -->
+      <rect x="-2" y="-2" width="114" height="70" rx="12" fill="#58a6ff" filter="url(#blur)" opacity="0">
+        <animate attributeName="opacity" values="0;0;0.55;0.15;0" keyTimes="0;0.55;0.62;0.8;1" dur="5s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="0" y="0" width="110" height="66" rx="10" fill="#161b22" stroke="#30363d"/>
+      <rect x="0" y="0" width="110" height="66" rx="10" fill="#58a6ff" opacity="0">
+        <animate attributeName="opacity" values="0;0;0.28;0.08;0" keyTimes="0;0.55;0.62;0.8;1" dur="5s" repeatCount="indefinite"/>
+      </rect>
+      <polygon points="47,18 47,38 64,28" fill="#58a6ff"/>
+      <text x="55" y="57" text-anchor="middle" fill="#c9d1d9">Macro</text>
+
+      <!-- tile B: toggle with two states -->
+      <rect x="118" y="0" width="110" height="66" rx="10" fill="#161b22" stroke="#30363d"/>
+      <rect x="143" y="17" width="50" height="26" rx="13" fill="#3fb950">
+        <animate attributeName="fill" values="#3fb950;#3fb950;#30363d;#30363d;#3fb950" keyTimes="0;0.4;0.45;0.9;1" dur="14s" repeatCount="indefinite"/>
+      </rect>
+      <circle cx="180" cy="30" r="10" fill="#e6edf3">
+        <animate attributeName="cx" values="180;180;156;156;180" keyTimes="0;0.4;0.45;0.9;1" dur="14s" repeatCount="indefinite"/>
+      </circle>
+      <text x="173" y="57" text-anchor="middle" fill="#c9d1d9">Mute</text>
+
+      <!-- tile C: button -->
+      <rect x="236" y="0" width="124" height="66" rx="10" fill="#161b22" stroke="#30363d"/>
+      <rect x="284" y="21" width="28" height="18" rx="4" fill="none" stroke="#d29922" stroke-width="2"/>
+      <rect x="291" y="17" width="14" height="5" rx="2" fill="#d29922"/>
+      <circle cx="298" cy="30" r="5" fill="none" stroke="#d29922" stroke-width="2"/>
+      <text x="298" y="57" text-anchor="middle" fill="#c9d1d9">Screenshot</text>
+
+      <!-- slider tile -->
+      <rect x="0" y="74" width="360" height="50" rx="10" fill="#161b22" stroke="#30363d"/>
+      <text x="16" y="103" fill="#c9d1d9">Volume</text>
+      <rect x="86" y="96" width="254" height="6" rx="3" fill="#30363d"/>
+      <rect x="86" y="96" width="150" height="6" rx="3" fill="#58a6ff">
+        <animate attributeName="width" values="150;176;150" dur="7s" repeatCount="indefinite"/>
+      </rect>
+      <circle cx="236" cy="99" r="13" fill="#58a6ff" opacity="0.18">
+        <animate attributeName="cx" values="236;262;236" dur="7s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="236" cy="99" r="8" fill="#e6edf3">
+        <animate attributeName="cx" values="236;262;236" dur="7s" repeatCount="indefinite"/>
+      </circle>
+
+      <!-- live status rows -->
+      <rect x="0" y="132" width="360" height="100" rx="10" fill="#161b22" stroke="#30363d"/>
+
+      <!-- CPU -->
+      <circle cx="18" cy="154" r="4" fill="#3fb950" opacity="0.5">
+        <animate attributeName="r" values="4;11" dur="2.2s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.5;0" dur="2.2s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="18" cy="154" r="4" fill="#3fb950">
+        <animate attributeName="opacity" values="1;0.55;1" dur="2.2s" repeatCount="indefinite"/>
+      </circle>
+      <text x="34" y="158" fill="#c9d1d9">CPU</text>
+      <rect x="100" y="150" width="176" height="8" rx="4" fill="#30363d"/>
+      <rect x="100" y="150" width="58" height="8" rx="4" fill="#3fb950">
+        <animate attributeName="width" values="58;72;58" dur="6s" repeatCount="indefinite"/>
+      </rect>
+      <text x="292" y="158" fill="#8b949e">33%
+        <animate attributeName="opacity" calcMode="discrete" values="1;0;1;1" keyTimes="0;0.25;0.75;1" dur="6s" repeatCount="indefinite"/>
+      </text>
+      <text x="292" y="158" fill="#8b949e" opacity="0">41%
+        <animate attributeName="opacity" calcMode="discrete" values="0;1;0;0" keyTimes="0;0.25;0.75;1" dur="6s" repeatCount="indefinite"/>
+      </text>
+
+      <!-- RAM -->
+      <circle cx="18" cy="182" r="4" fill="#d29922" opacity="0.5">
+        <animate attributeName="r" values="4;11" dur="2.2s" begin="0.7s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.5;0" dur="2.2s" begin="0.7s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="18" cy="182" r="4" fill="#d29922">
+        <animate attributeName="opacity" values="1;0.55;1" dur="2.2s" begin="0.7s" repeatCount="indefinite"/>
+      </circle>
+      <text x="34" y="186" fill="#c9d1d9">RAM</text>
+      <rect x="100" y="178" width="176" height="8" rx="4" fill="#30363d"/>
+      <rect x="100" y="178" width="107" height="8" rx="4" fill="#d29922"/>
+      <text x="292" y="186" fill="#8b949e">61%</text>
+
+      <!-- AI plan limit -->
+      <circle cx="18" cy="210" r="4" fill="#3fb950" opacity="0.5">
+        <animate attributeName="r" values="4;11" dur="2.2s" begin="1.4s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.5;0" dur="2.2s" begin="1.4s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="18" cy="210" r="4" fill="#3fb950">
+        <animate attributeName="opacity" values="1;0.55;1" dur="2.2s" begin="1.4s" repeatCount="indefinite"/>
+      </circle>
+      <text x="34" y="214" fill="#c9d1d9">GLM 5h</text>
+      <rect x="100" y="206" width="176" height="8" rx="4" fill="#30363d"/>
+      <rect x="100" y="206" width="58" height="8" rx="4" fill="#3fb950"/>
+      <text x="292" y="214" fill="#8b949e">67% left</text>
+    </g>
+  </defs>
+
+  <!-- backdrop -->
+  <rect x="0.5" y="0.5" width="1199" height="359" rx="16" fill="url(#bg)" stroke="#30363d"/>
+  <ellipse cx="330" cy="180" rx="360" ry="170" fill="url(#glowGreen)"/>
+  <ellipse cx="960" cy="180" rx="360" ry="170" fill="url(#glowBlue)"/>
+
+  <g font-family="sans-serif">
+    <text x="40" y="27" font-size="14" font-weight="bold" letter-spacing="4" fill="#8b949e">PULPIT</text>
+    <text x="1160" y="27" font-size="12" text-anchor="end" fill="#6e7681">v1.3.0</text>
+  </g>
+
+  <!-- desktop window -->
+  <rect x="40" y="40" width="600" height="280" rx="12" fill="#0d1117" stroke="#30363d"/>
+  <path d="M40,70 V52 a12,12 0 0 1 12,-12 H628 a12,12 0 0 1 12,12 V70 Z" fill="#161b22"/>
+  <line x1="40" y1="70" x2="640" y2="70" stroke="#30363d"/>
+  <circle cx="58" cy="55" r="5" fill="#ff5f56"/>
+  <circle cx="76" cy="55" r="5" fill="#ffbd2e"/>
+  <circle cx="94" cy="55" r="5" fill="#27c93f"/>
+  <g font-family="sans-serif" font-size="12">
+    <text x="340" y="59" text-anchor="middle" fill="#8b949e">Pulpit - board editor</text>
+    <text x="578" y="59" text-anchor="end" font-size="11" fill="#8b949e">server :8500</text>
+  </g>
+  <circle cx="591" cy="55" r="4" fill="#3fb950" opacity="0.5">
+    <animate attributeName="r" values="4;10" dur="2.2s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.5;0" dur="2.2s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="591" cy="55" r="4" fill="#3fb950">
+    <animate attributeName="opacity" values="1;0.55;1" dur="2.2s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- editor canvas with visible grid -->
+  <rect x="48" y="74" width="380" height="240" rx="8" fill="#0b0f14"/>
+  <rect x="48" y="74" width="380" height="240" rx="8" fill="url(#dots)"/>
+  <use href="#board" transform="translate(58,79)"/>
+
+  <!-- selection around tile A -->
+  <rect x="55" y="76" width="116" height="72" rx="12" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="4 3">
+    <animate attributeName="stroke-dashoffset" from="0" to="-14" dur="1.2s" repeatCount="indefinite"/>
+  </rect>
+  <g fill="#58a6ff">
+    <rect x="52" y="73" width="6" height="6"/>
+    <rect x="168" y="73" width="6" height="6"/>
+    <rect x="52" y="145" width="6" height="6"/>
+    <rect x="168" y="145" width="6" height="6"/>
+  </g>
+
+  <!-- inspector -->
+  <rect x="440" y="74" width="184" height="240" rx="10" fill="#161b22" stroke="#30363d"/>
+  <g font-family="sans-serif" font-size="11">
+    <text x="456" y="98" fill="#8b949e">Press mode</text>
+    <rect x="456" y="106" width="152" height="28" rx="7" fill="#0d1117" stroke="#30363d"/>
+    <rect x="458" y="108" width="48" height="24" rx="5" fill="#1f6feb"/>
+    <text x="482" y="124" text-anchor="middle" font-size="10" fill="#ffffff">button</text>
+    <text x="532" y="124" text-anchor="middle" font-size="10" fill="#8b949e">toggle</text>
+    <text x="583" y="124" text-anchor="middle" font-size="10" fill="#8b949e">slider</text>
+
+    <text x="456" y="162" fill="#8b949e">Dual state</text>
+    <rect x="456" y="170" width="72" height="24" rx="6" fill="#0c2d6b" stroke="#58a6ff"/>
+    <text x="492" y="186" text-anchor="middle" font-size="10" fill="#c9d1d9">state 1</text>
+    <rect x="536" y="170" width="72" height="24" rx="6" fill="#0f3d1e" stroke="#3fb950"/>
+    <text x="572" y="186" text-anchor="middle" font-size="10" fill="#c9d1d9">state 2</text>
+
+    <text x="456" y="232" fill="#8b949e">Visible grid</text>
+    <rect x="568" y="218" width="40" height="20" rx="10" fill="#238636"/>
+    <circle cx="598" cy="228" r="7" fill="#ffffff"/>
+
+    <line x1="456" y1="250" x2="608" y2="250" stroke="#30363d"/>
+    <rect x="456" y="262" width="152" height="36" rx="8" fill="#238636"/>
+    <text x="532" y="285" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">Touch mode</text>
+  </g>
+
+  <!-- link -->
+  <path id="link" d="M640,180 H760" fill="none" stroke="#58a6ff" stroke-width="2" stroke-dasharray="6 8" opacity="0.85">
+    <animate attributeName="stroke-dashoffset" from="0" to="-14" dur="1.4s" repeatCount="indefinite"/>
+  </path>
+  <circle r="3.5" fill="#e6edf3">
+    <animateMotion dur="2.4s" repeatCount="indefinite" path="M640,180 H760"/>
+  </circle>
+  <circle cx="640" cy="180" r="4" fill="#58a6ff"/>
+  <circle cx="760" cy="180" r="4" fill="#58a6ff"/>
+  <rect x="672" y="165" width="56" height="30" rx="8" fill="#161b22" stroke="#30363d"/>
+  <text x="700" y="185" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#c9d1d9">:8500</text>
+
+  <!-- tablet -->
+  <rect x="760" y="40" width="400" height="280" rx="28" fill="#1c2128" stroke="#444c56" stroke-width="1.5"/>
+  <circle cx="768" cy="180" r="2.5" fill="#30363d"/>
+  <rect x="776" y="56" width="368" height="248" rx="14" fill="#0d1117"/>
+  <use href="#board" transform="translate(780,64)"/>
+
+  <g font-family="sans-serif" font-size="12" fill="#8b949e" text-anchor="middle">
+    <text x="340" y="344">Desktop: Rust + Tauri, editor and touch mode</text>
+    <text x="960" y="344">Tablet: stock Deckboard client or native Pulpit app</text>
+  </g>
+</svg>
