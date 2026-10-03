@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 
@@ -94,6 +94,12 @@ async function refreshDevices() {
     devices.value = [];
   }
 }
+
+// a pairing can complete while the overlay is open: refetch when the
+// devices tile is (re)focused
+watch(focused, (tile) => {
+  if (tile === "devices") refreshDevices();
+});
 
 async function revokeDevice(device) {
   const ok = await ask(

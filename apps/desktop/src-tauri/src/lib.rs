@@ -1140,10 +1140,8 @@ struct PairingOffer {
 
 #[tauri::command]
 fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, String> {
-    let pairing = state.pairing.as_ref().ok_or_else(|| {
-        "protocol v2 unavailable (devices.json or asset store failed to load)".to_string()
-    })?;
-    let code = pairing.new_code();
+    let v2 = v2_or_err(&state)?;
+    let code = v2.pairing.new_code();
     let addresses = lan_ipv4s()
         .into_iter()
         .map(|(name, ipv4)| {
@@ -1221,19 +1219,23 @@ fn revoke_and_teardown(devices: &pulpit_v2::DeviceStore, hub: &pulpit_v2::V2Hub,
     removed
 }
 
+/// The v2 stack for the pairing/device commands; `None` means it failed
+/// to start (bad devices.json or asset store) and the UI hides the
+/// feature - the same message every such command reports.
+fn v2_or_err(state: &DesktopState) -> Result<&Arc<pulpit_v2::V2State>, String> {
+    state.v2.as_ref().ok_or_else(|| {
+        "protocol v2 unavailable (devices.json or asset store failed to load)".to_string()
+    })
+}
+
 #[tauri::command]
 fn list_devices(state: State<'_, DesktopState>) -> Result<Vec<DeviceInfo>, String> {
-    let v2 = state.v2.as_ref().ok_or_else(|| {
-        "protocol v2 unavailable (devices.json or asset store failed to load)".to_string()
-    })?;
-    Ok(device_infos(&v2.devices))
+    Ok(device_infos(&v2_or_err(&state)?.devices))
 }
 
 #[tauri::command]
 fn revoke_device(id: String, state: State<'_, DesktopState>) -> Result<bool, String> {
-    let v2 = state.v2.as_ref().ok_or_else(|| {
-        "protocol v2 unavailable (devices.json or asset store failed to load)".to_string()
-    })?;
+    let v2 = v2_or_err(&state)?;
     Ok(revoke_and_teardown(&v2.devices, &v2.hub, &id))
 }
 
