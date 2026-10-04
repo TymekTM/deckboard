@@ -1158,28 +1158,30 @@ enum Job {
 pub struct DiscordClient {
     jobs: std::sync::Mutex<std::sync::mpsc::Sender<Job>>,
     /// Set after every queued job so the actor's idle pipe read ends at
-    /// once instead of at the tick.
-    wake: WakeEvent,
+    /// once instead of at the tick. Shared with the actor thread, so the
+    /// handle closes only after both are done with it.
+    wake: std::sync::Arc<WakeEvent>,
 }
 
-/// Non-owning copy of the wake handle for the actor thread and the serve
-/// path; the owning [`WakeEvent`] in [`DiscordClient`] closes it.
+/// Non-owning copy of the wake handle for the serve path; the actor keeps
+/// the owning [`WakeEvent`] alive for as long as it uses this copy.
 #[derive(Clone, Copy)]
 struct WakeHandle(*mut c_void);
 
 unsafe impl Send for WakeHandle {}
 
 /// Auto-reset event the API threads signal to interrupt the actor's idle
-/// pipe read ([`Conn::serve`] waits on it next to the read event). Owned
-/// by the [`DiscordClient`] handle; the actor thread only borrows the raw
-/// handle, so signaling from the API thread is safe (SetEvent is
-/// thread-safe on Windows) and the actor exits before or concurrently
-/// with the handle being closed.
+/// pipe read ([`Conn::serve`] waits on it next to the read event). The
+/// [`DiscordClient`] and the actor thread share it through an `Arc`, so
+/// dropping the client never closes a handle the actor is still waiting
+/// on (a closed handle value can be reused by an unrelated object).
 struct WakeEvent(*mut c_void);
 
-// SAFETY: the raw handle is only ever passed to SetEvent (any thread) and
-// WaitForMultipleObjects (actor thread); it carries no interior state.
+// SAFETY: the raw handle is only ever passed to SetEvent (any thread,
+// thread-safe on Windows) and WaitForMultipleObjects (actor thread); it
+// carries no interior state, and CloseHandle runs once, on the last drop.
 unsafe impl Send for WakeEvent {}
+unsafe impl Sync for WakeEvent {}
 
 impl WakeEvent {
     fn new() -> WakeEvent {
@@ -1218,8 +1220,8 @@ impl DiscordClient {
     /// session setup; every later one is a single round trip.
     pub fn spawn() -> DiscordClient {
         let (tx, rx) = std::sync::mpsc::channel();
-        let wake = WakeEvent::new();
-        let thread_wake = wake.handle();
+        let wake = std::sync::Arc::new(WakeEvent::new());
+        let thread_wake = wake.clone();
         std::thread::Builder::new()
             .name("discord-rpc".into())
             .spawn(move || actor_loop(rx, thread_wake, None))
@@ -1291,7 +1293,7 @@ fn handle_job(conn: &mut Option<Conn>, job: Job) -> bool {
 
 fn actor_loop(
     rx: std::sync::mpsc::Receiver<Job>,
-    wake: WakeHandle,
+    wake: std::sync::Arc<WakeEvent>,
     mut conn: Option<Conn>,
 ) {
     loop {
@@ -1314,7 +1316,7 @@ fn actor_loop(
         // execute() queues a job, so the long tick costs no action
         // latency. A transport failure drops the session so the next
         // action reconnects instead of failing.
-        if conn.as_mut().unwrap().serve(IDLE_TICK, wake).is_err() {
+        if conn.as_mut().unwrap().serve(IDLE_TICK, wake.handle()).is_err() {
             conn = None;
             continue;
         }
@@ -1832,8 +1834,8 @@ mod tests {
             cache: None,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let wake = WakeEvent::new();
-        let thread_wake = wake.handle();
+        let wake = std::sync::Arc::new(WakeEvent::new());
+        let thread_wake = wake.clone();
         std::thread::spawn(move || actor_loop(rx, thread_wake, Some(conn)));
         let client = DiscordClient {
             jobs: std::sync::Mutex::new(tx),
