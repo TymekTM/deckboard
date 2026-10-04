@@ -19,6 +19,13 @@ pub struct AssetStore {
     /// strings on every generation bump; the fingerprint key (not the URL
     /// itself) keeps multi-MB base64 strings out of memory.
     url_hashes: Mutex<HashMap<[u8; 16], String>>,
+    /// Hashes some board image resolved to (every board image goes
+    /// through [`AssetStore::import_data_url`]). [`AssetStore::remove`]
+    /// refuses them: the store is content-addressed, so a cover the
+    /// Spotify art LRU imported can be byte-identical to a board image,
+    /// in either order. Never shrinks - at worst one stale pin keeps a
+    /// file that would otherwise have been evicted.
+    pinned: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AssetStore {
@@ -52,6 +59,7 @@ impl AssetStore {
             dir,
             exts: Mutex::new(exts),
             url_hashes: Mutex::new(HashMap::new()),
+            pinned: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -86,7 +94,7 @@ impl AssetStore {
             .expect("asset store poisoned")
             .get(&fingerprint)
         {
-            return Some(hash.clone());
+            return Some(hash.clone()); // pinned when first imported
         }
         let rest = url.strip_prefix("data:")?;
         let (head, payload) = rest.split_once(',')?;
@@ -96,6 +104,10 @@ impl AssetStore {
             .decode(payload)
             .ok()?;
         let hash = self.import_bytes(&bytes, ext).ok()?;
+        self.pinned
+            .lock()
+            .expect("asset store poisoned")
+            .insert(hash.clone());
         let mut urls = self.url_hashes.lock().expect("asset store poisoned");
         // distinct images per install are far below this; the clear is a
         // safety valve so a pathological input cannot grow the map forever
@@ -116,12 +128,15 @@ impl AssetStore {
         std::fs::read(self.dir.join(format!("{hash}.{ext}"))).ok()
     }
 
-    /// Deletes an entry. The store is content-addressed, so callers that
-    /// imported the bytes themselves (the Spotify art LRU) can never
-    /// collide with an image some board references - retention is safe
-    /// when only own imports are removed. Returns whether the entry
-    /// existed; a file already gone counts as removed.
+    /// Deletes an entry (the Spotify art LRU's retention). The store is
+    /// content-addressed, so bytes a caller imported itself can still be
+    /// a board image too: hashes any board image resolved to are pinned
+    /// and never deleted (returns false). Otherwise returns whether the
+    /// entry existed; a file already gone counts as removed.
     pub fn remove(&self, hash: &str) -> bool {
+        if self.pinned.lock().expect("asset store poisoned").contains(hash) {
+            return false;
+        }
         let ext = self
             .exts
             .lock()
@@ -307,6 +322,38 @@ pub fn content_type(ext: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_never_deletes_a_board_image_whatever_the_import_order() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let store = AssetStore::open(dir.path().to_path_buf()).unwrap();
+        let url = |bytes: &[u8]| {
+            format!(
+                "data:image/jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )
+        };
+
+        // board first, then the same bytes arrive as album art
+        let board = store.import_data_url(&url(b"cover-a")).unwrap();
+        let art = store.import_bytes(b"cover-a", "jpg").unwrap();
+        assert_eq!(art, board, "content-addressed: one entry");
+        assert!(!store.remove(&art), "a board image is pinned");
+        assert!(store.get(&board).is_some());
+
+        // album art first, then a board picks up the same bytes
+        let art = store.import_bytes(b"cover-b", "jpg").unwrap();
+        let board = store.import_data_url(&url(b"cover-b")).unwrap();
+        assert_eq!(art, board);
+        assert!(!store.remove(&art));
+        assert!(store.get(&board).is_some());
+
+        // bytes no board uses are deleted
+        let own = store.import_bytes(b"cover-c", "jpg").unwrap();
+        assert!(store.remove(&own));
+        assert!(store.get(&own).is_none());
+    }
 
     #[test]
     fn import_is_idempotent_by_hash() {

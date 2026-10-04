@@ -75,9 +75,9 @@ fn lru_lookup(entries: &mut VecDeque<(String, String)>, url: &str) -> Option<Str
 
 /// Insert a freshly imported entry and evict past the cap, handing every
 /// evicted hash not still referenced by another URL to `remove` (the
-/// caller deletes it from the AssetStore; the hashes in this list are
-/// only ever ones this module imported, so retention cannot touch board
-/// images).
+/// caller deletes it from the AssetStore, which refuses any hash a board
+/// image resolved to - covers are content-addressed and can be
+/// byte-identical to a board image).
 fn lru_remember(
     entries: &mut VecDeque<(String, String)>,
     url: String,
