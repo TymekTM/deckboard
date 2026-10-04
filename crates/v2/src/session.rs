@@ -142,7 +142,17 @@ async fn run_session(
     // 1) hello within the timeout, or the connection dies.
     let frame = match tokio::time::timeout(state.config.hello_timeout, next_text(stream)).await {
         Ok(Some(Ok(frame))) => frame,
-        Ok(Some(Err(_))) | Ok(None) => return End::Closed,
+        // Unparseable text is a protocol violation, not a silent drop:
+        // answer `bad-frame` like the post-handshake loop does (NET-05),
+        // then close - there is no session to continue with.
+        Ok(Some(Err(_))) => {
+            session.send_frame(&Frame::push(
+                TYPE_ERROR,
+                json!({"code": error_code::BAD_FRAME, "message": "hello payload"}),
+            ));
+            return End::Fatal;
+        }
+        Ok(None) => return End::Closed,
         Err(_) => {
             session.send_frame(&Frame::push(
                 TYPE_ERROR,
