@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 530" width="1200" height="530" role="img" aria-labelledby="arch-title arch-desc">
   <title id="arch-title">Pulpit architecture</title>
-  <desc id="arch-desc">The Windows desktop app (editor, touch mode and an embedded server on port 8500) talks to the stock Deckboard Android client over the legacy APP_CUSTOM_VALUE protocol and to the native Pulpit Android app over v2 sessions, with mDNS discovery and numeric-code pairing. AI usage data from z.ai GLM, Claude, Codex and OpenRouter feeds the desktop.</desc>
+  <desc id="arch-desc">The Windows desktop app (editor, touch mode and an embedded server on port 8500) talks to the stock Deckboard Android client over the legacy APP_CUSTOM_VALUE protocol and to the native Pulpit Android app over v2 sessions, with mDNS discovery and pairing by code comparison. AI usage data from z.ai GLM, Claude, Codex and OpenRouter feeds the desktop.</desc>
 
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -44,7 +44,7 @@
   <g font-family="sans-serif" font-size="11" text-anchor="middle" fill="#c9d1d9">
     <rect x="62" y="240" width="108" height="40" rx="8" fill="#0d1117" stroke="#3fb950"/>
     <text x="116" y="257">sysinfo</text>
-    <text x="116" y="271" fill="#8b949e">CPU, RAM, audio</text>
+    <text x="116" y="271" fill="#8b949e">CPU and RAM load</text>
     <rect x="182" y="240" width="108" height="40" rx="8" fill="#0d1117" stroke="#a371f7"/>
     <text x="236" y="257">.asar extensions</text>
     <text x="236" y="271" fill="#8b949e">user plugins</text>
@@ -133,21 +133,21 @@
   </path>
   <polygon points="800,462 790,457 790,467" fill="#a371f7"/>
   <rect x="470" y="450" width="290" height="24" rx="8" fill="#0d1117" stroke="#a371f7"/>
-  <text x="615" y="466" font-family="sans-serif" font-size="11" text-anchor="middle" fill="#c9d1d9">_pulpit._tcp discovery + numeric-code pairing</text>
+  <text x="615" y="466" font-family="sans-serif" font-size="11" text-anchor="middle" fill="#c9d1d9">_pulpit._tcp discovery + code-comparison pairing</text>
 
   <!-- ===== tablets ===== -->
   <rect x="800" y="320" width="370" height="80" rx="12" fill="#0d1117" stroke="#58a6ff"/>
   <g font-family="sans-serif">
     <text x="820" y="350" font-size="14" font-weight="bold" fill="#e6edf3">Stock Deckboard Android client</text>
     <text x="820" y="370" font-size="12" fill="#8b949e">Deckboard 3.x, Free and Pro</text>
-    <text x="820" y="388" font-size="11" fill="#8b949e">scan the QR in "Connect a tablet"</text>
+    <text x="820" y="388" font-size="11" fill="#8b949e">scan the QR in Settings: Stock client</text>
   </g>
 
   <rect x="800" y="410" width="370" height="90" rx="12" fill="#0d1117" stroke="#3fb950"/>
   <g font-family="sans-serif">
     <text x="820" y="438" font-size="14" font-weight="bold" fill="#e6edf3">Pulpit Android app</text>
     <text x="820" y="458" font-size="12" fill="#8b949e">native client, Kotlin / Compose</text>
-    <text x="820" y="478" font-size="11" fill="#8b949e">browses mDNS, pairs with a numeric code</text>
+    <text x="820" y="478" font-size="11" fill="#8b949e">browses mDNS, pairs by comparing a code</text>
   </g>
 
   <!-- ===== legend ===== -->
