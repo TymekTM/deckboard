@@ -1,8 +1,8 @@
 # Pulpit
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/TymekTM/deckboard)](../../releases/latest)
-[![CI](https://github.com/TymekTM/deckboard/actions/workflows/ci.yml/badge.svg?branch=main)](../../actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/TymekTM/deckboard)](https://github.com/TymekTM/deckboard/releases/latest)
+[![CI](https://github.com/TymekTM/deckboard/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TymekTM/deckboard/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Android-blue)
 ![Rust](https://img.shields.io/badge/Rust-stable%20MSVC-orange)
 
@@ -40,9 +40,9 @@ extensions load in a native runtime.
 - **AI usage panel**: plan limits with usage bars and reset countdowns for
   z.ai GLM, Claude, Codex and OpenRouter (or any custom JSON endpoint).
   Rows are auto-detected, the tile picks name-or-logo styling, and the
-  whole thing is edited live from Ustawienia → AI usage.
-- Native system-info source (CPU, RAM, audio) replaces the heaviest JS
-  extensions.
+  whole thing is edited live from Settings (Ustawienia) → AI usage.
+- Native system-info source (CPU and RAM load) replaces the heaviest JS
+  extension.
 - **Spotify**: playback, shuffle/repeat, like, playlists, device switch,
   volume and seek sliders, and a now-playing tile with cover art and a
   live progress bar. Talks to the Web API directly; setup and login live
@@ -54,17 +54,22 @@ extensions load in a native runtime.
   client speaks, and Pulpit protocol v2 (plain WebSocket, typed schema,
   one-time QR pairing codes, per-device tokens, delta sync).
 - Discovery pairing: the desktop advertises `_pulpit._tcp` over mDNS and a
-  tablet pairs Bluetooth-style — the same numeric verification code shows on
-  both screens. Manual code pairing and USB `adb reverse` stay for networks
-  where multicast does not traverse.
+  tablet pairs Bluetooth-style: the same verification code shows on both
+  screens and pairing completes only once the match is approved on the
+  desktop. Manual code pairing and USB `adb reverse` stay for networks where
+  multicast does not traverse.
 - Native Android client (Kotlin/Compose): offline board cache, foreground
   keep-alive service, custom gestures (long-press, double-tap, swipes).
+
+The discovery pairing flow, step by step:
+
+![Pairing flow: advertise, discover, compare code, approve, token minted](docs/assets/pairing.svg)
 
 **Maintenance**
 
 - Self-updater: the desktop checks a `latest.json` feed, downloads the
   release asset over HTTPS, verifies its sha256 and swaps itself with an
-  automatic restart (Ustawienia → Aktualizacje).
+  automatic restart (Settings → Aktualizacje).
 - Tray, close-to-tray, autostart, single instance, daily-rotated logs.
 - User extensions: original Deckboard `.asar` packages run in an embedded JS
   engine; system info, callurl, Discord and Voicemeeter have native Rust
@@ -73,7 +78,7 @@ extensions load in a native runtime.
 ## Install
 
 Download `pulpit-desktop-*.exe` from
-[Releases](../../releases/latest) (Windows 10/11, single binary, no
+[Releases](https://github.com/TymekTM/deckboard/releases/latest) (Windows 10/11, single binary, no
 installer) and `Pulpit-*.apk` for the Android tablet. The desktop checks for
 newer releases on its own and can update itself in place.
 
@@ -82,10 +87,11 @@ On first launch Pulpit copies an existing `~/deckboard` data directory
 so an upgrade from the original app needs no manual steps. The original app
 keeps its files and keeps working.
 
-The stock Deckboard Android app connects out of the box (scan the QR in the
-editor's "Connect a tablet" panel). The native Pulpit client pairs either
-from the mDNS discovery list (numeric code comparison on both screens) or by
-typing a manually minted pairing code.
+The stock Deckboard Android app connects out of the box (scan the QR in
+Settings → "Stock client"). The native Pulpit client pairs either from the
+mDNS discovery list (compare the code on both screens, then approve on the
+desktop) or by typing a pairing code minted on the desktop ("Generuj kod
+parowania" under "Nowy klient (v2)").
 
 ## Build from source
 
@@ -105,7 +111,7 @@ npx tauri build --no-bundle   # exe at ../../target/release/pulpit-desktop.exe
 Tests and lints run from the repo root:
 
 ```sh
-cargo test --workspace        # includes real device tests: audio, screen capture
+cargo test --workspace        # live device tests are #[ignore]d; run them with -- --ignored
 cargo clippy --workspace --all-targets
 cd apps/desktop && npx vite build
 
@@ -124,10 +130,10 @@ Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
 | `PULPIT_PORT`         | `8500`                    | Server port (legacy + v2 share it)          |
 | `PULPIT_DB`           | `~/pulpitApp/database.db` | Database location (profiling/hermetic runs) |
 | `PULPIT_EXT_DIR`      | `~/pulpitApp/extensions`  | Extension directory                         |
-| `PULPIT_AIDEV_CONFIG` | `~/pulpitApp/aidev.json`  | AI dev-work producer config                 |
-| `PULPIT_NO_SINGLE_INSTANCE` | unset               | Set to `1` to run side-by-side instances    |
+| `PULPIT_AIDEV_CONFIG` | `~/pulpitApp/aidev.json`  | AI usage producer config                    |
+| `PULPIT_NO_SINGLE_INSTANCE` | unset               | Any value: allow side-by-side instances     |
 | `PULPIT_NO_DISCOVERY` | unset                     | Set to `1` to skip the mDNS announcement    |
-| `PULPIT_SPOTIFY_CONFIG` | `~/pulpitApp/spotify.json` | Spotify client id and tokens           |
+| `PULPIT_SPOTIFY_CONFIG` | `~/pulpitApp/spotify.json` | Spotify client id and tokens            |
 
 ## Spotify
 
@@ -177,18 +183,18 @@ hidden. Tiles extrapolate track progress between polls.
 
 One Cargo workspace, thin crates with a single job each:
 
-| Crate            | Role                                                                  |
-| ---------------- | --------------------------------------------------------------------- |
-| `crates/db`      | SQLite access, schema, data dir + legacy migration                    |
-| `crates/actions` | Command catalog and dispatch behind a testable `Input` seam           |
-| `crates/os`      | Windows integration: WASAPI volume, capture, clipboard, playback      |
-| `crates/sysinfo` | Native system-info source (volume/mute/device watcher)                |
-| `crates/aidev`   | AI dev-work source: plan limits, agent status, local token sums       |
-| `crates/legacy`  | Engine.IO v3 + socket.io v2 server for the stock Android client       |
-| `crates/proto`   | Protocol v2 typed schema + TS bindings + golden JSON fixtures         |
-| `crates/v2`      | v2 transport: sessions, pairing, devices, assets, state engine        |
-| `crates/backend` | SQLite backend shared by the editor and the headless server           |
-| `crates/ext`     | Extension host: original Deckboard extensions on an embedded JS engine|
+| Crate            | Role                                                                   |
+| ---------------- | ---------------------------------------------------------------------- |
+| `crates/db`      | SQLite access, schema, data dir + legacy migration                     |
+| `crates/actions` | Command catalog and dispatch behind a testable `Input` seam            |
+| `crates/os`      | Windows integration: WASAPI volume, capture, clipboard, playback       |
+| `crates/sysinfo` | Native system-info source (CPU and RAM load)                           |
+| `crates/aidev`   | AI dev-work source: plan limits, agent status, local token sums        |
+| `crates/legacy`  | Engine.IO v3 + socket.io v2 server for the stock Android client        |
+| `crates/proto`   | Protocol v2 typed schema + TS bindings + golden JSON fixtures          |
+| `crates/v2`      | v2 transport: sessions, pairing, devices, assets, state engine         |
+| `crates/backend` | SQLite backend shared by the editor and the headless server            |
+| `crates/ext`     | Extension host: original Deckboard extensions on an embedded JS engine |
 | `crates/vm`      | Native Voicemeeter integration                                         |
 | `crates/discord` | Native Discord local-RPC integration                                   |
 | `apps/desktop`   | Tauri 2 + Vue 3 editor and touch surface                               |
@@ -197,9 +203,9 @@ One Cargo workspace, thin crates with a single job each:
 
 Further reading:
 
-- `docs/protocol-v2.md` — wire protocol, pairing, state sync
-- `docs/decisions.md` — architecture decision records
-- `ROADMAP.md` — milestones and status
+- [`docs/protocol-v2.md`](docs/protocol-v2.md) — wire protocol, pairing, state sync
+- [`docs/decisions.md`](docs/decisions.md) — architecture decision records
+- [`ROADMAP.md`](ROADMAP.md) — milestones and status
 
 ## Compatibility with Deckboard
 
