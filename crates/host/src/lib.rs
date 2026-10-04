@@ -283,43 +283,29 @@ pub async fn activity_loop(
     }
 }
 
-/// The "consumers" signal `pulpit_spotify::spawn_push` polls: how many
-/// live state consumers exist right now. The legacy hub's session count
-/// sits behind an async mutex, so the signal is a counter a 1 s sampler
-/// ([`consumer_sampler`]) keeps current and the sync reader closure the
-/// poller's plain thread loads. Returns `(counter, reader)`.
-pub fn consumer_signal() -> (
-    Arc<std::sync::atomic::AtomicUsize>,
-    Arc<dyn Fn() -> usize + Send + Sync + 'static>,
-) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let count = Arc::new(AtomicUsize::new(0));
-    let reader = count.clone();
-    (
-        count,
-        Arc::new(move || reader.load(Ordering::Relaxed)),
-    )
-}
-
-/// One consumers sample, taken every second: connected legacy clients +
-/// connected v2 clients + whatever host-local consumer `extra` counts
-/// (the desktop adds its visible editor window). Spawned with the
-/// host's own spawn flavor (`tauri::async_runtime` vs `tokio::spawn`).
-/// `v2_hub` is `None` when the v2 stack failed to start.
-pub async fn consumer_sampler(
-    count: Arc<std::sync::atomic::AtomicUsize>,
+/// The "consumers" signal `pulpit_spotify::spawn_push` reads: how many
+/// live state consumers exist right now - connected legacy + v2 clients
+/// plus whatever host-local consumer `extra` counts (the desktop adds
+/// its visible editor window). Computed on demand from the poller's own
+/// thread, which asks at most every few seconds; no sampler task, so an
+/// idle host gains no periodic wakeup. A contended legacy hub counts as
+/// one consumer (poll rather than go stale). `v2_hub` is `None` when the
+/// v2 stack failed to start.
+pub fn consumer_reader(
     legacy: Arc<pulpit_legacy::Hub>,
     v2_hub: Option<Arc<pulpit_v2::V2Hub>>,
     extra: Option<Arc<dyn Fn() -> usize + Send + Sync + 'static>>,
-) {
-    use std::sync::atomic::Ordering;
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-    loop {
-        interval.tick().await;
-        let host_extra = extra.as_deref().map(|f| f()).unwrap_or(0);
-        let clients = legacy.len().await + v2_hub.as_ref().map_or(0, |hub| hub.count());
-        count.store(clients + host_extra, Ordering::Relaxed);
-    }
+) -> Arc<dyn Fn() -> usize + Send + Sync + 'static> {
+    Arc::new(move || {
+        let legacy = legacy.try_len().unwrap_or(1);
+        let v2 = v2_hub.as_ref().map_or(0, |hub| hub.count());
+        // the host-local check is the expensive one (the desktop asks
+        // the UI thread); skip it when a client already counts
+        if legacy + v2 > 0 {
+            return legacy + v2;
+        }
+        extra.as_deref().map_or(0, |f| f())
+    })
 }
 
 /// The extension packages native code replaces (their JS runtimes were

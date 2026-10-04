@@ -527,22 +527,20 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // nothing). Snapshots ride the shared spotify pump, which strips the
     // internal art key and imports album art into the v2 asset store.
     {
-        let (consumers_count, consumers) = pulpit_host::consumer_signal();
-        let app_for_consumers = app.clone();
-        let extra: Arc<dyn Fn() -> usize + Send + Sync> = Arc::new(move || {
-            app_for_consumers
-                .get_webview_window("main")
-                .map(|w| w.is_visible().unwrap_or(false))
-                .unwrap_or(false) as usize
-        });
-        tauri::async_runtime::spawn(pulpit_host::consumer_sampler(
-            consumers_count,
-            hub.clone(),
-            v2.as_ref().map(|v2| v2.hub.clone()),
-            Some(extra),
-        ));
         match &spotify {
             Some(spotify) => {
+                let app_for_consumers = app.clone();
+                let extra: Arc<dyn Fn() -> usize + Send + Sync> = Arc::new(move || {
+                    app_for_consumers
+                        .get_webview_window("main")
+                        .map(|w| w.is_visible().unwrap_or(false))
+                        .unwrap_or(false) as usize
+                });
+                let consumers = pulpit_host::consumer_reader(
+                    hub.clone(),
+                    v2.as_ref().map(|v2| v2.hub.clone()),
+                    Some(extra),
+                );
                 tauri::async_runtime::spawn(pulpit_host::spotify::forward_spotify(
                     feed.clone(),
                     pulpit_spotify::spawn_push(spotify.clone(), consumers),

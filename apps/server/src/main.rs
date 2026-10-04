@@ -186,13 +186,8 @@ async fn main() -> anyhow::Result<()> {
     // spotify pump (internal art key stripped, album art imported).
     match &spotify {
         Some(spotify) => {
-            let (consumers_count, consumers) = pulpit_host::consumer_signal();
-            tokio::spawn(pulpit_host::consumer_sampler(
-                consumers_count,
-                state.hub.clone(),
-                Some(v2.hub.clone()),
-                None,
-            ));
+            let consumers =
+                pulpit_host::consumer_reader(state.hub.clone(), Some(v2.hub.clone()), None);
             tokio::spawn(pulpit_host::spotify::forward_spotify(
                 feed.clone(),
                 pulpit_spotify::spawn_push(spotify.clone(), consumers),
