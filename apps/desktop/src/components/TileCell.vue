@@ -1,6 +1,13 @@
 <script setup>
-import { computed, ref } from "vue";
-import { stateActive, VM_SLIDER_RESET, parsePlanWindows } from "../catalog";
+import { computed, ref, watchEffect } from "vue";
+import {
+  stateActive,
+  VM_SLIDER_RESET,
+  parsePlanWindows,
+  statusProgressAt,
+  mmss,
+} from "../catalog";
+import { resolveStatusArt, payloadReceivedAt, windowVisible } from "../statusMedia";
 
 // One tile. Isolated so a live state push re-renders only the tiles that
 // read the pushed key, not the whole board. Geometry (grid position,
@@ -224,6 +231,65 @@ const statusMini = computed(() => {
   return rows.length ? rows : [];
 });
 
+// ---- album art + playback progress on status payloads (design §4) ----------
+// Generic status-payload extensions: any producer's push that carries
+// `image` (an asset hash) or `progress` gets them rendered, not only
+// spotify-now-playing. Old payloads without the fields render exactly as
+// before.
+
+// Album art, resolved per hash through the asset_data_url Tauri command
+// and memoized in the WebView (see statusMedia.js). A dropped lookup
+// leaves the url null - the tile renders text-only.
+const statusArtUrl = ref(null);
+watchEffect((onCleanup) => {
+  const hash = statusData.value?.image;
+  let live = true;
+  onCleanup(() => {
+    live = false;
+  });
+  resolveStatusArt(hash, (url) => {
+    if (live) statusArtUrl.value = url;
+  });
+});
+
+// The bar ticks ~1 Hz, but only while the payload says playing AND the
+// window is on screen: hiding the window tears the interval down through
+// windowVisible, pausing (or a payload without progress) never starts
+// one, and unmounting the tile disposes the effect. nowTick starting at
+// Date.now() also covers the payload-change frame - no stale position.
+const nowTick = ref(Date.now());
+watchEffect((onCleanup) => {
+  if (statusData.value?.progress?.playing !== true || !windowVisible.value) {
+    return;
+  }
+  nowTick.value = Date.now();
+  const id = setInterval(() => {
+    nowTick.value = Date.now();
+  }, 1000);
+  onCleanup(() => clearInterval(id));
+});
+
+// Reported position extrapolated by the local time since the payload
+// arrived, clamped to the track (statusProgressAt); frozen while paused
+// because then no tick runs and nowTick stays put.
+const progressView = computed(() => {
+  const data = statusData.value;
+  const progress = data?.progress;
+  if (!progress) return null;
+  const at = statusProgressAt(progress, payloadReceivedAt(data), nowTick.value);
+  if (at == null) return null;
+  const duration = Number(progress.duration_ms);
+  return {
+    percent: Math.min(100, Math.max(0, (at / duration) * 100)),
+    label: `${mmss(at)} / ${mmss(duration)}`,
+  };
+});
+
+// Portrait/square tiles stack the art above the text; wide tiles put the
+// art beside it. The m:ss / m:ss label only fits from two cells wide.
+const artBeside = computed(() => props.tile.w > props.tile.h);
+const showProgressTimes = computed(() => props.tile.w >= 2);
+
 // Monochrome brand marks (24x24, currentColor) for the agent providers:
 // official paths from Simple Icons (Z.ai, Claude, OpenAI, OpenCode) and
 // Antigravity's mark traced from its official icon asset.
@@ -232,6 +298,8 @@ const PROVIDER_GLYPHS = {
   claude: "m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z",
   codex: "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z",
   opencode: "M22 24H2V0h20zM17 4.8H7v14.4h10z",
+  spotify:
+    "M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.42 1.56-.299.421-1.02.599-1.559.3z",
   antigravity: "M0.0 21.11 1.62 19.49 3.25 16.78 4.69 12.81 6.68 5.41 8.12 2.35 9.38 0.9 10.83 0.18 12.63 0.0 14.26 0.54 15.34 1.44 16.96 4.15 20.21 15.16 21.65 18.23 23.1 19.85 23.1 20.21 24.0 20.93 24.0 22.02 22.38 22.2 21.11 21.11 20.75 21.11 18.77 18.95 15.7 13.71 14.8 12.81 13.35 12.09 10.83 12.09 9.38 12.81 7.76 14.62 5.23 19.13 2.71 21.65 1.8 22.2 0.54 22.38 0.0 22.02Z",
 };
 
@@ -484,6 +552,8 @@ function onTileKeydown(event) {
         :class="{
           'is-compact': statusCompact.length,
           'is-mini': statusMini.length,
+          'has-art': !!statusArtUrl,
+          'art-beside': !!statusArtUrl && artBeside,
         }"
       >
         <template v-if="statusCompact.length">
@@ -516,23 +586,43 @@ function onTileKeydown(event) {
           </div>
         </template>
         <template v-else>
-          <div
-            v-for="(row, i) in statusRows"
-            :key="i"
-            class="status-row"
-            :class="['s-' + (row.state || 'off'), { 'is-header': row.state === 'header' }]"
-          >
-            <span v-if="row.state !== 'header'" class="status-dot"></span>
-            <span v-if="statusGlyph(row)" class="provider-glyph" v-html="statusGlyph(row)"></span>
-            <span v-else-if="row.label" class="status-label">{{ row.label }}</span>
-            <span v-if="row.value" class="status-val">{{ row.value }}</span>
-            <span v-if="row.percent != null" class="status-bar">
-              <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
-            </span>
+          <!-- album art, shown whole (fit, aspect kept, nothing on top) -->
+          <img v-if="statusArtUrl" class="status-art" :src="statusArtUrl" alt="" />
+          <div class="status-body">
+            <div
+              v-for="(row, i) in statusRows"
+              :key="i"
+              class="status-row"
+              :class="['s-' + (row.state || 'off'), { 'is-header': row.state === 'header' }]"
+            >
+              <span v-if="row.state !== 'header'" class="status-dot"></span>
+              <span v-if="statusGlyph(row)" class="provider-glyph" v-html="statusGlyph(row)"></span>
+              <span v-else-if="row.label" class="status-label">{{ row.label }}</span>
+              <span v-if="row.value" class="status-val">{{ row.value }}</span>
+              <span v-if="row.percent != null" class="status-bar">
+                <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
+              </span>
+            </div>
+            <div v-if="statusSummary" class="status-summary">
+              {{ statusSummary }}
+            </div>
+            <!-- locally extrapolated playback progress, ticked ~1 Hz only
+                 while playing and on screen -->
+            <div v-if="progressView" class="status-progress">
+              <span class="status-progress-track">
+                <i :style="{ width: progressView.percent + '%' }"></i>
+              </span>
+              <span v-if="showProgressTimes" class="status-progress-time">{{
+                progressView.label
+              }}</span>
+            </div>
           </div>
-          <div v-if="statusSummary" class="status-summary">
-            {{ statusSummary }}
-          </div>
+          <!-- brand mark in a tile corner, outside the art -->
+          <span
+            v-if="statusArtUrl"
+            class="status-corner-glyph"
+            v-html="providerSvg('spotify')"
+          ></span>
         </template>
       </div>
       <span
@@ -788,6 +878,77 @@ function onTileKeydown(event) {
   border-top: 1px solid rgba(255, 255, 255, 0.14);
   margin-top: 2px;
   padding-top: 4px;
+}
+/* album art + playback progress (design §4): the art shows whole - fit,
+   aspect kept, never cropped, tinted or overdrawn; rows, summary and the
+   progress bar sit below it (portrait/square tiles) or beside it (wide
+   tiles). Without art the body is layout-transparent (display: contents)
+   so plain status tiles render exactly as before. */
+.status-art {
+  min-width: 0;
+  min-height: 0;
+  object-fit: contain;
+}
+.tile-status.has-art .status-art {
+  flex: 1 1 0;
+  width: 100%;
+}
+.tile-status.has-art .status-body {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.tile-status:not(.has-art) .status-body {
+  display: contents;
+}
+.tile-status.has-art.art-beside {
+  flex-direction: row;
+  align-items: stretch;
+}
+.tile-status.has-art.art-beside .status-art {
+  flex: 0 0 40%;
+  width: 40%;
+  height: 100%;
+}
+.tile-status.has-art.art-beside .status-body {
+  flex: 1 1 0;
+  justify-content: center;
+}
+.status-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.status-progress-track {
+  flex: 1;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.status-progress-track i {
+  display: block;
+  height: 100%;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.75);
+}
+.status-progress-time {
+  font-size: 9.5px;
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+}
+.status-corner-glyph {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  color: rgba(255, 255, 255, 0.8);
+  pointer-events: none;
+}
+.status-corner-glyph svg {
+  width: 13px;
+  height: 13px;
 }
 .provider-glyph {
   flex: none;

@@ -33,6 +33,17 @@ data class StatusCompact(
     val state: String = "working",
 )
 
+/** Optional playback progress on a status push (`spotify-now-playing`,
+ *  but parsed for any producer that ships it): the position at push time
+ *  plus whether the track keeps playing. Clients extrapolate locally -
+ *  no server timestamp rides the wire because clocks differ. */
+@Immutable
+data class StatusProgress(
+    val positionMs: Long,
+    val durationMs: Long,
+    val playing: Boolean,
+)
+
 @Immutable
 data class StatusData(
     val rows: List<StatusRow>,
@@ -40,4 +51,10 @@ data class StatusData(
     val summary: String = "",
     /** Row identifier style: "name" (default) or "logo" - never both. */
     val rowStyle: String = "name",
+    /** Album art as an asset hash (the v2 AssetStore entry); null when
+     *  nothing plays, art failed, or the producer ships none. Resolved
+     *  through the regular tile-asset fetch + bitmap LRU. */
+    val image: String? = null,
+    /** Playback progress; null when nothing plays. */
+    val progress: StatusProgress? = null,
 )
