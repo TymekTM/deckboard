@@ -438,10 +438,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                     generation: pulpit_v2::Generation::starting_at(1),
                     boards_cache: Default::default(),
                     pair_requests: Default::default(),
-                    config: pulpit_v2::V2Config {
-                        public_port: port,
-                        ..Default::default()
-                    },
+                    config: Default::default(),
                 }))
             }
             (Err(e), _) | (_, Err(e)) => {

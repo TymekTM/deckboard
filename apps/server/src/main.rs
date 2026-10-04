@@ -141,10 +141,7 @@ async fn main() -> anyhow::Result<()> {
         generation: pulpit_v2::Generation::starting_at(1),
         boards_cache: Default::default(),
         pair_requests: Default::default(),
-        config: pulpit_v2::V2Config {
-            public_port: port,
-            ..Default::default()
-        },
+        config: Default::default(),
     });
 
     // M8 discovery: advertise on mDNS so tablets can find this server

@@ -9,7 +9,6 @@ description = "Pulpit desktop editor"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-anyhow = "1"
 base64 = "0.22"
 sha2 = { workspace = true }
 hex = { workspace = true }

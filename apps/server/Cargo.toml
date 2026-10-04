@@ -20,8 +20,6 @@ pulpit-db = { path = "../../crates/db" }
 pulpit-host = { path = "../../crates/host" }
 pulpit-proto = { path = "../../crates/proto" }
 pulpit-backend = { path = "../../crates/backend" }
-pulpit-actions = { path = "../../crates/actions" }
-pulpit-os = { path = "../../crates/os" }
 pulpit-legacy = { path = "../../crates/legacy" }
 pulpit-v2 = { path = "../../crates/v2" }
 pulpit-ext = { path = "../../crates/ext" }
@@ -30,4 +28,3 @@ pulpit-discord = { path = "../../crates/discord" }
 pulpit-spotify = { path = "../../crates/spotify" }
 pulpit-sysinfo = { path = "../../crates/sysinfo" }
 pulpit-aidev = { path = "../../crates/aidev" }
-ureq = "3"

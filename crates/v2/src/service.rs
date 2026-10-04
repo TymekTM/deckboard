@@ -33,8 +33,6 @@ pub struct V2Config {
     pub ping_interval: Duration,
     pub hello_timeout: Duration,
     pub hold_cap: Duration,
-    /// Port clients reach this server on (QR payload / pairing logs).
-    pub public_port: u16,
 }
 
 impl Default for V2Config {
@@ -46,7 +44,6 @@ impl Default for V2Config {
             ping_interval: Duration::from_secs(60),
             hello_timeout: Duration::from_secs(5),
             hold_cap: Duration::from_secs(120),
-            public_port: 8500,
         }
     }
 }

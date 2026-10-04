@@ -52,7 +52,9 @@ pub fn advertise(port: u16, version: &str) -> Result<Discovery, String> {
 
 impl Discovery {
     /// Graceful unregister (best-effort; process death also clears the
-    /// announcement once the TTL lapses).
+    /// announcement once the TTL lapses). Both hosts currently
+    /// `mem::forget` the handle and rely on the TTL; kept for a host that
+    /// wants to withdraw the announcement before exit.
     pub fn stop(self) {
         let _ = self.daemon.unregister(&self.fullname);
     }
