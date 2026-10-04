@@ -376,7 +376,8 @@ impl Backend for SqlBackend {
             button.options.as_deref(),
             &button.mode,
         );
-        if self.exec_extension(&cmd, Some(value))
+        if self.exec_runcommand(&cmd)
+            || self.exec_extension(&cmd, Some(value))
             || self.exec_sysinfo(&cmd)
             || self.exec_aidev(&cmd)
             || self.exec_callurl(&cmd)
@@ -394,13 +395,14 @@ impl Backend for SqlBackend {
 
 impl SqlBackend {
     /// The native/extension dispatch chain, shared by top-level tile
-    /// presses and multiaction steps: extension, sysinfo, aidev,
-    /// callurl, voicemeeter, discord, spotify, speaker, play. Returns
-    /// true when one of them claimed the command (the builtin
+    /// presses and multiaction steps: run-command, extension, sysinfo,
+    /// aidev, callurl, voicemeeter, discord, spotify, speaker, play.
+    /// Returns true when one of them claimed the command (the builtin
     /// dispatcher is skipped, mirroring the original `runCommand`
     /// default case).
     fn exec_native(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
-        self.exec_extension(cmd, None)
+        self.exec_runcommand(cmd)
+            || self.exec_extension(cmd, None)
             || self.exec_sysinfo(cmd)
             || self.exec_aidev(cmd)
             || self.exec_callurl(cmd)
@@ -497,6 +499,66 @@ impl SqlBackend {
                 }
             }
             None => tracing::warn!(kind = "url-to-call", "tile has no urlToCall configured"),
+        }
+        true
+    }
+
+    /// Native run-command: `{"commandAction": "<shell line>"}` executed
+    /// through `cmd /C`, what the deckboard-commands JS package did via
+    /// `child_process.exec`. Sits ahead of the extension chain so the
+    /// 12 MB package is never extracted or evaluated for a press; the
+    /// package stays loaded for its input metadata (the editor's action
+    /// list and tile styles), only its execute is replaced.
+    fn exec_runcommand(&self, cmd: &pulpit_actions::Command) -> bool {
+        if cmd.kind != "run-command" {
+            return false;
+        }
+        // mirror ExtManager::execute's arg parsing: unparsable command
+        // JSON becomes a plain string, so `{commandAction}` is missing and
+        // the action is a no-op (the JS `execute` destructured the same way)
+        let args = cmd
+            .command
+            .as_deref()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok());
+        let Some(what) = args
+            .as_ref()
+            .and_then(|v| v.get("commandAction"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            tracing::debug!(kind = %cmd.kind, "run-command without commandAction - nothing to run");
+            return true;
+        };
+        if what.trim().is_empty() {
+            return true;
+        }
+        // fire and forget like child_process.exec: the press returns as
+        // soon as the shell starts. No pipes either - a program the shell
+        // launches (notepad, a server script) inherits piped handles, and
+        // waiting for their EOF would hold the press until it exits.
+        let child = shell_command(what)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match child {
+            Ok(mut child) => {
+                let what = what.to_string();
+                // the original popped a "Command Failed!" dialog; the host
+                // has no dialogs, so a reaper logs the failure instead
+                let reaper = std::thread::Builder::new()
+                    .name("run-command-reaper".into())
+                    .spawn(move || match child.wait() {
+                        Ok(status) if !status.success() => {
+                            tracing::warn!(command = %what, %status, "run-command failed");
+                        }
+                        Ok(_) => tracing::debug!(command = %what, "run-command finished"),
+                        Err(e) => tracing::warn!(command = %what, error = %e, "run-command wait failed"),
+                    });
+                if let Err(e) = reaper {
+                    tracing::warn!(error = %e, "run-command reaper thread failed to start");
+                }
+            }
+            Err(e) => tracing::warn!(command = %what, error = %e, "run-command spawn failed"),
         }
         true
     }
@@ -782,6 +844,24 @@ impl SqlBackend {
 /// anyway blocks the action thread for its whole timeout for nothing.
 fn refresh_failure_needs_popup(err: &pulpit_discord::DiscordError) -> bool {
     !matches!(err, pulpit_discord::DiscordError::Network(_))
+}
+
+/// Shell runner for `run-command`, byte-for-byte the same invocation the
+/// extension host uses (crates/ext host.rs): `cmd /C` on Windows with
+/// CREATE_NO_WINDOW so no console flashes per press, `sh -c` elsewhere.
+#[cfg(windows)]
+fn shell_command(command: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = std::process::Command::new("cmd");
+    c.args(["/C", command]).creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    c
+}
+
+#[cfg(not(windows))]
+fn shell_command(command: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("sh");
+    c.args(["-c", command]);
+    c
 }
 
 /// Multiaction step dispatcher: every step goes through the same
@@ -1369,6 +1449,140 @@ mod tests {
                 pulpit_actions::Effect::KeyUp(vec![pulpit_actions::KeyName::Return]),
             ],
             "multiaction key steps must reach the builtin dispatcher too"
+        );
+    }
+
+    #[test]
+    fn run_command_tile_executes_natively_without_any_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.txt");
+        // what the deckboard-commands package ran via child_process.exec:
+        // a bare shell line; the executor wraps it in `cmd /C` (or `sh -c`)
+        // (no quotes around the target: cmd /C mangles nested quotes)
+        let (action, probe) = if cfg!(windows) {
+            (
+                format!("echo pulpit-runcmd > {}", out.display()),
+                "pulpit-runcmd",
+            )
+        } else {
+            (
+                format!("printf pulpit-runcmd > '{}'", out.display()),
+                "pulpit-runcmd",
+            )
+        };
+        let backend = test_backend();
+        let command = serde_json::json!({ "commandAction": action }).to_string();
+        backend.exec(
+            button_row("run-command", Some(&command)),
+            false,
+            &mut RecSink::default(),
+        );
+        // the executor does not wait for the shell, so poll for its output
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut seen = String::new();
+        while std::time::Instant::now() < deadline {
+            seen = std::fs::read_to_string(&out).unwrap_or_default();
+            if seen.trim() == probe {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(
+            seen.trim(),
+            probe,
+            "the native run-command executor must run the shell line"
+        );
+    }
+
+    #[test]
+    fn run_command_press_does_not_wait_for_the_program() {
+        // a long-lived program (notepad, a server script) must not hold the
+        // press: the old JS used async child_process.exec
+        let action = if cfg!(windows) {
+            "ping -n 6 127.0.0.1"
+        } else {
+            "sleep 5"
+        };
+        let backend = test_backend();
+        let command = serde_json::json!({ "commandAction": action }).to_string();
+        let started = std::time::Instant::now();
+        backend.exec(
+            button_row("run-command", Some(&command)),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "press blocked for {:?} on a 5 s command",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn run_command_without_commandaction_is_a_claimed_noop() {
+        let backend = test_backend();
+        // slider taps arrive as {"value": v}; the JS execute destructured
+        // {commandAction} and did nothing - the native path claims too
+        backend.exec(
+            button_row("run-command", Some(r#"{"value":50}"#)),
+            false,
+            &mut RecSink::default(),
+        );
+        backend.exec(button_row("run-command", None), false, &mut RecSink::default());
+    }
+
+    #[test]
+    fn run_command_is_claimed_before_the_extension_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("js-ran.txt");
+        let pkg = dir.path().join("commands-lookalike");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("index.js"),
+            format!(
+                r##"module.exports = {{
+                    name: "commands lookalike",
+                    inputs: [{{
+                        value: "run-command",
+                        label: "Run Command",
+                        icon: "terminal",
+                        color: "#34495e"
+                    }}],
+                    execute: function (action, args) {{
+                        __host_write_file("{}", "js");
+                    }}
+                }};"##,
+                marker.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        let (manager, _events) =
+            pulpit_ext::ExtManager::load(dir.path(), &serde_json::Value::Null, &[]);
+        assert!(manager.has_action("run-command"));
+        // The editor's action picker and tile styling read exactly this
+        // listing (list_known_inputs / register_extension_input), so the
+        // declaration must survive even though the press never runs JS.
+        let input = manager
+            .inputs()
+            .iter()
+            .find(|i| i.value == "run-command")
+            .expect("run-command stays listed for the editor");
+        assert_eq!(input.label.as_deref(), Some("Run Command"));
+        assert_eq!(input.icon.as_deref(), Some("terminal"));
+        assert_eq!(input.color.as_deref(), Some("#34495e"));
+
+        let backend = test_backend().with_extensions(manager);
+        backend.exec(
+            button_row(
+                "run-command",
+                Some(r#"{"commandAction":"echo pulpit-runcmd"}"#),
+            ),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(
+            !marker.exists(),
+            "the JS execute must never run: the native executor claims run-command first"
         );
     }
 }
