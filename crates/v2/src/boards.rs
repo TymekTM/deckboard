@@ -113,6 +113,16 @@ fn board_background(board: &BoardRow, assets: &AssetStore) -> Option<pulpit_prot
     background_from_legacy(&board.background)
 }
 
+/// The tile's options column parsed once (SWEEP-13): `build_tile` and the
+/// per-event paths all want the same JSON, and a non-JSON column (the
+/// legacy `windows:` dialect) reads as Null.
+fn parse_options(row: &ButtonRow) -> Value {
+    row.options
+        .as_deref()
+        .and_then(|o| serde_json::from_str(o).ok())
+        .unwrap_or(Value::Null)
+}
+
 /// One row -> one tile. The legacy payload supplies resolved style fields
 /// and the watch key (`extra`); state channels are namespaced `ext.<key>`
 /// so pushes land on the channel the tile reads.
@@ -123,7 +133,9 @@ pub fn build_tile(
     engine: &StateEngine,
 ) -> Tile {
     let legacy = Mapper::new().shortcut_payload(row);
-    let (kind, interactions) = widget_kind(row, &legacy);
+    let mut params = parse_options(row);
+    let (kind, interactions) =
+        widget_kind_for(row, legacy.get("app").and_then(Value::as_str), &params);
     let state = state_ref(row, &legacy, engine);
     let asset_hash = row
         .img
@@ -137,11 +149,6 @@ pub fn build_tile(
         .as_deref()
         .filter(|img| !img.is_empty())
         .and_then(|img| assets.import_data_url(img));
-    let mut params: Value = row
-        .options
-        .as_deref()
-        .and_then(|o| serde_json::from_str(o).ok())
-        .unwrap_or(Value::Null);
     apply_implicit_params(row, &mut params);
 
     Tile {
@@ -171,7 +178,7 @@ pub fn build_tile(
 /// only the `app` marker feeds the kind decision.
 pub fn allowed_interactions(row: &ButtonRow) -> Vec<Interaction> {
     let app = Mapper::new().app_value(row);
-    widget_kind_for(row, app.as_deref()).1
+    widget_kind_for(row, app.as_deref(), &parse_options(row)).1
 }
 
 /// `params.hold.repeat: {delay_ms, interval_ms}` - the server-side
@@ -249,15 +256,18 @@ pub fn windows_filter(options: Option<&str>) -> Option<Vec<String>> {
 /// Widget kind from the legacy `mode`/`app` columns: rendering modes map
 /// 1:1, custom-value buttons are toggles, everything else is a button.
 fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>) {
-    widget_kind_for(row, legacy.get("app").and_then(Value::as_str))
+    widget_kind_for(
+        row,
+        legacy.get("app").and_then(Value::as_str),
+        &parse_options(row),
+    )
 }
 
-fn widget_kind_for(row: &ButtonRow, app: Option<&str>) -> (WidgetKind, Vec<Interaction>) {
-    let params: Value = row
-        .options
-        .as_deref()
-        .and_then(|o| serde_json::from_str(o).ok())
-        .unwrap_or(Value::Null);
+fn widget_kind_for(
+    row: &ButtonRow,
+    app: Option<&str>,
+    params: &Value,
+) -> (WidgetKind, Vec<Interaction>) {
     let (kind, mut interactions) = match row.mode.as_str() {
         "slider" => (WidgetKind::Slider, vec![Interaction::Slide]),
         "knob" => (WidgetKind::Knob, vec![Interaction::Slide]),
