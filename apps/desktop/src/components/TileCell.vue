@@ -312,9 +312,13 @@ const mediaView = computed(() => {
     rest,
   };
 });
-// Album and the label/value extras need two cells of width to be
-// readable; at one cell only the title, the artist and the bar remain.
-const showMediaMeta = computed(() => props.tile.w >= 2);
+// Album and the producer's extra rows need room for four-plus text
+// lines: they render only when BOTH dimensions have two cells. A
+// one-cell-high tile keeps the title, the artist and the bar - more
+// lines truncate into noise. Extras collapse to one dim "Label: value"
+// line each. Mirrored in the Compose StatusMediaText.
+const showMediaMeta = computed(() => props.tile.w >= 2 && props.tile.h >= 2);
+const mediaTitleLines = computed(() => (props.tile.h >= 2 ? 2 : 1));
 
 // Portrait/square tiles stack the art above the text; wide tiles put the
 // art beside it. The m:ss / m:ss label only fits from two cells wide.
@@ -625,7 +629,11 @@ function onTileKeydown(event) {
           <template v-if="mediaView">
             <img v-if="statusArtUrl" class="status-art" :src="statusArtUrl" alt="" />
             <div class="status-body media-body">
-              <span class="media-title">{{ mediaView.title }}</span>
+              <span
+                class="media-title"
+                :style="{ '-webkit-line-clamp': mediaTitleLines }"
+                >{{ mediaView.title }}</span
+              >
               <span v-if="mediaView.artist" class="media-sub">{{
                 mediaView.artist
               }}</span>
@@ -633,15 +641,12 @@ function onTileKeydown(event) {
                 <span v-if="mediaView.album" class="media-sub dim">{{
                   mediaView.album
                 }}</span>
-                <div
+                <span
                   v-for="(row, i) in mediaView.rest"
                   :key="i"
-                  class="status-row"
+                  class="media-sub dim"
+                  >{{ row.label ? row.label + ': ' : '' }}{{ row.value }}</span
                 >
-                  <span class="status-dot"></span>
-                  <span class="status-label">{{ row.label }}</span>
-                  <span class="status-val">{{ row.value }}</span>
-                </div>
               </template>
               <div v-if="progressView" class="status-progress">
                 <span class="status-progress-track">

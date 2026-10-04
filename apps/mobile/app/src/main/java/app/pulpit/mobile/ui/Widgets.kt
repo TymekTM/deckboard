@@ -847,13 +847,13 @@ private fun StatusArt(bitmap: ImageBitmap, modifier: Modifier = Modifier) {
 private fun StatusData.rowValue(name: String): String =
     rows.firstOrNull { it.label.equals(name, ignoreCase = true) }?.value.orEmpty()
 
-/** The media card's text block: the track title bold on up to two
- *  lines, the artist under it, and - only from two cells of width -
- *  the album plus the payload's extra label/value rows (Device, ...).
- *  The duplicated summary line never renders here, so one narrow cell
- *  still reads cleanly. */
+/** The media card's text block: the track title bold, the artist under
+ *  it, and - only when BOTH dimensions have two cells, so the extra
+ *  lines cannot truncate into noise - the album plus the payload's
+ *  extra rows as one dim "Label: value" line each. The duplicated
+ *  summary never renders here. Mirrors the TileCell.vue media card. */
 @Composable
-private fun StatusMediaText(data: StatusData, wide: Boolean) {
+private fun StatusMediaText(data: StatusData, meta: Boolean, titleLines: Int) {
     val title = data.rowValue("Track")
     val artist = data.rowValue("Artist")
     val extras = data.rows.filter {
@@ -869,7 +869,7 @@ private fun StatusMediaText(data: StatusData, wide: Boolean) {
                 fontWeight = FontWeight.Bold,
                 lineHeight = 15.sp,
                 color = Color.White,
-                maxLines = 2,
+                maxLines = titleLines,
                 overflow = TextOverflow.Ellipsis,
             )
         }
@@ -882,7 +882,7 @@ private fun StatusMediaText(data: StatusData, wide: Boolean) {
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (wide) {
+        if (meta) {
             val album = data.rowValue("Album")
             if (album.isNotEmpty()) {
                 Text(
@@ -894,32 +894,13 @@ private fun StatusMediaText(data: StatusData, wide: Boolean) {
                 )
             }
             extras.forEach { row ->
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    StatusDot(row.state)
-                    Spacer(Modifier.size(7.dp))
-                    Text(
-                        text = row.label,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    if (row.value.isNotEmpty()) {
-                        Spacer(Modifier.size(6.dp))
-                        Text(
-                            text = row.value,
-                            fontSize = 10.5.sp,
-                            color = Color.White.copy(alpha = 0.85f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
+                Text(
+                    text = if (row.label.isNotEmpty()) "${row.label}: ${row.value}" else row.value,
+                    fontSize = 10.sp,
+                    color = Color.White.copy(alpha = 0.45f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -939,7 +920,8 @@ private fun StatusMediaView(
     receivedAtMs: Long,
     modifier: Modifier = Modifier,
 ) {
-    val wide = tile.w >= 2
+    val wide = tile.w >= 2 && tile.h >= 2
+    val titleLines = if (tile.h >= 2) 2 else 1
     Box(modifier.fillMaxSize()) {
         if (tile.w > tile.h) {
             Row(
@@ -956,9 +938,9 @@ private fun StatusMediaView(
                     Modifier.weight(0.58f),
                     verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically),
                 ) {
-                    StatusMediaText(data, wide)
+                    StatusMediaText(data, meta = wide, titleLines = titleLines)
                     data.progress?.let {
-                        StatusMediaBar(it, receivedAtMs, showTimes = wide)
+                        StatusMediaBar(it, receivedAtMs, showTimes = tile.w >= 2)
                     }
                 }
             }
@@ -972,9 +954,9 @@ private fun StatusMediaView(
                 if (art != null) {
                     StatusArt(art, Modifier.fillMaxWidth().weight(1f))
                 }
-                StatusMediaText(data, wide)
+                StatusMediaText(data, meta = wide, titleLines = titleLines)
                 data.progress?.let {
-                    StatusMediaBar(it, receivedAtMs, showTimes = wide)
+                    StatusMediaBar(it, receivedAtMs, showTimes = tile.w >= 2)
                 }
             }
         }
