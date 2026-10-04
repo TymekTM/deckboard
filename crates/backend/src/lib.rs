@@ -58,10 +58,7 @@ impl SqlBackend {
             discord_client: Mutex::new(None),
             spotify: None,
             speaker: Mutex::new(None),
-            http_agent: ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(10)))
-                .build()
-                .new_agent(),
+            http_agent: pulpit_db::http_agent(std::time::Duration::from_secs(10), true),
         }
     }
 

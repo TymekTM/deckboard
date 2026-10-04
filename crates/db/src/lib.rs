@@ -245,10 +245,11 @@ impl Db {
     }
 
     /// Open the database for reading and writing, creating an empty
-    /// schema when the file does not exist (a clean install has no legacy
-    /// copy to migrate). The caller becomes the single writer - the
-    /// original desktop app must not have the file open (docs/decisions.md
-    /// ADR-001).
+    /// schema when the file does not exist - or when it exists but has
+    /// none (an empty or hand-created placeholder must not open into a
+    /// database every query fails on). The caller becomes the single
+    /// writer - the original desktop app must not have the file open
+    /// (docs/decisions.md ADR-001).
     pub fn open_read_write(path: Option<&Path>) -> Result<Db> {
         let path = match path {
             Some(p) => p.to_path_buf(),
@@ -269,6 +270,23 @@ impl Db {
             return Ok(Db { conn });
         }
         let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        // A file that merely exists may be empty or junk (torn third-party
+        // write): probe the schema instead of trusting the file. A real
+        // database answers "tables present" and nothing is written;
+        // create_schema's CREATE TABLE IF NOT EXISTS makes the other case
+        // idempotent.
+        let has_boards: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'Boards')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_boards {
+            create_schema(&conn)?;
+            tracing::info!(
+                path = %path.display(),
+                "existing database file had no schema - created it"
+            );
+        }
         tracing::info!(path = %path.display(), "opened pulpitApp database (read-write)");
         Ok(Db { conn })
     }
@@ -681,6 +699,27 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             Err(e)
         }
     }
+}
+
+/// Shared HTTP client constructor: one place for the timeout policy and
+/// the user agent every Pulpit HTTP call carries. `status_as_error` picks
+/// ureq's default behavior (4xx/5xx become `ureq::Error::Status`) or the
+/// tolerant one APIs like Discord's local RPC need (every status comes
+/// back as a `Response`).
+///
+/// Users today: pulpit-discord (OAuth calls), pulpit-aidev (provider
+/// limits + Antigravity quota), pulpit-backend (third-party app pings).
+/// Skip-sized timeouts on purpose: Discord's local pipe API answers
+/// instantly, quota/limits endpoints can be slow. New HTTP consumers -
+/// `crates/spotify` is next - must build their agents through this
+/// instead of rolling another `Agent::config_builder()` chain.
+pub fn http_agent(global_timeout: std::time::Duration, status_as_error: bool) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(global_timeout))
+        .http_status_as_error(status_as_error)
+        .user_agent(concat!("pulpit/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .new_agent()
 }
 
 /// `<path>.tmp` in the same directory, so the rename stays on one volume.
@@ -1240,6 +1279,33 @@ mod tests {
     }
 
     #[test]
+    fn open_read_write_creates_schema_for_an_empty_existing_file() {
+        // the file merely existing must not count as "schema present": a
+        // 0-byte placeholder (or torn write) used to open "successfully"
+        // and then fail every query with "no such table"
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        std::fs::write(&path, b"").unwrap();
+
+        let db = Db::open_read_write(Some(&path)).unwrap();
+        assert!(db.get_boards().unwrap().is_empty());
+        let id = db.insert_board("First", "#2c3e50", 4, 3).unwrap();
+        assert!(db.get_board(id).unwrap().is_some());
+    }
+
+    #[test]
+    fn open_read_write_rejects_a_non_sqlite_file() {
+        // junk bytes are not rescuable: say so at open instead of handing
+        // back a database whose every query fails with "not a database"
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        std::fs::write(&path, b"this is not sqlite at all").unwrap();
+
+        let err = Db::open_read_write(Some(&path)).unwrap_err();
+        assert!(matches!(err, DbError::Sqlite(_)), "got {err:?}");
+    }
+
+    #[test]
     fn open_read_write_still_errors_on_an_unwritable_path() {
         // creation cannot rescue a path whose parent cannot exist
         let err = Db::open_read_write(Some(Path::new("Z:/nope/pulpit.db"))).unwrap_err();
@@ -1290,5 +1356,43 @@ mod tests {
         assert_eq!((b.x, b.y), (None, Some(1)));
         assert_eq!(b.position, None);
         assert_eq!(b.position2, 2);
+    }
+
+    #[test]
+    fn http_agent_carries_the_pulpit_user_agent() {
+        // one shared constructor means one user agent: assert it survives
+        // onto the wire so the policy stays in this one place
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = std::io::Read::read(&mut sock, &mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            let _ = std::io::Write::write_all(
+                &mut sock,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+            );
+            String::from_utf8_lossy(&head).into_owned()
+        });
+        let mut resp = http_agent(std::time::Duration::from_secs(10), true)
+            .get(&format!("http://{addr}/ua"))
+            .call()
+            .unwrap();
+        let _ = resp.body_mut().read_to_string();
+        let head = server.join().unwrap();
+        let header = head
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("user-agent:"))
+            .expect("user agent header present");
+        let (name, value) = header.split_once(':').unwrap();
+        assert_eq!(name.to_ascii_lowercase(), "user-agent");
+        assert_eq!(value.trim(), format!("pulpit/{}", env!("CARGO_PKG_VERSION")));
     }
 }
