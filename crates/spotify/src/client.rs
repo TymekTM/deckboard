@@ -136,6 +136,7 @@ struct Inner {
 /// The integration handle. Clone is cheap (`Arc`); requests serialize
 /// through the shared state, so clones (backend + poller + host) never
 /// race tokens or the rate-limit pause.
+#[derive(Clone)]
 pub struct Spotify {
     inner: Arc<Inner>,
 }

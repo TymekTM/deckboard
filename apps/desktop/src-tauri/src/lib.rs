@@ -35,6 +35,13 @@ struct DesktopState {
     /// `pulpitApp/aidev.json` - the AI dev-work producer's config (plan
     /// API keys, and the AI-usage tile selection under `status`).
     aidev_config: Option<std::path::PathBuf>,
+    /// The native Spotify handle (cheap clone over the shared state the
+    /// backend exec chain uses). `None` only when `spotify.json` exists
+    /// but is unreadable - the Settings panel then shows Spotify as
+    /// unavailable instead of silently wiping the file.
+    spotify: Option<pulpit_spotify::Spotify>,
+    /// `pulpitApp/spotify.json` - the Spotify config (client id + tokens).
+    spotify_path: Option<std::path::PathBuf>,
 }
 
 impl DesktopState {
@@ -344,9 +351,28 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             hotkey: std::sync::Mutex::new(DEFAULT_HOTKEY.to_string()),
             settings_path: None,
             aidev_config: Some(aidev_config),
+            spotify: None,
+            spotify_path: None,
         };
     }
     let db = db.unwrap();
+
+    // PULPIT_SPOTIFY_CONFIG overrides the config location (profiling /
+    // hermetic runs), like PULPIT_AIDEV_CONFIG for aidev.
+    let spotify_path = std::env::var_os("PULPIT_SPOTIFY_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("spotify.json"));
+    // The desktop always builds the handle (a missing file is a default,
+    // logged-out config) so Settings can paste a client id and log in.
+    // Only an unreadable file (corrupt JSON) leaves Spotify disabled -
+    // failing closed instead of overwriting the user's config.
+    let spotify = match pulpit_spotify::SpotifyConfig::load(&spotify_path) {
+        Ok(config) => Some(pulpit_spotify::Spotify::new(config, spotify_path.clone())),
+        Err(e) => {
+            tracing::error!("spotify.json exists but cannot be read: {e} - Spotify disabled");
+            None
+        }
+    };
 
     let settings: serde_json::Value = std::fs::read_to_string(data_dir.join("settings.json"))
         .ok()
@@ -374,7 +400,8 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             .with_discord(
                 pulpit_discord::DiscordConfig::from_settings(&settings),
                 data_dir.join("settings.json"),
-            ),
+            )
+            .with_spotify(spotify.clone()),
     );
 
     let hub = Arc::new(Hub::new());
@@ -482,6 +509,44 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         backend.clone() as Arc<dyn Backend>,
     ));
 
+    // Spotify (when its config is readable): the poller's consumers
+    // signal counts connected legacy + v2 clients plus this host's extra
+    // consumer - the visible editor window (a tray-hidden window renders
+    // nothing). Snapshots ride the shared spotify pump, which strips the
+    // internal art key and imports album art into the v2 asset store.
+    {
+        let (consumers_count, consumers) = pulpit_host::consumer_signal();
+        let app_for_consumers = app.clone();
+        let extra: Arc<dyn Fn() -> usize + Send + Sync> = Arc::new(move || {
+            app_for_consumers
+                .get_webview_window("main")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false) as usize
+        });
+        tauri::async_runtime::spawn(pulpit_host::consumer_sampler(
+            consumers_count,
+            hub.clone(),
+            v2.as_ref().map(|v2| v2.hub.clone()),
+            Some(extra),
+        ));
+        match &spotify {
+            Some(spotify) => {
+                tauri::async_runtime::spawn(pulpit_host::spotify::forward_spotify(
+                    feed.clone(),
+                    pulpit_spotify::spawn_push(spotify.clone(), consumers),
+                    v2.as_ref().map(|v2| v2.assets.clone()),
+                ));
+            }
+            None => {
+                // Spotify disabled: say so once (`spotify-auth: "off"`),
+                // no poller exists.
+                tauri::async_runtime::spawn(pulpit_host::spotify::forward_spotify_disabled(
+                    feed.clone(),
+                ));
+            }
+        }
+    }
+
     let state = Arc::new(AppState {
         hub: hub.clone(),
         backend: backend.clone() as Arc<dyn Backend>,
@@ -563,6 +628,8 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         hotkey: std::sync::Mutex::new(hotkey),
         settings_path: Some(settings_path),
         aidev_config: Some(aidev_config),
+        spotify,
+        spotify_path: Some(spotify_path),
     }
 }
 
@@ -921,6 +988,16 @@ fn list_known_inputs(state: State<'_, DesktopState>) -> Vec<serde_json::Value> {
         }));
     }
     for (value, icon, color, mode) in pulpit_discord::input_declarations() {
+        out.push(serde_json::json!({
+            "value": value,
+            "icon": icon,
+            "color": color,
+            "mode": mode,
+            "command": serde_json::Value::Null,
+            "source": "device",
+        }));
+    }
+    for (value, icon, color, mode) in pulpit_spotify::input_declarations() {
         out.push(serde_json::json!({
             "value": value,
             "icon": icon,

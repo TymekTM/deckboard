@@ -18,3 +18,7 @@ pulpit-aidev = { path = "../aidev" }
 pulpit-sysinfo = { path = "../sysinfo" }
 pulpit-vm = { path = "../vm" }
 pulpit-discord = { path = "../discord" }
+pulpit-spotify = { path = "../spotify" }
+
+[dev-dependencies]
+tempfile = "3"

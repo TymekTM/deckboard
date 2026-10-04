@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+pub mod spotify;
+
 /// The client lanes a live-value producer fans out to. Implemented once
 /// per host: the desktop adds its WebView as an extra sink, the headless
 /// server has none beyond the two protocols.
@@ -281,6 +283,45 @@ pub async fn activity_loop(
     }
 }
 
+/// The "consumers" signal `pulpit_spotify::spawn_push` polls: how many
+/// live state consumers exist right now. The legacy hub's session count
+/// sits behind an async mutex, so the signal is a counter a 1 s sampler
+/// ([`consumer_sampler`]) keeps current and the sync reader closure the
+/// poller's plain thread loads. Returns `(counter, reader)`.
+pub fn consumer_signal() -> (
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<dyn Fn() -> usize + Send + Sync + 'static>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let count = Arc::new(AtomicUsize::new(0));
+    let reader = count.clone();
+    (
+        count,
+        Arc::new(move || reader.load(Ordering::Relaxed)),
+    )
+}
+
+/// One consumers sample, taken every second: connected legacy clients +
+/// connected v2 clients + whatever host-local consumer `extra` counts
+/// (the desktop adds its visible editor window). Spawned with the
+/// host's own spawn flavor (`tauri::async_runtime` vs `tokio::spawn`).
+/// `v2_hub` is `None` when the v2 stack failed to start.
+pub async fn consumer_sampler(
+    count: Arc<std::sync::atomic::AtomicUsize>,
+    legacy: Arc<pulpit_legacy::Hub>,
+    v2_hub: Option<Arc<pulpit_v2::V2Hub>>,
+    extra: Option<Arc<dyn Fn() -> usize + Send + Sync + 'static>>,
+) {
+    use std::sync::atomic::Ordering;
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        let host_extra = extra.as_deref().map(|f| f()).unwrap_or(0);
+        let clients = legacy.len().await + v2_hub.as_ref().map_or(0, |hub| hub.count());
+        count.store(clients + host_extra, Ordering::Relaxed);
+    }
+}
+
 /// The extension packages native code replaces (their JS runtimes were
 /// the heaviest part of the fleet); `ExtManager::load` must skip them.
 /// One list, both hosts.
@@ -351,6 +392,11 @@ pub fn register_inputs(ext: &pulpit_ext::ExtManager) {
     // native AI dev-work display tiles (plan limits, agent progress)
     for (value, icon, color, mode) in pulpit_aidev::input_declarations() {
         register_input(value, Some(icon), Some(color), "fas", Some(mode), None);
+    }
+    // native Spotify (control buttons + the custom-value toggles and
+    // slider/status shapes the pushed state keys drive)
+    for (value, icon, color, mode) in pulpit_spotify::input_declarations() {
+        register_input(value, Some(icon), Some(color), "fas", mode, None);
     }
 }
 
