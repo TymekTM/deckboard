@@ -3657,10 +3657,8 @@ dependencies = [
  "pulpit-spotify",
  "pulpit-sysinfo",
  "pulpit-vm",
- "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
  "tracing",
  "ureq",
 ]
@@ -3775,7 +3773,6 @@ dependencies = [
  "pulpit-actions",
  "pulpit-db",
  "rand 0.8.8",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -3791,7 +3788,6 @@ dependencies = [
  "image",
  "tempfile",
  "thiserror 2.0.21",
- "tracing",
  "windows 0.58.0",
 ]
 
