@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from "vue";
-import { stateActive, VM_SLIDER_RESET } from "../catalog";
+import { stateActive, VM_SLIDER_RESET, parsePlanWindows } from "../catalog";
 
 // One tile. Isolated so a live state push re-renders only the tiles that
 // read the pushed key, not the whole board. Geometry (grid position,
@@ -11,9 +11,8 @@ const props = defineProps({
   touch: { type: Boolean, default: false },
   // type -> {icon, color, mode, dual} fallbacks from the action catalog
   typeMeta: { type: Object, default: () => ({}) },
-  // live state pushes (APP_CUSTOM_VALUE / APP_*), see applyStatusUpdate
+  // live state pushes (APP_CUSTOM_VALUE), see applyStatusUpdate
   customValues: { type: Object, default: () => ({}) },
-  appStates: { type: Object, default: () => ({}) },
   // board id -> name, for board-switch tiles without a title
   boardNames: { type: Object, default: () => ({}) },
   // editor-preview dual-state flip from the parent's session Set
@@ -38,7 +37,7 @@ const cmd = computed(() => {
 // Whether the tile renders its second state. A known live state wins
 // (original ToggleButton isActive); otherwise the session tap flip.
 const activeState = computed(() => {
-  const state = stateActive(props.tile, cmd.value, props.customValues, props.appStates, props.typeMeta);
+  const state = stateActive(props.tile, cmd.value, props.customValues, props.typeMeta);
   return state !== null ? state : props.active;
 });
 
@@ -155,13 +154,15 @@ const statusCompact = computed(() => {
 // Per-tile editor option stored in the tile's options column as
 // "windows:5h,week" (missing token = both): percent rows of windows the
 // user unticked drop out; agent rows carry no percent, never touched.
+// The token parses through the shared catalog helper (DESK-10) - the
+// edit dialog's checkboxes write the same format - and only once per
+// options change instead of once per row.
+const planWant = computed(() => parsePlanWindows(props.tile.options));
 function planWindowHidden(label) {
   if (typeof label !== "string") return false;
-  const match = String(props.tile.options || "").match(/(?:^|;)windows:([^;]*)/);
-  if (!match) return false;
-  const want = match[1].split(",").map((s) => s.trim()).filter(Boolean);
-  if (label.endsWith(" 5h")) return !want.includes("5h");
-  if (label.endsWith(" week")) return !want.includes("week");
+  const want = planWant.value;
+  if (label.endsWith(" 5h")) return !want.five;
+  if (label.endsWith(" week")) return !want.week;
   return false;
 }
 

@@ -299,7 +299,7 @@ impl Config {
     }
 }
 
-/// ---- push loop ---------------------------------------------------------------
+// ---- push loop ---------------------------------------------------------------
 
 /// Spawn the poll loop; values arrive as one object with the ai-* keys.
 pub fn spawn_push(paths: Paths) -> tokio_mpsc::UnboundedReceiver<serde_json::Value> {
@@ -332,7 +332,7 @@ fn push_loop(tx: &tokio_mpsc::UnboundedSender<serde_json::Value>, paths: Paths) 
         codex.scan(local_usage::Format::Codex, &paths.codex_sessions);
         opencode.scan(&paths.opencode_db, now);
         antigravity.scan(&paths.antigravity_conversations, now);
-        if last_http.map_or(true, |t| t.elapsed() >= http_every) {
+        if last_http.is_none_or(|t| t.elapsed() >= http_every) {
             http.refresh(&config, &paths);
             last_http = Some(std::time::Instant::now());
         }
@@ -357,6 +357,7 @@ fn push_loop(tx: &tokio_mpsc::UnboundedSender<serde_json::Value>, paths: Paths) 
 
 /// One snapshot of every ai-* key. `rows` are display-ready so the tile
 /// renderer stays dumb; `percent` (0..100) drives the thin usage bars.
+#[allow(clippy::too_many_arguments)] // nine read-only inputs into one private fn; a params struct is churn in this perf-frozen crate
 fn assemble(
     config: &Config,
     http: &limits::HttpState,

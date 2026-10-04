@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
-import { CELL_W, ROW_H, MAX_BOARD_DIM } from "../catalog";
+import { CELL_W, ROW_H, MAX_BOARD_DIM, clamp } from "../catalog";
 import TileCell from "./TileCell.vue";
 
 // Edit-mode grid: drag to move, corner handle to resize, double-click to
@@ -13,9 +13,8 @@ const props = defineProps({
   zoom: { type: Number, default: 1 },
   // type -> {icon, color, mode, dual} fallbacks from the action catalog
   typeMeta: { type: Object, default: () => ({}) },
-  // live state pushes (APP_CUSTOM_VALUE / APP_*), see applyStatusUpdate
+  // live state pushes (APP_CUSTOM_VALUE), see applyStatusUpdate
   customValues: { type: Object, default: () => ({}) },
-  appStates: { type: Object, default: () => ({}) },
   // board id -> name, for board-switch tiles without a title
   boardNames: { type: Object, default: () => ({}) },
 });
@@ -41,24 +40,46 @@ const gridStyle = computed(() => ({
   backgroundSize: "cover",
 }));
 
+// Base geometry per tile, memoized in one computed: the returned objects
+// keep their identity across pointer events, so a drag re-renders only
+// the dragged tile instead of handing every TileCell a fresh style object
+// per pointermove (DESK-12) - Vue's child update check then hits the
+// `a === b` fast path instead of deep-comparing styles for ~1000 tiles
+// at 60-125 Hz.
+const baseStyles = computed(() => {
+  const map = new Map();
+  for (const t of props.board.buttons) {
+    map.set(t, {
+      // clamp to W-w / H-h so a multi-cell tile never hangs over the edge
+      left: `${clamp(t.x, 0, Math.max(0, props.board.width - t.w)) * cell.value}px`,
+      top: `${clamp(t.y, 0, Math.max(0, props.board.height - t.h)) * row.value}px`,
+      width: `${clamp(t.w, 1, props.board.width) * cell.value}px`,
+      height: `${clamp(t.h, 1, props.board.height) * row.value}px`,
+      zIndex: 1,
+    });
+  }
+  return map;
+});
+
+// The dragged (or resized) tile alone gets a fresh style per pointer
+// event with the live offset applied; every other tile keeps its
+// memoized object and skips the child update entirely.
 function tileStyle(tile) {
   const d = drag.value && drag.value.tile.id === tile.id ? drag.value : null;
-  const x = d && d.mode === "move" ? tile.x + d.cx : tile.x;
-  const y = d && d.mode === "move" ? tile.y + d.cy : tile.y;
-  const w = d && d.mode === "resize" ? Math.max(1, tile.w + d.cw) : tile.w;
-  const h = d && d.mode === "resize" ? Math.max(1, tile.h + d.ch) : tile.h;
+  const base = baseStyles.value.get(tile);
+  if (!d) return base;
+  const x = d.mode === "move" ? tile.x + d.cx : tile.x;
+  const y = d.mode === "move" ? tile.y + d.cy : tile.y;
+  const w = d.mode === "resize" ? Math.max(1, tile.w + d.cw) : tile.w;
+  const h = d.mode === "resize" ? Math.max(1, tile.h + d.ch) : tile.h;
   return {
-    // clamp to W-w / H-h so a multi-cell tile never hangs over the edge
+    ...base,
     left: `${clamp(x, 0, Math.max(0, props.board.width - w)) * cell.value}px`,
     top: `${clamp(y, 0, Math.max(0, props.board.height - h)) * row.value}px`,
     width: `${clamp(w, 1, props.board.width) * cell.value}px`,
     height: `${clamp(h, 1, props.board.height) * row.value}px`,
-    zIndex: d ? 10 : 1,
+    zIndex: 10,
   };
-}
-
-function clamp(v, min, max) {
-  return Math.min(max, Math.max(min, v));
 }
 
 // every unoccupied grid position renders as a visible empty slot, like the
@@ -285,7 +306,6 @@ function onGridClick(event) {
         :touch="touch"
         :type-meta="typeMeta"
         :custom-values="customValues"
-        :app-states="appStates"
         :board-names="boardNames"
         :active="activeTiles.has(tile.id)"
         :dragging="Boolean(drag && drag.tile.id === tile.id)"

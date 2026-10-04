@@ -13,10 +13,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,12 +26,10 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -120,22 +116,6 @@ fun BoardScreen(vm: PulpitViewModel) {
                 )
             }
         }
-    }
-}
-
-/** Static busy ring: deck tablets often run with animator scales off,
- *  which freezes an indeterminate spinner into an invisible dot. A fixed
- *  300-degree arc reads as "busy" on every device. */
-@Composable
-private fun RingSpinner(modifier: Modifier = Modifier) {
-    Canvas(modifier.size(34.dp)) {
-        drawArc(
-            color = Color.White,
-            startAngle = -90f,
-            sweepAngle = 300f,
-            useCenter = false,
-            style = Stroke(width = 6f, cap = StrokeCap.Round),
-        )
     }
 }
 
@@ -302,9 +282,12 @@ private fun BoardGrid(vm: PulpitViewModel, board: Board, modifier: Modifier) {
     val positions = remember(board.id) { mutableStateMapOf<Long, Boolean>() }
 
     // a board image wins over the color (like the original client); the
-    // color shows through while the asset loads
+    // color shows through while the asset loads. Backgrounds decode at
+    // ~screen width (MOB-07), not the 512px tile cap
     val bgAsset = board.background?.hash
-    LaunchedEffect(bgAsset) { bgAsset?.let { vm.ensureAsset(it) } }
+    LaunchedEffect(bgAsset) {
+        bgAsset?.let { vm.ensureAsset(it, maxDim = PulpitViewModel.ASSET_BG_DIM) }
+    }
     val bgBitmap by remember(bitmaps, bgAsset) {
         derivedStateOf { bgAsset?.let { bitmaps.value[it] } }
     }

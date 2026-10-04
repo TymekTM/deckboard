@@ -6,7 +6,6 @@
 
 package app.pulpit.mobile.net
 
-import android.util.Log
 import app.pulpit.mobile.proto.BoardsDelta
 import app.pulpit.mobile.proto.BoardsSync
 import app.pulpit.mobile.proto.BoardOp
@@ -21,9 +20,10 @@ import app.pulpit.mobile.proto.StateSync
 import app.pulpit.mobile.proto.V2
 import app.pulpit.mobile.proto.Welcome
 import app.pulpit.mobile.proto.decodeDeltaOps
+import app.pulpit.mobile.proto.PULPIT_JSON
+import app.pulpit.mobile.state.Plog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -103,7 +103,7 @@ class V2Client(
     private val pairCode: String?,
     private val deviceName: String,
 ) {
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val json = PULPIT_JSON
 
     private val _state = MutableStateFlow<ConnState>(ConnState.Connecting(host, port))
     val state: StateFlow<ConnState> = _state
@@ -127,10 +127,28 @@ class V2Client(
                 return
             }
         }
+        // MOB-01: a malformed host/port (saved by an older build, or a
+        // 5-digit port that passed the digit filter) must surface as a
+        // Failed state, never as OkHttp's IllegalArgumentException
+        // through the caller - a paired device would crash-loop at
+        // every launch otherwise. The same bad address can never
+        // connect, so the failure is terminal.
+        val invalid = addressError(host, port)
+        if (invalid != null) {
+            Plog.w(TAG, "invalid address \"$host:$port\" - not connecting")
+            _state.value = ConnState.Failed(invalid, retryable = false)
+            return
+        }
         val url = "ws://$host:$port/v2/ws?$auth"
-        Log.i(TAG, "connecting to ws://$host:$port/v2/ws")
+        Plog.i(TAG, "connecting to ws://$host:$port/v2/ws")
         _state.value = ConnState.Connecting(host, port)
-        webSocket = http.newWebSocket(Request.Builder().url(url).build(), listener)
+        webSocket = runCatching {
+            http.newWebSocket(Request.Builder().url(url).build(), listener)
+        }.getOrElse {
+            Plog.w(TAG, "cannot build socket URL for \"$host:$port\": ${it.message}")
+            _state.value = ConnState.Failed("invalid address: \"$host:$port\"", retryable = false)
+            null
+        }
     }
 
     fun disconnect() {
@@ -189,7 +207,7 @@ class V2Client(
      *  deliberate. Surface the terminal state, then close politely so the
      *  server's teardown sees an acked peer. */
     private fun onServerShutdown() {
-        Log.i(TAG, "server is shutting down - standing down")
+        Plog.i(TAG, "server is shutting down - standing down")
         _state.value = ConnState.ServerDown
         webSocket?.close(1000, "server shutdown acknowledged")
     }
@@ -197,13 +215,13 @@ class V2Client(
     private fun sendFrame(frame: Frame) {
         val text = json.encodeToString(Frame.serializer(), frame)
         if (webSocket?.send(text) != true) {
-            Log.w(TAG, "frame dropped, socket closed")
+            Plog.w(TAG, "frame dropped, socket closed")
         }
     }
 
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            Log.i(TAG, "socket open, sending hello")
+            Plog.i(TAG, "socket open, sending hello")
             sendFrame(
                 Frame(
                     v = V2.PROTOCOL,
@@ -224,16 +242,26 @@ class V2Client(
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             runCatching { handleFrame(text) }
-                .onFailure { Log.w(TAG, "bad frame: $text", it) }
+                .onFailure {
+                    // MOB-12: a frame can be up to 1 MiB - dump only its
+                    // head into the log. A malformed welcome would
+                    // otherwise land the fresh pairing token it carries
+                    // in logcat and the field log (ADR-008: never token
+                    // material).
+                    Plog.w(
+                        TAG,
+                        "bad frame (${it.javaClass.simpleName}: ${it.message}): ${text.take(BAD_FRAME_LOG_CHARS)}",
+                    )
+                }
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            Log.i(TAG, "closed: $reason")
+            Plog.i(TAG, "closed: $reason")
             setStateUnlessTerminal(ConnState.Disconnected)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            Log.w(TAG, "failure: ${t.message} (http ${response?.code})")
+            Plog.w(TAG, "failure: ${t.message} (http ${response?.code})")
             setStateUnlessTerminal(failureState(response?.code, t.message))
         }
     }
@@ -277,7 +305,7 @@ class V2Client(
                     // snapshot is no longer trustworthy. Close the socket
                     // so the reconnect path fetches a fresh boards.sync -
                     // staying would drift silently from the desktop.
-                    Log.w(TAG, "rejected boards.delta op - reconnecting for a fresh snapshot")
+                    Plog.w(TAG, "rejected boards.delta op - reconnecting for a fresh snapshot")
                     webSocket?.close(1000, "delta op rejected")
                     return
                 }
@@ -300,7 +328,7 @@ class V2Client(
             }
             V2.TYPE_ERROR -> {
                 val error = json.decodeFromJsonElement(ErrorPayload.serializer(), payload)
-                Log.w(TAG, "server error: ${error.code} ${error.message.orEmpty()}")
+                Plog.w(TAG, "server error: ${error.code} ${error.message.orEmpty()}")
                 val fatal = FATAL_CODES.contains(error.code)
                 if (fatal) {
                     // Terminal before the event and the close, so the
@@ -317,7 +345,7 @@ class V2Client(
                 if (ack != null) {
                     _events.trySend(V2Event.Acked(ack))
                 } else {
-                    Log.d(TAG, "ignored frame type ${frame.type}")
+                    Plog.i(TAG, "ignored frame type ${frame.type}")
                 }
             }
         }
@@ -325,6 +353,11 @@ class V2Client(
 
     companion object {
         private const val TAG = "V2Client"
+
+        /** How much of an undecodable frame reaches the log (MOB-12):
+         *  frames can carry up to 1 MiB, and a malformed welcome would
+         *  otherwise print the pairing token it contains. */
+        private const val BAD_FRAME_LOG_CHARS = 256
 
         /** One client per process. OkHttp keeps its own thread pools and
          *  connection pool; building an instance per reconnect would leak
@@ -336,6 +369,16 @@ class V2Client(
             // socket when a pong is missing (keepalive is protocol-level,
             // docs/protocol-v2.md §7 - no app frames).
             .pingInterval(KEEPALIVE_SECONDS, TimeUnit.SECONDS)
+            .build()
+
+        /** Plain-HTTP client for pairing and asset fetches (MOB-13):
+         *  the same pool and dispatcher threads as [http] - a second
+         *  OkHttpClient singleton used to keep its own on a 1 GB device -
+         *  with the websocket-unfriendly settings replaced by a finite
+         *  read timeout. */
+        val httpCalls: OkHttpClient = http.newBuilder()
+            .readTimeout(30, TimeUnit.SECONDS)
+            .pingInterval(0, TimeUnit.MILLISECONDS)
             .build()
         const val CLIENT = "pulpit-mobile"
 

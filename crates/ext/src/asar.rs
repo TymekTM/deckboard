@@ -202,7 +202,7 @@ mod tests {
         out.extend_from_slice(&4u32.to_le_bytes());
         out.extend_from_slice(&(json_len as u32).to_le_bytes());
         out.extend_from_slice(json_bytes);
-        out.extend(std::iter::repeat(0).take((4 - (json_len % 4)) % 4));
+        out.extend(std::iter::repeat_n(0, (4 - (json_len % 4)) % 4));
         out.extend_from_slice(b"content-bytes");
         out
     }

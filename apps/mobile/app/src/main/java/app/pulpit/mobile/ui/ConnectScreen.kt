@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -45,7 +44,7 @@ import app.pulpit.mobile.net.NsdDiscovery
 import app.pulpit.mobile.state.PulpitViewModel
 
 @Composable
-fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
+fun ConnectScreen(vm: PulpitViewModel) {
     val cfg by vm.config.collectAsState()
     val conn by vm.connState.collectAsState()
     val context = LocalContext.current
@@ -54,6 +53,9 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
     var port by remember(cfg.port) { mutableStateOf(cfg.port.toString()) }
     var name by remember(cfg.name) { mutableStateOf(cfg.name) }
     var pairCode by remember { mutableStateOf("") }
+    // MOB-01: set when the typed host/port cannot become a URL - shown
+    // instead of connecting (and before saveConfig persists the bad pair)
+    var addressError by remember { mutableStateOf<String?>(null) }
     val paired = !cfg.token.isNullOrBlank()
 
     // M8 pairing modes: Auto (pick a desktop discovered over mDNS, both
@@ -239,7 +241,10 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.padding(16.dp),
                 ) {
-                    CircularProgressIndicator()
+                    // the same fixed-arc ring as the board overlay: the
+                    // deck's animator scale is off, a Material
+                    // indeterminate spinner would freeze into a dot
+                    RingSpinner()
                     Text(
                         text = "Connecting to ${cfg.host}:${cfg.port}...",
                         color = Color.White.copy(alpha = 0.7f),
@@ -258,21 +263,38 @@ fun ConnectScreen(vm: PulpitViewModel, onConnected: () -> Unit) {
             else -> {}
         }
 
+        addressError?.let {
+            Text(
+                text = it,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+
         if (!paired && autoMode) {
             // the auto flow is self-contained: picking a desktop starts
             // the request and approval connects on its own
         } else {
             Button(
                 onClick = {
+                    // MOB-01: validate before saving - a persisted
+                    // malformed host crashed (and re-crashed) the app
+                    // on every paired launch
+                    val portNum = port.toIntOrNull() ?: 0
+                    val err = app.pulpit.mobile.net.addressError(host.trim(), portNum)
+                    if (err != null) {
+                        addressError = err
+                        return@Button
+                    }
+                    addressError = null
                     vm.saveConfig(
-                        cfg.copy(host = host.trim(), port = port.toIntOrNull() ?: 8500, name = name.trim()),
+                        cfg.copy(host = host.trim(), port = portNum, name = name.trim()),
                     )
                     if (paired) {
                         vm.connect()
                     } else {
                         vm.connectWithPairCode(pairCode)
                     }
-                    onConnected()
                 },
                 modifier = Modifier.padding(top = 16.dp).fillMaxWidth(),
             ) {

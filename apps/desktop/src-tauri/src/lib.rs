@@ -1464,7 +1464,7 @@ async fn check_for_updates(state: State<'_, DesktopState>) -> Result<serde_json:
     };
     let current = env!("CARGO_PKG_VERSION").to_string();
     let manifest =
-        tauri::async_runtime::spawn_blocking(move || fetch_manifest(&url.trim().to_string()))
+        tauri::async_runtime::spawn_blocking(move || fetch_manifest(url.trim()))
             .await
             .map_err(|e| e.to_string())??;
     let update_available = version_newer(&manifest.version, &current);
@@ -1487,7 +1487,7 @@ fn download_update(url: &str, dest: &std::path::Path) -> Result<(), String> {
         .timeout_global(Some(std::time::Duration::from_secs(600)))
         .build()
         .new_agent();
-    let mut resp = agent
+    let resp = agent
         .get(url)
         .call()
         .map_err(|e| format!("Nie udało się pobrać aktualizacji: {e}"))?;

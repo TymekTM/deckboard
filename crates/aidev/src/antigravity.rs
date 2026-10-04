@@ -66,7 +66,7 @@ pub fn sessions(
     }
 }
 
-/// ---- token usage ------------------------------------------------------------
+// ---- token usage ------------------------------------------------------------
 
 /// Incremental reader over all conversation databases.
 pub struct Usage {
@@ -360,7 +360,7 @@ fn ide_ports() -> Vec<u16> {
         // TCP    127.0.0.1:4123    0.0.0.0:0    LISTENING    12345
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() >= 5 && fields[3].eq_ignore_ascii_case("LISTENING") {
-            if let Some(pid) = fields[4].parse::<u32>().ok() {
+            if let Ok(pid) = fields[4].parse::<u32>() {
                 if pids.contains(&pid) {
                     if let Some(port) = fields[1].rsplit(':').next().and_then(|p| p.parse().ok()) {
                         if !ports.contains(&port) {
@@ -480,7 +480,7 @@ mod tests {
     }
 
     fn field(num: u32, value: u64) -> Vec<u8> {
-        let mut out = varint(((num << 3) | 0) as u64);
+        let mut out = varint((num << 3) as u64); // key: field << 3 | wire type 0 (varint)
         out.extend(varint(value));
         out
     }

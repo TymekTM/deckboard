@@ -34,6 +34,10 @@ pub struct SqlBackend {
     /// authenticated pipe for the process lifetime instead of a fresh
     /// ~450 ms session per click.
     discord_client: Mutex<Option<pulpit_discord::DiscordClient>>,
+    /// Native Spotify integration handle, injected by the host when
+    /// `spotify.json` provides a login; None leaves Spotify actions
+    /// claimed-but-logged-out (the design's NeedsLogin surface).
+    spotify: Option<pulpit_spotify::Spotify>,
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
     speaker: Mutex<Option<Box<dyn pulpit_os::Speaker>>>,
@@ -52,6 +56,7 @@ impl SqlBackend {
             discord: Mutex::new(None),
             discord_settings_path: None,
             discord_client: Mutex::new(None),
+            spotify: None,
             speaker: Mutex::new(None),
             http_agent: ureq::Agent::config_builder()
                 .timeout_global(Some(std::time::Duration::from_secs(10)))
@@ -67,6 +72,14 @@ impl SqlBackend {
     ) -> Self {
         self.discord = Mutex::new(config);
         self.discord_settings_path = Some(settings_path);
+        self
+    }
+
+    /// Attach the native Spotify integration (None = no `spotify.json`
+    /// / not logged in: spotify tile presses still resolve to a typed
+    /// NeedsLogin instead of falling through to the macro dispatcher).
+    pub fn with_spotify(mut self, spotify: Option<pulpit_spotify::Spotify>) -> Self {
+        self.spotify = spotify;
         self
     }
 
@@ -369,6 +382,7 @@ impl Backend for SqlBackend {
             || self.exec_aidev(&cmd)
             || self.exec_callurl(&cmd)
             || self.exec_voicemeeter(&cmd, Some(value))
+            || self.exec_spotify(&cmd, Some(value))
             || self.exec_speaker_volume(&cmd, value)
         {
             return;
@@ -382,9 +396,10 @@ impl Backend for SqlBackend {
 impl SqlBackend {
     /// The native/extension dispatch chain, shared by top-level tile
     /// presses and multiaction steps: run-command, extension, sysinfo,
-    /// aidev, callurl, voicemeeter, discord, speaker, play. Returns true
-    /// when one of them claimed the command (the builtin dispatcher is
-    /// skipped, mirroring the original `runCommand` default case).
+    /// aidev, callurl, voicemeeter, discord, spotify, speaker, play.
+    /// Returns true when one of them claimed the command (the builtin
+    /// dispatcher is skipped, mirroring the original `runCommand`
+    /// default case).
     fn exec_native(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
         self.exec_runcommand(cmd)
             || self.exec_extension(cmd, None)
@@ -393,6 +408,7 @@ impl SqlBackend {
             || self.exec_callurl(cmd)
             || self.exec_voicemeeter(cmd, None)
             || self.exec_discord(cmd, sink)
+            || self.exec_spotify(cmd, None)
             || self.exec_speaker(cmd, sink)
             || self.exec_play(cmd)
     }
@@ -761,6 +777,37 @@ impl SqlBackend {
         Ok(fresh)
     }
 
+    /// Run one Spotify tile action through the native handle
+    /// (`crates/spotify`). Slider kinds arrive here a second time from
+    /// [`Backend::slider`] with their 0..1 value. Failures surface as
+    /// the design's typed errors (Premium required / no active device /
+    /// needs login) - logged with the user-facing message for the
+    /// desktop toast / tablet flash path. Returns true when the kind
+    /// belongs to Spotify.
+    fn exec_spotify(&self, cmd: &pulpit_actions::Command, slider_value: Option<f64>) -> bool {
+        if !pulpit_spotify::is_spotify_action(&cmd.kind) {
+            return false;
+        }
+        let Some(spotify) = &self.spotify else {
+            tracing::warn!(
+                kind = %cmd.kind,
+                message = "Log in to Spotify in Pulpit settings",
+                "spotify action skipped (not configured)"
+            );
+            return true;
+        };
+        let command = cmd.command.as_deref().unwrap_or_default();
+        if let Err(e) = spotify.exec(&cmd.kind, command, slider_value) {
+            tracing::warn!(
+                kind = %cmd.kind,
+                error = %e,
+                message = %pulpit_spotify::user_message(&e),
+                "spotify action failed"
+            );
+        }
+        true
+    }
+
     fn with_input(&self, f: impl FnOnce(&mut dyn pulpit_actions::Input)) {
         let mut guard = self.input.lock().unwrap();
         if guard.is_none() {
@@ -1023,6 +1070,136 @@ mod tests {
                 pulpit_actions::Effect::Sleep(25),
             ]
         );
+    }
+
+    // ---- spotify native arm ---------------------------------------------
+
+    /// Scripted transport shared with the Spotify handle the backend
+    /// owns, so tests can queue answers and read requests afterwards.
+    #[derive(Clone)]
+    struct SharedSpotifyFake(std::sync::Arc<pulpit_spotify::http::FakeTransport>);
+
+    impl pulpit_spotify::http::Transport for SharedSpotifyFake {
+        fn send(
+            &self,
+            req: &pulpit_spotify::http::HttpRequest,
+        ) -> std::result::Result<
+            pulpit_spotify::http::HttpResponse,
+            pulpit_spotify::http::TransportError,
+        > {
+            self.0.send(req)
+        }
+    }
+
+    fn spotify_backend(
+        fake: &SharedSpotifyFake,
+    ) -> (SqlBackend, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spotify.json");
+        pulpit_spotify::SpotifyConfig {
+            client_id: "cid".into(),
+            access_token: "ACCESS".into(),
+            refresh_token: Some("REFRESH".into()),
+            // far-future: no refresh happens during these tests
+            expires_at: Some(4_102_444_800),
+            user: None,
+            product: None,
+        }
+        .save(&path)
+        .unwrap();
+        let config = pulpit_spotify::SpotifyConfig::load(&path).unwrap();
+        let spotify = pulpit_spotify::Spotify::with_transport(
+            config,
+            path.clone(),
+            Box::new(fake.clone()),
+        );
+        (test_backend().with_spotify(Some(spotify)), path, dir)
+    }
+
+    fn control_answer(status: u16) -> pulpit_spotify::http::HttpResponse {
+        pulpit_spotify::http::HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn spotify_kinds_reach_the_native_chain() {
+        let fake = SharedSpotifyFake(std::sync::Arc::new(
+            pulpit_spotify::http::FakeTransport::new(),
+        ));
+        // playing -> pause; then the pause answer
+        fake.0.push_json(200, serde_json::json!({ "is_playing": true }));
+        fake.0.push(control_answer(204));
+        let (backend, _path, _dir) = spotify_backend(&fake);
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+
+        let row = button_row("spotify-playback", Some("play"));
+        backend.exec(row, false, &mut RecSink::default());
+        // the native arm claimed it: two HTTP calls happened and the
+        // macro dispatcher (input effects) never ran
+        assert!(input.effects().is_empty());
+        let requests = fake.0.requests();
+        let urls: Vec<&str> = requests.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls.len(), 2);
+        assert!(urls[0].ends_with("/me/player"));
+        assert!(urls[1].ends_with("/me/player/pause"));
+    }
+
+    #[test]
+    fn spotify_slider_kinds_deliver_the_value() {
+        let fake = SharedSpotifyFake(std::sync::Arc::new(
+            pulpit_spotify::http::FakeTransport::new(),
+        ));
+        fake.0.push(control_answer(204));
+        let (backend, _path, _dir) = spotify_backend(&fake);
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+
+        let mut row = button_row("spotify-volume", None);
+        row.mode = "slider".into();
+        backend.slider(row, 0.55);
+        assert!(input.effects().is_empty());
+        assert!(fake
+            .0
+            .last_url()
+            .ends_with("/me/player/volume?volume_percent=55"));
+    }
+
+    #[test]
+    fn spotify_actions_without_configuration_stay_claimed() {
+        // no with_spotify: the kind is still ours (claimed, warned about,
+        // never falling through to the macro dispatcher)
+        let backend = test_backend();
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+        backend.exec(
+            button_row("spotify-playback", Some("next")),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(input.effects().is_empty());
+    }
+
+    #[test]
+    fn multiaction_spotify_steps_run_the_native_chain() {
+        let fake = SharedSpotifyFake(std::sync::Arc::new(
+            pulpit_spotify::http::FakeTransport::new(),
+        ));
+        fake.0.push(control_answer(204));
+        let (backend, _path, _dir) = spotify_backend(&fake);
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+
+        let row = button_row(
+            "multiaction",
+            Some(r#"[{"type":"spotify-playback","command":"next"}]"#),
+        );
+        backend.exec(row, false, &mut RecSink::default());
+        assert!(input.effects().is_empty());
+        assert!(fake.0.last_url().ends_with("/me/player/next"));
     }
 
     #[test]

@@ -201,7 +201,7 @@ fn resolve_key(cfg: Option<&Apikey>, env: &str) -> Option<String> {
     std::env::var(env).ok().filter(|k| !k.is_empty())
 }
 
-/// ---- HTTP plumbing -----------------------------------------------------------
+// ---- HTTP plumbing -----------------------------------------------------------
 
 pub(crate) fn http_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
@@ -246,7 +246,7 @@ fn http_error_note(body: &str) -> String {
     truncate(&collapsed, 48)
 }
 
-/// ---- built-in providers --------------------------------------------------------
+// ---- built-in providers --------------------------------------------------------
 
 /// OpenRouter key info: `GET /api/v1/key` -> `{data: {usage, limit}}`
 /// (limit is null when no per-key spending cap is set).
@@ -353,7 +353,7 @@ fn custom_row(custom: &crate::CustomProvider) -> ProviderRow {
     }
 }
 
-/// ---- lanes as per-window bars ------------------------------------------------
+// ---- lanes as per-window bars ------------------------------------------------
 
 const GLM_LANE: &str = "GLM";
 
@@ -536,7 +536,7 @@ fn zai_rows_from(v: serde_json::Value) -> Vec<ProviderRow> {
                 .map(str::to_string)
         });
     let mut windows: Vec<(u64, ProviderRow)> =
-        limits.iter().filter_map(|raw| zai_window(raw)).collect();
+        limits.iter().filter_map(zai_window).collect();
     windows.sort_by_key(|(minutes, _)| *minutes);
     if windows.is_empty() {
         return vec![ProviderRow {
@@ -794,7 +794,7 @@ fn rfc3339_to_epoch(text: &str) -> Option<i64> {
         .map(|t| t.timestamp())
 }
 
-/// ---- Codex wham/usage lane -----------------------------------------------------
+// ---- Codex wham/usage lane -----------------------------------------------------
 
 /// Codex OAuth usage lane: read the CLI's own `auth.json` and poll
 /// `wham/usage` so limits and resets stay fresh even when no Codex session
@@ -895,7 +895,7 @@ fn antigravity_quota_rows() -> Vec<ProviderRow> {
     rows
 }
 
-/// ---- row shaping -----------------------------------------------------------
+// ---- row shaping -----------------------------------------------------------
 
 fn usd_row(name: &str, used: f64, limit: Option<f64>) -> ProviderRow {
     numeric_row(name, used, limit, Some("$"))
@@ -958,7 +958,7 @@ fn json_path<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json:
     Some(cur)
 }
 
-/// ---- local transcript rows ---------------------------------------------------
+// ---- local transcript rows ---------------------------------------------------
 
 #[cfg(test)]
 mod tests {

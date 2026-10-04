@@ -32,14 +32,20 @@ The golden wire fixtures in `crates/proto/tests/fixtures` are parsed by
    everything else taps.
 
 The device is a dedicated deck: a live board keeps the screen on and the
-app starts itself after a reboot (`BootReceiver`). When the screen goes
-off (power button, or the system timeout) the app closes its connection
-and reconnects the moment it is back in front. If the PC stays
-unreachable for 3 minutes - asleep, crashed, off the network - the app
-stops holding the screen on, so the system screen timeout applies;
-waking the tablet reconnects. A deliberate server exit (`server.shutdown`)
-switches to the goodbye screen right away. Pairing data survives
-reinstalls as long as the app is updated with `adb install -r`.
+app starts itself after a reboot (`BootReceiver`). A foreground
+keep-alive service (ROADMAP M4, `LinkService`) starts with every paired
+launch and holds the process - and with it the WebSocket - through
+screen-off and Doze, so a dark screen does not starve the link. The
+older plan-008 behavior (close the socket the moment the app leaves the
+foreground) remains as the fallback once the service stops: the
+notification's "Rozłącz" action, unpairing, or swiping the app away put
+it back in charge. Independently of the link policy: if the PC stays
+unreachable for 3 minutes while the deck sits in front - asleep,
+crashed, off the network - the app stops holding the screen on, so the
+system screen timeout applies; waking the tablet reconnects (or repaints
+the cached board). A deliberate server exit (`server.shutdown`) switches
+to the goodbye screen right away. Pairing data survives reinstalls as
+long as the app is updated with `adb install -r`.
 
 ## Notes
 

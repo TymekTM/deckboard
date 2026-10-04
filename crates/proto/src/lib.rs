@@ -242,7 +242,7 @@ pub struct BoardsSync {
 pub enum BoardOp {
     BoardSet { board: Board },
     BoardRemove { board: i64 },
-    TileSet { board: i64, tile: Tile },
+    TileSet { board: i64, tile: Box<Tile> },
     TileRemove { board: i64, tile: i64 },
     TileClear { board: i64 },
 }

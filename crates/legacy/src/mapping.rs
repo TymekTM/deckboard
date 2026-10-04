@@ -128,6 +128,11 @@ impl Mapper {
         if b.kind == "vol" && command == "vol_mute" {
             return Some("custom-value".to_string());
         }
+        // the play command of spotify-playback is a live toggle on the
+        // pushed spotify-playing key (same shape as the vol_mute quirk)
+        if b.kind == "spotify-playback" && b.command.as_deref() == Some("play") {
+            return Some("custom-value".to_string());
+        }
         props.app.clone()
     }
 
@@ -272,8 +277,28 @@ fn transform_command(kind: &str, command: Option<&str>, props: &Props) -> String
     String::new()
 }
 
+/// Spotify dual-state tiles watch pushed keys that differ from the tile
+/// kind (round-4 Spotify design §4): the `play` command of
+/// spotify-playback flips `spotify-playing`, `spotify-repeat` lights on
+/// `spotify-repeat-on`, `spotify-like` on `spotify-liked`, and the seek
+/// slider reads track `spotify-progress`. Like the vol_mute quirk, the
+/// wire must name the pushed key exactly or the stock client never
+/// flips the tile.
+fn spotify_listener(kind: &str, command: Option<&str>) -> Option<&'static str> {
+    match (kind, command.unwrap_or_default()) {
+        ("spotify-playback", "play") => Some("spotify-playing"),
+        ("spotify-repeat", _) => Some("spotify-repeat-on"),
+        ("spotify-like", _) => Some("spotify-liked"),
+        ("spotify-seek", _) => Some("spotify-progress"),
+        _ => None,
+    }
+}
+
 /// The `extra` field: which state key the client watches for toggles/graphs.
 fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props) -> String {
+    if let Some(key) = spotify_listener(kind, command) {
+        return key.to_string();
+    }
     let raw = command.unwrap_or_default();
     if props.json_key.is_some() {
         // jsonKey types use the type as the listener key
@@ -495,6 +520,58 @@ mod tests {
         let basic = m.board_payload(&b, &[], false);
         assert_eq!(basic["width"], 32);
         assert_eq!(basic["shortcuts"].as_array().unwrap().len(), 4 * 3);
+    }
+
+    #[test]
+    fn spotify_tiles_watch_the_pushed_keys() {
+        let m = Mapper::new();
+        // the play command is a live toggle on the pushed key
+        let s = m.shortcut_payload(&button("spotify-playback", Some("play"), 0, 0, 1, 1));
+        assert_eq!(s["app"], "custom-value");
+        assert_eq!(s["extra"], "spotify-playing");
+        assert_eq!(s["color"], "#1DB954"); // per-command playback style
+        assert!(!s["unicode"].as_str().unwrap().is_empty());
+        // other playback commands stay plain buttons (existing behavior)
+        let s = m.shortcut_payload(&button("spotify-playback", Some("next"), 0, 0, 1, 1));
+        assert!(s.get("app").is_none());
+        assert_eq!(s["extra"], "");
+        // repeat/like remap onto their pushed keys, not the kind
+        for (kind, key) in [("spotify-repeat", "spotify-repeat-on"), ("spotify-like", "spotify-liked")] {
+            let s = m.shortcut_payload(&button(kind, None, 0, 0, 1, 1));
+            assert_eq!(s["app"], "custom-value", "{kind}");
+            assert_eq!(s["extra"], key, "{kind}");
+            assert_eq!(s["toggle_key"], key, "{kind}");
+            assert_eq!(s["color"], "#1db954", "{kind}");
+        }
+        // shuffle watches its own kind name
+        let s = m.shortcut_payload(&button("spotify-shuffle", None, 0, 0, 1, 1));
+        assert_eq!(s["extra"], "spotify-shuffle");
+        // sliders: volume watches the kind, seek remaps to progress
+        let mut vol = button("spotify-volume", None, 0, 0, 1, 1);
+        vol.mode = "slider".into();
+        let s = m.shortcut_payload(&vol);
+        assert_eq!(s["extra"], "spotify-volume");
+        let mut seek = button("spotify-seek", None, 0, 0, 1, 1);
+        seek.mode = "slider".into();
+        let s = m.shortcut_payload(&seek);
+        assert_eq!(s["extra"], "spotify-progress");
+        // device: jsonKey extraction like speaker-device
+        let s = m.shortcut_payload(&button(
+            "spotify-device",
+            Some(r#"{"device":"Kitchen"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["command"], "Kitchen");
+        assert_eq!(s["extra"], "spotify-device");
+        // now-playing: status display tile, no toggle plumbing
+        let mut np = button("spotify-now-playing", None, 0, 0, 1, 1);
+        np.mode = "status".into();
+        let s = m.shortcut_payload(&np);
+        assert!(s.get("app").is_none());
+        assert_eq!(s["extra"], "");
     }
 
     #[test]

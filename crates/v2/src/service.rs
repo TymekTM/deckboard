@@ -255,7 +255,7 @@ async fn pair_request_status(
         return (StatusCode::OK, Json(json!({"status": "expired"}))).into_response();
     }
     use crate::devices::PairDecision;
-    let status = match request.decision() {
+    match request.decision() {
         PairDecision::Pending => Json(json!({"status": "pending"})).into_response(),
         PairDecision::Approved => {
             state.pair_requests.reset(&id);
@@ -265,8 +265,7 @@ async fn pair_request_status(
             state.pair_requests.reset(&id);
             Json(json!({"status": "rejected"})).into_response()
         }
-    };
-    status
+    }
 }
 
 /// Random request id: hex so it survives any logging/casing untouched.
@@ -369,7 +368,7 @@ impl V2State {
         let row = self.backend.get_button(tile_id)?;
         Some(pulpit_proto::BoardOp::TileSet {
             board: board_id,
-            tile: crate::boards::build_tile(&row, &self.assets, &self.engine),
+            tile: Box::new(crate::boards::build_tile(&row, &self.assets, &self.engine)),
         })
     }
 
