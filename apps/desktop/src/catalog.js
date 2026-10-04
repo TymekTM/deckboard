@@ -639,6 +639,34 @@ export function clamp(v, min, max) {
   return Math.min(max, Math.max(min, v));
 }
 
+// ---- status-payload playback progress (spotify-now-playing et al) -----------
+
+// The displayed playback position in ms, extrapolated client-side (design
+// §4): the payload carries no server timestamp because clocks differ, so
+// the receiver stamps its local arrival time and this advances
+// position_ms by the elapsed wall time while `playing` is true - clamped
+// to the track - and freezes at the reported position when paused.
+// Returns null when the payload carries no usable progress.
+export function statusProgressAt(progress, receivedAtMs, nowMs) {
+  if (!progress || typeof progress !== "object") return null;
+  const position = Number(progress.position_ms);
+  const duration = Number(progress.duration_ms);
+  if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) {
+    return null;
+  }
+  const base = clamp(position, 0, duration);
+  if (progress.playing !== true) return base;
+  const elapsed = Math.max(0, nowMs - receivedAtMs);
+  return Math.min(duration, base + elapsed);
+}
+
+// m:ss without hours - playback clocks stay under an hour in practice
+// and the text has to fit a tile row.
+export function mmss(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
 // ---- plan usage windows (ai-plan-limits tiles) ------------------------------
 
 // Which usage windows a plan tile renders, stored in its options column as
