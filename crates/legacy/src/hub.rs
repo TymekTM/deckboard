@@ -240,23 +240,16 @@ impl Hub {
         removed.len()
     }
 
-    /// Emit a socket.io EVENT packet to every connected session.
+    /// Emit a socket.io EVENT packet to every connected session. Session
+    /// Arcs are snapshotted under the lock and sent after releasing it -
+    /// one slow drain must not stall every other hub operation. (The
+    /// original's pro/basic room split rides inside the payloads; every
+    /// frame goes to every client.)
     pub async fn broadcast(&self, event: &str, payload: Option<&str>) {
-        self.send_to_room("both", event, payload).await;
-    }
-
-    /// Emit to a room: "PRO_ROOM", "BASIC_ROOM" or "both". Session Arcs
-    /// are snapshotted under the lock and sent after releasing it - one
-    /// slow drain must not stall every other hub operation.
-    pub async fn send_to_room(&self, room: &str, event: &str, payload: Option<&str>) {
         let packet = event_packet(event, payload);
         let targets: Vec<_> = {
             let sessions = self.sessions.lock().await;
-            sessions
-                .values()
-                .filter(|s| room == "both" || room == s.room())
-                .cloned()
-                .collect()
+            sessions.values().cloned().collect()
         };
         for s in targets {
             s.send(packet.clone()).await;
