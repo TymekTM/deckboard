@@ -177,6 +177,17 @@ impl Spotify {
         self.inner.auth.lock().unwrap().to_config()
     }
 
+    /// Re-read the persisted config and swap the live auth state to it.
+    /// The host calls this after login / logout / client-id changes:
+    /// the backend and the poller hold clones of this same handle, so an
+    /// in-place swap (not a new handle) is what makes the change visible
+    /// to the next exec without a restart.
+    pub fn reload(&self) -> Result<()> {
+        let config = SpotifyConfig::load(&self.inner.path)?;
+        *self.inner.auth.lock().unwrap() = Auth::from(&config);
+        Ok(())
+    }
+
     /// True when the saved login is gone/expired: every call now fails
     /// fast with [`SpotifyError::NeedsLogin`] until the host re-logs in.
     pub fn needs_login(&self) -> bool {
@@ -747,7 +758,7 @@ impl Spotify {
 }
 
 /// One Connect device.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Device {
     pub id: String,
     pub name: String,
@@ -755,7 +766,7 @@ pub struct Device {
 }
 
 /// One user playlist (editor picker).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Playlist {
     pub id: String,
     pub name: String,

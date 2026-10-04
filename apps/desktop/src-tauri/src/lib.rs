@@ -42,6 +42,11 @@ struct DesktopState {
     spotify: Option<pulpit_spotify::Spotify>,
     /// `pulpitApp/spotify.json` - the Spotify config (client id + tokens).
     spotify_path: Option<std::path::PathBuf>,
+    /// Editor picker cache: the user's playlists (the `spotify_playlists`
+    /// command caches them for 60 s so opening the tile dialog does not
+    /// hammer the API).
+    spotify_playlists:
+        std::sync::Mutex<Option<(std::time::Instant, Vec<pulpit_spotify::Playlist>)>>,
 }
 
 impl DesktopState {
@@ -212,6 +217,13 @@ pub fn run() {
             aidev_status_config,
             set_aidev_status_config,
             install_update,
+            spotify_status,
+            spotify_set_client_id,
+            spotify_login,
+            spotify_logout,
+            spotify_playlists,
+            spotify_devices,
+            asset_data_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -353,6 +365,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             aidev_config: Some(aidev_config),
             spotify: None,
             spotify_path: None,
+            spotify_playlists: std::sync::Mutex::new(None),
         };
     }
     let db = db.unwrap();
@@ -630,6 +643,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         aidev_config: Some(aidev_config),
         spotify,
         spotify_path: Some(spotify_path),
+        spotify_playlists: std::sync::Mutex::new(None),
     }
 }
 
@@ -2615,4 +2629,179 @@ async fn import_boards(state: State<'_, DesktopState>, path: String) -> Result<V
         state.publish_board_set(id);
     }
     Ok(ids)
+}
+
+// ---- Spotify (Ustawienia; design round 4 §2 + §5) ---------------------------
+
+/// How long the editor's playlist picker list may be reused.
+const SPOTIFY_PLAYLISTS_CACHE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Spotify state for the settings panel: what is configured, who is
+/// logged in and the redirect URI the user's own Spotify app must
+/// register (fixed port, design §2).
+#[tauri::command]
+fn spotify_status(state: State<'_, DesktopState>) -> serde_json::Value {
+    let Some(spotify) = &state.spotify else {
+        return serde_json::json!({
+            "configured": false,
+            "redirectUri": pulpit_spotify::REDIRECT_URI,
+        });
+    };
+    let config = spotify.config();
+    serde_json::json!({
+        "configured": true,
+        "clientId": config.client_id,
+        "loggedIn": config.has_login() && !spotify.needs_login(),
+        "user": config.user,
+        "product": config.product,
+        "redirectUri": pulpit_spotify::REDIRECT_URI,
+    })
+}
+
+/// Store the user's own Spotify app client id (BYO, design §2). The live
+/// handle re-reads it, so a login right after pasting uses the new id.
+#[tauri::command]
+async fn spotify_set_client_id(
+    state: State<'_, DesktopState>,
+    client_id: String,
+) -> Result<(), String> {
+    let path = state
+        .spotify_path
+        .clone()
+        .ok_or_else(|| "Brak ścieżki spotify.json.".to_string())?;
+    let client_id = client_id.trim().to_string();
+    // file IO off the main thread
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut config = pulpit_spotify::SpotifyConfig::load(&path).map_err(|e| e.to_string())?;
+        config.client_id = client_id;
+        config.save(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if let Some(spotify) = &state.spotify {
+        spotify.reload().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Full PKCE login (design §2). Blocking (browser + loopback callback
+/// wait, up to 5 min) on the blocking pool; resolves when the callback
+/// lands or the crate gives up. A busy 127.0.0.1:8502 fails here with
+/// the crate's clear error - the redirect URI is registered exactly, so
+/// there is no port fallback.
+#[tauri::command]
+async fn spotify_login(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let spotify = state
+        .spotify
+        .clone()
+        .ok_or_else(|| "Spotify wyłączony - spotify.json jest uszkodzony.".to_string())?;
+    let path = state
+        .spotify_path
+        .clone()
+        .ok_or_else(|| "Brak ścieżki spotify.json.".to_string())?;
+    let client_id = spotify.config().client_id;
+    if client_id.trim().is_empty() {
+        return Err("Wklej najpierw Client ID swojej aplikacji Spotify.".into());
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        pulpit_spotify::login(&client_id, |url| {
+            if let Err(e) = open::that(url) {
+                tracing::warn!(error = %e, "could not open the browser for the Spotify login");
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let config = result.map_err(|e| e.to_string())?;
+    config.save(&path).map_err(|e| e.to_string())?;
+    spotify.reload().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "loggedIn": true,
+        "user": config.user,
+        "product": config.product,
+    }))
+}
+
+/// Logout: delete the tokens, keep the client id (design §2).
+#[tauri::command]
+async fn spotify_logout(state: State<'_, DesktopState>) -> Result<(), String> {
+    let path = state
+        .spotify_path
+        .clone()
+        .ok_or_else(|| "Brak ścieżki spotify.json.".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        pulpit_spotify::logout(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if let Some(spotify) = &state.spotify {
+        spotify.reload().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The user's playlists for the editor picker, paged by the crate and
+/// cached here for 60 s (design §5). Errors are NOT cached - a transient
+/// API failure retries on the next dialog open.
+#[tauri::command]
+async fn spotify_playlists(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<pulpit_spotify::Playlist>, String> {
+    let Some(spotify) = state.spotify.clone() else {
+        return Err("Spotify wyłączony.".into());
+    };
+    {
+        let cache = state.spotify_playlists.lock().unwrap();
+        if let Some((at, list)) = cache.as_ref() {
+            if at.elapsed() < SPOTIFY_PLAYLISTS_CACHE {
+                return Ok(list.clone());
+            }
+        }
+    }
+    let list = tauri::async_runtime::spawn_blocking(move || spotify.playlists().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())??;
+    *state.spotify_playlists.lock().unwrap() = Some((std::time::Instant::now(), list.clone()));
+    Ok(list)
+}
+
+/// Active Spotify Connect devices for the editor picker.
+#[tauri::command]
+async fn spotify_devices(state: State<'_, DesktopState>) -> Result<Vec<pulpit_spotify::Device>, String> {
+    let spotify = state
+        .spotify
+        .clone()
+        .ok_or_else(|| "Spotify wyłączony.".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || spotify.devices().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// One stored asset as a data URL for the WebView (the desktop TileCell
+/// resolves `spotify-now-playing` art this way; the spotify-art lane
+/// memoizes the result per hash). Reads like [`read_image_data`]: file
+/// IO + base64 on the blocking pool.
+#[tauri::command]
+async fn asset_data_url(state: State<'_, DesktopState>, hash: String) -> Result<String, String> {
+    if !pulpit_v2::is_valid_hash(&hash) {
+        return Err(format!("invalid asset hash {hash:?}"));
+    }
+    let assets = state
+        .v2
+        .as_ref()
+        .map(|v2| v2.assets.clone())
+        .ok_or_else(|| "protocol v2 unavailable".to_string())?;
+    use base64::Engine as _;
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = assets.get(&hash).ok_or_else(|| "unknown asset".to_string())?;
+        let mime = assets
+            .content_type(&hash)
+            .unwrap_or("application/octet-stream");
+        Ok(format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

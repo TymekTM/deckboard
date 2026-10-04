@@ -3686,6 +3686,7 @@ dependencies = [
  "dirs 5.0.1",
  "hex",
  "if-addrs",
+ "open",
  "pulpit-actions",
  "pulpit-aidev",
  "pulpit-backend",
