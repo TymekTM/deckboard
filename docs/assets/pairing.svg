@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 240" width="1200" height="240" role="img" aria-labelledby="pair-title pair-desc">
+  <title id="pair-title">Pulpit pairing flow</title>
+  <desc id="pair-desc">Animated strip in five steps: the desktop advertises _pulpit._tcp over mDNS; the tablet finds it in its discovery list and sends a pair request; both screens show the same verification code; a human compares them and approves on the desktop; a per-device token is minted and the tablet is paired.</desc>
+  <rect width="1200" height="240" rx="14" fill="#0d1117" stroke="#30363d"/>
+  <g font-family="sans-serif">
+    <rect x="26" y="14" width="220" height="28" rx="14" fill="#161b22" stroke="#30363d"/>
+    <g><animate attributeName="opacity" values="0;1;1" keyTimes="0;0.2;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="136.0" y="33" font-size="13" fill="#8b949e" text-anchor="middle">1  Advertise</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="1;0;0" keyTimes="0;0.2;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="26" y="14" width="220" height="28" rx="14" fill="#a371f7" fill-opacity="0.18" stroke="#a371f7"/>
+      <text x="136.0" y="33" font-size="13" fill="#e6edf3" font-weight="bold" text-anchor="middle">1  Advertise</text>
+    </g>
+    <rect x="258" y="14" width="220" height="28" rx="14" fill="#161b22" stroke="#30363d"/>
+    <g><animate attributeName="opacity" values="1;0;1;1" keyTimes="0;0.2;0.4;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="368.0" y="33" font-size="13" fill="#8b949e" text-anchor="middle">2  Discover</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.2;0.4;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="258" y="14" width="220" height="28" rx="14" fill="#58a6ff" fill-opacity="0.18" stroke="#58a6ff"/>
+      <text x="368.0" y="33" font-size="13" fill="#e6edf3" font-weight="bold" text-anchor="middle">2  Discover</text>
+    </g>
+    <rect x="490" y="14" width="220" height="28" rx="14" fill="#161b22" stroke="#30363d"/>
+    <g><animate attributeName="opacity" values="1;0;1;1" keyTimes="0;0.4;0.6;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="600.0" y="33" font-size="13" fill="#8b949e" text-anchor="middle">3  Compare code</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.4;0.6;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="490" y="14" width="220" height="28" rx="14" fill="#d29922" fill-opacity="0.18" stroke="#d29922"/>
+      <text x="600.0" y="33" font-size="13" fill="#e6edf3" font-weight="bold" text-anchor="middle">3  Compare code</text>
+    </g>
+    <rect x="722" y="14" width="220" height="28" rx="14" fill="#161b22" stroke="#30363d"/>
+    <g><animate attributeName="opacity" values="1;0;1;1" keyTimes="0;0.6;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="832.0" y="33" font-size="13" fill="#8b949e" text-anchor="middle">4  Approve</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.6;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="722" y="14" width="220" height="28" rx="14" fill="#d29922" fill-opacity="0.18" stroke="#d29922"/>
+      <text x="832.0" y="33" font-size="13" fill="#e6edf3" font-weight="bold" text-anchor="middle">4  Approve</text>
+    </g>
+    <rect x="954" y="14" width="220" height="28" rx="14" fill="#161b22" stroke="#30363d"/>
+    <g><animate attributeName="opacity" values="1;0;0" keyTimes="0;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="1064.0" y="33" font-size="13" fill="#8b949e" text-anchor="middle">5  Token minted</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;1" keyTimes="0;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="954" y="14" width="220" height="28" rx="14" fill="#3fb950" fill-opacity="0.18" stroke="#3fb950"/>
+      <text x="1064.0" y="33" font-size="13" fill="#e6edf3" font-weight="bold" text-anchor="middle">5  Token minted</text>
+    </g>
+    <rect x="26" y="56" width="300" height="140" rx="12" fill="#161b22" stroke="#30363d"/>
+    <rect x="26" y="56" width="300" height="30" rx="12" fill="#21262d"/>
+    <rect x="26" y="74" width="300" height="12" fill="#21262d"/>
+    <circle cx="42" cy="71" r="4" fill="#58a6ff"/>
+    <text x="54" y="76" font-size="12" fill="#c9d1d9" font-weight="bold">Desktop  |  Pulpit for Windows</text>
+    <rect x="874" y="56" width="300" height="140" rx="12" fill="#161b22" stroke="#30363d"/>
+    <rect x="874" y="56" width="300" height="30" rx="12" fill="#21262d"/>
+    <rect x="874" y="74" width="300" height="12" fill="#21262d"/>
+    <circle cx="890" cy="71" r="4" fill="#3fb950"/>
+    <text x="902" y="76" font-size="12" fill="#c9d1d9" font-weight="bold">Tablet  |  Pulpit for Android</text>
+    <g opacity="0"><animate attributeName="opacity" values="1;0;0" keyTimes="0;0.2;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="46" y="114" font-size="14" fill="#e6edf3" font-weight="bold">Embedded server on :8500</text>
+      <text x="46" y="138" font-size="12" fill="#a371f7" font-family="Consolas,Menlo,monospace">mDNS: advertising _pulpit._tcp</text>
+      <text x="46" y="158" font-size="11" fill="#8b949e" font-family="Consolas,Menlo,monospace">TXT: proto=v2, version, host</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.2;0.4;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="46" y="114" font-size="14" fill="#e6edf3" font-weight="bold">Pair request received</text>
+      <text x="46" y="138" font-size="12" fill="#58a6ff" font-family="Consolas,Menlo,monospace">from &quot;SM-T561&quot;</text>
+      <text x="46" y="158" font-size="11" fill="#8b949e">LAN only, one request at a time</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.4;0.6;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="46" y="110" font-size="12" fill="#8b949e">Verification code</text>
+      <text x="46" y="142" font-size="30" fill="#d29922" font-weight="bold" font-family="Consolas,Menlo,monospace">K7M4Q2XN</text>
+      <text x="46" y="162" font-size="11" fill="#8b949e">valid for 5 minutes</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.6;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="46" y="110" font-size="13" fill="#e6edf3" font-weight="bold">Same code on the tablet?</text>
+      <text x="46" y="128" font-size="14" fill="#d29922" font-family="Consolas,Menlo,monospace">K7M4Q2XN</text>
+      <rect x="46" y="138" width="86" height="28" rx="8" fill="#21262d" stroke="#30363d"/>
+      <text x="89" y="157" font-size="12" fill="#8b949e" text-anchor="middle">Deny</text>
+      <rect x="144" y="138" width="110" height="28" rx="8" fill="#3fb950" fill-opacity="0.2" stroke="#3fb950"/>
+      <text x="199" y="157" font-size="12" fill="#e6edf3" font-weight="bold" text-anchor="middle">Approve</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;1" keyTimes="0;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="46" y="114" font-size="14" fill="#3fb950" font-weight="bold">Device added</text>
+      <text x="46" y="138" font-size="12" fill="#e6edf3">per-device token minted</text>
+      <text x="46" y="158" font-size="11" fill="#8b949e">code burned, single use</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="1;0;0" keyTimes="0;0.2;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="894" y="114" font-size="14" fill="#e6edf3" font-weight="bold">Auto (on the network)</text>
+      <text x="894" y="138" font-size="12" fill="#8b949e">Searching for computers...</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.2;0.4;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="894" y="108" font-size="12" fill="#8b949e">Computers found</text>
+      <rect x="894" y="116" width="260" height="30" rx="8" fill="#58a6ff" fill-opacity="0.16" stroke="#58a6ff"/>
+      <text x="906" y="136" font-size="12" fill="#e6edf3" font-family="Consolas,Menlo,monospace">Pulpit  (192.168.x.x:8500)</text>
+      <text x="894" y="164" font-size="11" fill="#8b949e">tap to pair</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.4;0.6;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="894" y="110" font-size="12" fill="#8b949e">Verification code</text>
+      <text x="894" y="142" font-size="30" fill="#d29922" font-weight="bold" font-family="Consolas,Menlo,monospace">K7M4Q2XN</text>
+      <text x="894" y="162" font-size="11" fill="#8b949e">same as on the desktop</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.6;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="894" y="114" font-size="14" fill="#e6edf3" font-weight="bold">Confirm on the computer</text>
+      <text x="894" y="138" font-size="12" fill="#8b949e">that the codes match...</text>
+      <rect x="894" y="148" width="80" height="26" rx="8" fill="#21262d" stroke="#30363d"/>
+      <text x="934" y="166" font-size="12" fill="#8b949e" text-anchor="middle">Cancel</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;1" keyTimes="0;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="894" y="114" font-size="14" fill="#3fb950" font-weight="bold">Paired</text>
+      <text x="894" y="138" font-size="12" fill="#e6edf3">token stored on the tablet</text>
+      <text x="894" y="158" font-size="11" fill="#8b949e">board syncs next</text>
+    </g>
+    <path d="M350,130 H850" stroke="#30363d" stroke-width="2" stroke-dasharray="2 6" fill="none"/>
+    <g opacity="0"><animate attributeName="opacity" values="1;0;0" keyTimes="0;0.2;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="450" y="76" width="300" height="24" rx="8" fill="#0d1117" stroke="#a371f7"/>
+      <text x="600" y="92" font-size="11" fill="#c9d1d9" text-anchor="middle" font-family="Consolas,Menlo,monospace">mDNS  _pulpit._tcp.local</text>
+      <circle cx="350" cy="130" r="6" fill="none" stroke="#a371f7" stroke-width="2" opacity="0"><animate attributeName="cx" values="350;790" dur="1.5s" begin="0.0s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0" dur="1.5s" begin="0.0s" repeatCount="indefinite"/></circle>
+      <circle cx="350" cy="130" r="6" fill="none" stroke="#a371f7" stroke-width="2" opacity="0"><animate attributeName="cx" values="350;790" dur="1.5s" begin="0.5s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0" dur="1.5s" begin="0.5s" repeatCount="indefinite"/></circle>
+      <circle cx="350" cy="130" r="6" fill="none" stroke="#a371f7" stroke-width="2" opacity="0"><animate attributeName="cx" values="350;790" dur="1.5s" begin="1.0s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0" dur="1.5s" begin="1.0s" repeatCount="indefinite"/></circle>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.2;0.4;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="450" y="76" width="300" height="24" rx="8" fill="#0d1117" stroke="#58a6ff"/>
+      <text x="600" y="92" font-size="11" fill="#c9d1d9" text-anchor="middle" font-family="Consolas,Menlo,monospace">POST /v2/pair-request</text>
+      <circle cx="850" cy="130" r="8" fill="#58a6ff"><animate attributeName="cx" values="850;850;362;362" keyTimes="0;0.2;0.36000000000000004;1" dur="15s" repeatCount="indefinite"/></circle>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.4;0.6;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="450" y="76" width="300" height="24" rx="8" fill="#0d1117" stroke="#d29922"/>
+      <text x="600" y="92" font-size="11" fill="#c9d1d9" text-anchor="middle" font-family="Consolas,Menlo,monospace">same code on both screens</text>
+      <circle cx="350" cy="130" r="8" fill="#d29922"><animate attributeName="cx" values="350;350;540;540" keyTimes="0;0.4;0.56;1" dur="15s" repeatCount="indefinite"/></circle>
+      <circle cx="850" cy="130" r="8" fill="#d29922"><animate attributeName="cx" values="850;850;660;660" keyTimes="0;0.4;0.56;1" dur="15s" repeatCount="indefinite"/></circle>
+      <rect x="535" y="115" width="130" height="30" rx="10" fill="#161b22" stroke="#d29922"/>
+      <text x="600" y="135" font-size="15" fill="#e6edf3" font-weight="bold" text-anchor="middle" font-family="Consolas,Menlo,monospace">K7M4Q2XN</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.6;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="450" y="76" width="300" height="24" rx="8" fill="#0d1117" stroke="#d29922"/>
+      <text x="600" y="92" font-size="11" fill="#c9d1d9" text-anchor="middle" font-family="Consolas,Menlo,monospace">a human compares and approves</text>
+      <circle cx="600" cy="130" r="22" fill="#3fb950" fill-opacity="0.15" stroke="#3fb950" stroke-width="2"/>
+      <path d="M589,131 l8,9 l15,-17" fill="none" stroke="#3fb950" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="40" stroke-dashoffset="40"><animate attributeName="stroke-dashoffset" values="40;40;0;0" keyTimes="0;0.6;0.76;1" dur="15s" repeatCount="indefinite"/></path>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;1" keyTimes="0;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <rect x="450" y="76" width="300" height="24" rx="8" fill="#0d1117" stroke="#3fb950"/>
+      <text x="600" y="92" font-size="11" fill="#c9d1d9" text-anchor="middle" font-family="Consolas,Menlo,monospace">welcome.token  (per-device)</text>
+      <circle cx="350" cy="130" r="8" fill="#3fb950"><animate attributeName="cx" values="350;350;838;838" keyTimes="0;0.8;0.96;1" dur="15s" repeatCount="indefinite"/></circle>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="1;0;0" keyTimes="0;0.2;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="600" y="226" font-size="14" fill="#c9d1d9" text-anchor="middle">The desktop announces itself on the local network.</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.2;0.4;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="600" y="226" font-size="14" fill="#c9d1d9" text-anchor="middle">The tablet finds the desktop in its list and asks to pair.</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.4;0.6;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="600" y="226" font-size="14" fill="#c9d1d9" text-anchor="middle">Both screens show the same verification code.</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.6;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="600" y="226" font-size="14" fill="#c9d1d9" text-anchor="middle">Codes match: the operator approves on the desktop.</text>
+    </g>
+    <g opacity="0"><animate attributeName="opacity" values="0;1;1" keyTimes="0;0.8;1" calcMode="discrete" dur="15s" repeatCount="indefinite"/>
+      <text x="600" y="226" font-size="14" fill="#c9d1d9" text-anchor="middle">A per-device token is issued. No code needed next time.</text>
+    </g>
+  </g>
+</svg>
