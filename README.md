@@ -126,6 +126,7 @@ Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
 | `PULPIT_EXT_DIR`      | `~/pulpitApp/extensions`  | Extension directory                         |
 | `PULPIT_AIDEV_CONFIG` | `~/pulpitApp/aidev.json`  | AI dev-work producer config                 |
 | `PULPIT_NO_SINGLE_INSTANCE` | unset               | Set to `1` to run side-by-side instances    |
+| `PULPIT_NO_DISCOVERY` | unset                     | Set to `1` to skip the mDNS announcement    |
 | `PULPIT_SPOTIFY_CONFIG` | `~/pulpitApp/spotify.json` | Spotify client id and tokens           |
 
 ## Spotify

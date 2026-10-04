@@ -146,11 +146,12 @@ async fn main() -> anyhow::Result<()> {
 
     // M8 discovery: advertise on mDNS so tablets can find this server
     // (headless = no gate, so pair-requests auto-accept with a warning).
-    match pulpit_v2::discovery::advertise(port, env!("CARGO_PKG_VERSION")) {
-        Ok(d) => {
-            std::mem::forget(d);
+    // `PULPIT_NO_DISCOVERY=1` skips it (side-by-side runs on one host).
+    if std::env::var_os("PULPIT_NO_DISCOVERY").is_none() {
+        match pulpit_v2::discovery::advertise(port, env!("CARGO_PKG_VERSION")) {
+            Ok(d) => std::mem::forget(d),
+            Err(e) => tracing::warn!("mDNS advertisement failed: {e}"),
         }
-        Err(e) => tracing::warn!("mDNS advertisement failed: {e}"),
     }
 
     // Producer pumps (extension fleet, native system-info, AI dev-work,

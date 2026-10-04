@@ -471,9 +471,13 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // M8 discovery: announce the server on mDNS so tablets can find it
     // without typing an address. Failure is non-fatal (manual pairing
     // keeps working); the handle stays alive for the process lifetime.
-    match pulpit_v2::discovery::advertise(port, env!("CARGO_PKG_VERSION")) {
-        Ok(discovery) => std::mem::forget(discovery),
-        Err(e) => tracing::warn!("mDNS advertisement failed: {e}"),
+    // `PULPIT_NO_DISCOVERY=1` skips it: a side-by-side instance would
+    // announce the same "Pulpit on <host>" name on another port.
+    if std::env::var_os("PULPIT_NO_DISCOVERY").is_none() {
+        match pulpit_v2::discovery::advertise(port, env!("CARGO_PKG_VERSION")) {
+            Ok(discovery) => std::mem::forget(discovery),
+            Err(e) => tracing::warn!("mDNS advertisement failed: {e}"),
+        }
     }
     // v2 background task: coalesced state patches.
     if let Some(v2) = &v2 {

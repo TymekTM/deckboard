@@ -42,7 +42,11 @@ window opens with `ERR_CONNECTION_REFUSED` because nothing serves the
 dev server. The string is present in every binary either way, so greping
 the exe for it proves nothing; verify by running it. Side-by-side
 profiling runs opt out of the single-instance guard with
-`PULPIT_NO_SINGLE_INSTANCE=1` (plus `PULPIT_PORT` and `PULPIT_DB`).
+`PULPIT_NO_SINGLE_INSTANCE=1` (plus `PULPIT_PORT` and `PULPIT_DB`), and
+`PULPIT_NO_DISCOVERY=1` so the second instance does not announce a
+duplicate "Pulpit on <host>" over mDNS. The desktop still reads
+`editor.json`, `settings.json` and `devices.json` from `~/pulpitApp` and
+appends to its `logs/` - there is no data-dir override.
 
 ## Carry fields through both wire builders
 
