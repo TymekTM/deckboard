@@ -14,6 +14,11 @@ const props = defineProps({
   knownInputs: { type: Array, default: () => [] },
   // active audio endpoints ({id, name}) for the Set Audio Device select
   audioDevices: { type: Array, default: () => [] },
+  // Spotify pickers ({name} devices, {uri, name} playlists); empty when
+  // not logged in or the list failed - picker fields then fall back to
+  // free text
+  spotifyDevices: { type: Array, default: () => [] },
+  spotifyPlaylists: { type: Array, default: () => [] },
 });
 const emit = defineEmits(["save", "create", "delete", "close"]);
 
@@ -135,8 +140,11 @@ const actionGroups = computed(() => {
   return groups;
 });
 
-// catalog fields may declare a dynamic option source; currently the only
-// one is the audio endpoint list for speaker-device tiles
+// catalog fields may declare a dynamic option source; "audio" is the
+// audio endpoint list for speaker-device tiles, "spotify"/
+// "spotify-playlists" the Spotify device/playlist pickers. A picker
+// whose list is empty or failed to load (not logged in, API error)
+// falls back to the raw text field, so the URI/name can always be typed.
 function catalogFieldShape(f) {
   if (f.devices === "audio") {
     return {
@@ -144,6 +152,22 @@ function catalogFieldShape(f) {
       label: f.label,
       kind: "select",
       options: props.audioDevices.map((d) => ({ value: d.id, label: d.name })),
+    };
+  }
+  if (f.devices === "spotify" && props.spotifyDevices.length) {
+    return {
+      key: f.key,
+      label: f.label,
+      kind: "select",
+      options: props.spotifyDevices.map((d) => ({ value: d.name, label: d.name })),
+    };
+  }
+  if (f.devices === "spotify-playlists" && props.spotifyPlaylists.length) {
+    return {
+      key: f.key,
+      label: f.label,
+      kind: "select",
+      options: props.spotifyPlaylists.map((p) => ({ value: p.uri, label: p.name })),
     };
   }
   return f;

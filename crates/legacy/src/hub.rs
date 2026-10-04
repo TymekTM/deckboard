@@ -208,6 +208,13 @@ impl Hub {
         self.sessions.lock().await.len()
     }
 
+    /// Session count without awaiting, for sync callers on plain threads
+    /// (the Spotify poller's consumers check); `None` while the session
+    /// map is locked.
+    pub fn try_len(&self) -> Option<usize> {
+        self.sessions.try_lock().ok().map(|sessions| sessions.len())
+    }
+
     pub async fn is_empty(&self) -> bool {
         self.sessions.lock().await.is_empty()
     }

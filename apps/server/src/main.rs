@@ -78,13 +78,34 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     pulpit_host::register_inputs(&ext_manager);
+    // Spotify: the same `spotify.json` the desktop writes. A missing
+    // file (or one without a login) disables Spotify here - the headless
+    // server never logs in interactively. `PULPIT_SPOTIFY_CONFIG`
+    // overrides the location (hermetic runs).
+    let spotify_path = std::env::var_os("PULPIT_SPOTIFY_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("spotify.json"));
+    let spotify = match pulpit_spotify::SpotifyConfig::load(&spotify_path) {
+        Ok(config) if config.has_login() => {
+            Some(pulpit_spotify::Spotify::new(config, spotify_path))
+        }
+        Ok(_) => {
+            tracing::info!("no Spotify login in spotify.json - Spotify disabled");
+            None
+        }
+        Err(e) => {
+            tracing::error!("spotify.json exists but cannot be read: {e} - Spotify disabled");
+            None
+        }
+    };
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
             .with_discord(
                 pulpit_discord::DiscordConfig::from_settings(&settings),
                 data_dir.join("settings.json"),
-            ),
+            )
+            .with_spotify(spotify.clone()),
     );
 
     let state = Arc::new(AppState {
@@ -160,6 +181,27 @@ async fn main() -> anyhow::Result<()> {
         pulpit_aidev::spawn_push(pulpit_host::aidev_paths(aidev_config)),
     ));
     tokio::spawn(pulpit_host::speaker_watch(feed.clone(), state.backend.clone()));
+    // Spotify poller: consumers = connected legacy + v2 clients (no
+    // host-local UI on the headless server). Snapshots ride the shared
+    // spotify pump (internal art key stripped, album art imported).
+    match &spotify {
+        Some(spotify) => {
+            let consumers =
+                pulpit_host::consumer_reader(state.hub.clone(), Some(v2.hub.clone()), None);
+            tokio::spawn(pulpit_host::spotify::forward_spotify(
+                feed.clone(),
+                pulpit_spotify::spawn_push(spotify.clone(), consumers),
+                Some(v2.assets.clone()),
+            ));
+        }
+        None => {
+            // no poller: one `spotify-auth: "off"` marker so clients see
+            // a defined state
+            tokio::spawn(pulpit_host::spotify::forward_spotify_disabled(
+                feed.clone(),
+            ));
+        }
+    }
     tokio::spawn(pulpit_host::activity_loop(
         ext_manager.clone(),
         state.hub.clone(),

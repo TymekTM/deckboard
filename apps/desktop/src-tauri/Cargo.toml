@@ -17,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
+open = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = "0.2"
@@ -34,6 +35,7 @@ pulpit-legacy = { path = "../../../crates/legacy" }
 pulpit-ext = { path = "../../../crates/ext" }
 pulpit-vm = { path = "../../../crates/vm" }
 pulpit-discord = { path = "../../../crates/discord" }
+pulpit-spotify = { path = "../../../crates/spotify" }
 pulpit-sysinfo = { path = "../../../crates/sysinfo" }
 pulpit-proto = { path = "../../../crates/proto" }
 pulpit-v2 = { path = "../../../crates/v2" }

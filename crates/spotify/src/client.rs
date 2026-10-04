@@ -136,6 +136,7 @@ struct Inner {
 /// The integration handle. Clone is cheap (`Arc`); requests serialize
 /// through the shared state, so clones (backend + poller + host) never
 /// race tokens or the rate-limit pause.
+#[derive(Clone)]
 pub struct Spotify {
     inner: Arc<Inner>,
 }
@@ -174,6 +175,17 @@ impl Spotify {
     /// The persisted config as it stands now (settings UI).
     pub fn config(&self) -> SpotifyConfig {
         self.inner.auth.lock().unwrap().to_config()
+    }
+
+    /// Re-read the persisted config and swap the live auth state to it.
+    /// The host calls this after login / logout / client-id changes:
+    /// the backend and the poller hold clones of this same handle, so an
+    /// in-place swap (not a new handle) is what makes the change visible
+    /// to the next exec without a restart.
+    pub fn reload(&self) -> Result<()> {
+        let config = SpotifyConfig::load(&self.inner.path)?;
+        *self.inner.auth.lock().unwrap() = Auth::from(&config);
+        Ok(())
     }
 
     /// True when the saved login is gone/expired: every call now fails
@@ -746,7 +758,7 @@ impl Spotify {
 }
 
 /// One Connect device.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Device {
     pub id: String,
     pub name: String,
@@ -754,7 +766,7 @@ pub struct Device {
 }
 
 /// One user playlist (editor picker).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Playlist {
     pub id: String,
     pub name: String,

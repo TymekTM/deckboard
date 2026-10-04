@@ -5,6 +5,9 @@ import { api } from "../api";
 
 const props = defineProps({
   status: { type: Object, required: true },
+  // live pushed values (APP_CUSTOM_VALUE mirror): the spotify-auth and
+  // spotify-device keys feed the Spotify status line without reopening
+  customValues: { type: Object, default: () => ({}) },
 });
 const emit = defineEmits(["close"]);
 
@@ -160,8 +163,134 @@ function setAidevRowStyle(style) {
   saveAidev();
 }
 
-async function refreshAdb() {
-  adbBusy.value = true;
+// Spotify (Ustawienia): BYO client id + PKCE login (design §2/§5). The
+// status line combines the spotify_status command with the live
+// customValues pushes (spotify-auth / spotify-device), so an expired
+// login flips the line without reopening the panel.
+const spotify = ref({
+  configured: false,
+  clientId: "",
+  loggedIn: false,
+  user: null,
+  product: null,
+  redirectUri: "http://127.0.0.1:8502/spotify/callback",
+});
+const spotifyClientIdDraft = ref("");
+const spotifyBusy = ref(false);
+const spotifyError = ref("");
+const spotifyNote = ref("");
+const spotifyHelpOpen = ref(false);
+
+async function refreshSpotify() {
+  try {
+    const s = await api.spotifyStatus();
+    spotify.value = {
+      configured: s.configured !== false,
+      clientId: s.clientId || "",
+      loggedIn: Boolean(s.loggedIn),
+      user: s.user || null,
+      product: s.product || null,
+      redirectUri: s.redirectUri || "http://127.0.0.1:8502/spotify/callback",
+    };
+    spotifyClientIdDraft.value = s.clientId || "";
+  } catch (e) {
+    spotifyError.value = e ? String(e) : "Nie udało się pobrać statusu Spotify.";
+  }
+}
+
+const spotifyAuthLive = computed(() => props.customValues["spotify-auth"] || null);
+
+const spotifyLoggedIn = computed(
+  () => spotify.value.configured && (spotifyAuthLive.value === "ok" || (!spotifyAuthLive.value && spotify.value.loggedIn))
+);
+
+const spotifyStatusLine = computed(() => {
+  if (!spotify.value.configured) {
+    return "Spotify wyłączony — plik spotify.json jest uszkodzony.";
+  }
+  const auth = spotifyAuthLive.value || (spotify.value.loggedIn ? "ok" : "needs-login");
+  if (auth === "off") return "Spotify nieaktywne — wklej Client ID i zaloguj się.";
+  if (auth === "needs-login" || !spotifyLoggedIn.value) {
+    return "Wymaga logowania — sesja wygasła albo nie była jeszcze ustawiona.";
+  }
+  const who = spotify.value.user ? `jako ${spotify.value.user}` : "";
+  const plan =
+    spotify.value.product === "free"
+      ? "Free — sterowanie odtwarzaniem wymaga Premium"
+      : "Premium";
+  const device = props.customValues["spotify-device"];
+  const on = device ? ` — urządzenie: ${device}` : "";
+  return `Zalogowano ${who} (${plan})${on}`.trim();
+});
+
+const spotifyChip = computed(() => {
+  if (!spotify.value.configured) return { text: "wył.", ok: false };
+  const auth = spotifyAuthLive.value || (spotify.value.loggedIn ? "ok" : "needs-login");
+  if (auth === "ok") return { text: spotify.value.user || "zalogowano", ok: true };
+  if (auth === "needs-login") return { text: "wymaga logowania", ok: false };
+  return { text: "wył.", ok: false };
+});
+
+function flashSpotifyNote(text) {
+  spotifyNote.value = text;
+  setTimeout(() => {
+    if (spotifyNote.value === text) spotifyNote.value = "";
+  }, 4000);
+}
+
+async function saveSpotifyClientId() {
+  spotifyBusy.value = true;
+  spotifyError.value = "";
+  try {
+    await api.spotifySetClientId(spotifyClientIdDraft.value.trim());
+    flashSpotifyNote("Zapisano Client ID.");
+    await refreshSpotify();
+  } catch (e) {
+    spotifyError.value = e ? String(e) : "Nie udało się zapisać Client ID.";
+  } finally {
+    spotifyBusy.value = false;
+  }
+}
+
+async function doSpotifyLogin() {
+  spotifyBusy.value = true;
+  spotifyError.value = "";
+  flashSpotifyNote("Otwieram przeglądarkę — zaloguj się i wróć do Pulpitu.");
+  try {
+    const r = await api.spotifyLogin();
+    flashSpotifyNote(r?.user ? `Zalogowano jako ${r.user}.` : "Zalogowano.");
+    await refreshSpotify();
+  } catch (e) {
+    spotifyError.value = e ? String(e) : "Logowanie do Spotify nie powiodło się.";
+  } finally {
+    spotifyBusy.value = false;
+  }
+}
+
+async function doSpotifyLogout() {
+  spotifyBusy.value = true;
+  spotifyError.value = "";
+  try {
+    await api.spotifyLogout();
+    flashSpotifyNote("Wylogowano. Client ID został zapisany.");
+    await refreshSpotify();
+  } catch (e) {
+    spotifyError.value = e ? String(e) : "Nie udało się wylogować.";
+  } finally {
+    spotifyBusy.value = false;
+  }
+}
+
+async function copyRedirectUri() {
+  try {
+    await navigator.clipboard.writeText(spotify.value.redirectUri);
+    flashSpotifyNote("Skopiowano redirect URI.");
+  } catch {
+    spotifyError.value = "Nie udało się skopiować — zaznacz i skopiuj ręcznie.";
+  }
+}
+
+async function refreshAdb() {  adbBusy.value = true;
   try {
     adbList.value = await api.adbDevices();
   } catch (e) {
@@ -304,6 +433,7 @@ async function refreshDevices() {
 watch(focused, (tile) => {
   if (tile === "devices") refreshDevices();
   if (tile === "aidev") refreshAidev();
+  if (tile === "spotify") refreshSpotify();
 });
 
 function revokeDevice(device) {
@@ -430,6 +560,7 @@ onMounted(async () => {
   refreshLan();
   refreshDevices();
   refreshAidev();
+  refreshSpotify();
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
@@ -836,6 +967,98 @@ onUnmounted(() => {
           </article>
         </div>
       </section>
+
+      <section class="row" aria-labelledby="sec-spotify">
+        <h2 id="sec-spotify">Spotify</h2>
+        <div class="tiles">
+          <article class="tile" :class="tileCls('spotify')">
+            <button
+              class="hit"
+              :tabindex="focused === 'spotify' ? -1 : 0"
+              aria-label="Rozwiń: Spotify"
+              @click="focused = 'spotify'"
+            ></button>
+            <header class="tile-head">
+              <h3>Spotify</h3>
+              <span class="chip" :class="spotifyChip.ok ? 'ok' : ''">{{ spotifyChip.text }}</span>
+            </header>
+            <p class="sum">
+              Kafelki sterowania i teraz odtwarzane. Logowanie przez twoją własną aplikację
+              Spotify (PKCE) — dane logowania zostają na tym komputerze.
+            </p>
+            <div v-show="focused === 'spotify'" class="detail">
+              <div class="ctl">
+                <div class="ctl-text">
+                  <span class="ctl-name">Client ID</span>
+                  <span class="ctl-note">Z twojej aplikacji na developer.spotify.com/dashboard.</span>
+                </div>
+                <span class="spotify-id-line">
+                  <input
+                    v-model="spotifyClientIdDraft"
+                    class="combo-input spotify-id-input"
+                    placeholder="Client ID"
+                    autocomplete="off"
+                    spellcheck="false"
+                    aria-label="Spotify Client ID"
+                    @keyup.enter="saveSpotifyClientId"
+                  />
+                  <button class="act accent" :disabled="spotifyBusy" @click="saveSpotifyClientId">Zapisz</button>
+                </span>
+              </div>
+              <div class="ctl">
+                <div class="ctl-text">
+                  <span class="ctl-name">Redirect URI</span>
+                  <span class="ctl-note mono">{{ spotify.redirectUri }}</span>
+                  <span class="ctl-note">Wpisz go dokładnie tak w ustawieniach swojej aplikacji Spotify.</span>
+                </div>
+                <button class="act" @click="copyRedirectUri">
+                  <i class="fas fa-copy" aria-hidden="true"></i> Kopiuj
+                </button>
+              </div>
+              <div class="ctl">
+                <div class="ctl-text">
+                  <span class="ctl-name">Konto</span>
+                  <span class="ctl-note">{{ spotifyStatusLine }}</span>
+                </div>
+                <button
+                  v-if="spotifyLoggedIn"
+                  class="act danger"
+                  :disabled="spotifyBusy"
+                  @click="doSpotifyLogout"
+                >Wyloguj</button>
+                <button v-else class="act primary" :disabled="spotifyBusy" @click="doSpotifyLogin">
+                  Zaloguj przez Spotify
+                </button>
+              </div>
+              <p v-if="spotifyError" class="err">{{ spotifyError }}</p>
+              <p v-else-if="spotifyNote" class="note pending">{{ spotifyNote }}</p>
+              <button class="act spotify-help-toggle" @click="spotifyHelpOpen = !spotifyHelpOpen">
+                <i class="fas" :class="spotifyHelpOpen ? 'fa-chevron-down' : 'fa-chevron-right'" aria-hidden="true"></i>
+                Jak utworzyć aplikację Spotify
+              </button>
+              <ol v-if="spotifyHelpOpen" class="spotify-help">
+                <li>
+                  Otwórz <span class="mono">developer.spotify.com/dashboard</span>, zaloguj się
+                  i wybierz <b>Create app</b>.
+                </li>
+                <li>
+                  W polu <b>Redirect URI</b> podaj dokładnie
+                  <span class="mono">{{ spotify.redirectUri }}</span>, a jako API wybierz
+                  <b>Web API</b>.
+                </li>
+                <li>
+                  Skopiuj <b>Client ID</b> z ustawień aplikacji i wklej go w pole powyżej.
+                </li>
+                <li>
+                  Kliknij <b>Zaloguj przez Spotify</b> — otworzy się przeglądarka, zatwierdź
+                  dostęp i wróć do Pulpitu. Sterowanie odtwarzaniem wymaga konta Premium; stan
+                  teraz odtwarzanego działa też na Free.
+                </li>
+              </ol>
+            </div>
+          </article>
+        </div>
+      </section>
     </div>
 
     <!-- in-app revoke confirmation; replaces the native dialog popup -->
@@ -1056,6 +1279,23 @@ onUnmounted(() => {
 }
 .aid-check input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
 .aid-check:hover { color: var(--ink-2); }
+
+/* Spotify: client id line + the 4-step help */
+.spotify-id-line { display: flex; align-items: center; gap: 8px; flex: none; }
+.spotify-id-input { width: 260px; }
+.spotify-help-toggle { margin-top: 12px; }
+.spotify-help {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+.spotify-help b { color: var(--ink); font-weight: 600; }
+.spotify-help .mono { font-size: 11.5px; background: var(--tile-2); padding: 1px 5px; border-radius: 4px; }
 
 /* name | logo segmented pick */
 .seg {

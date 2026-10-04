@@ -39,4 +39,11 @@ export const api = {
   aidevStatusConfig: () => invoke("aidev_status_config"),
   setAidevStatusConfig: (show, summary, rowStyle) =>
     invoke("set_aidev_status_config", { show, summary, rowStyle }),
+  spotifyStatus: () => invoke("spotify_status"),
+  spotifySetClientId: (clientId) => invoke("spotify_set_client_id", { clientId }),
+  spotifyLogin: () => invoke("spotify_login"),
+  spotifyLogout: () => invoke("spotify_logout"),
+  spotifyPlaylists: () => invoke("spotify_playlists"),
+  spotifyDevices: () => invoke("spotify_devices"),
+  assetDataUrl: (hash) => invoke("asset_data_url", { hash }),
 };

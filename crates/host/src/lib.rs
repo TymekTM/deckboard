@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+pub mod spotify;
+
 /// The client lanes a live-value producer fans out to. Implemented once
 /// per host: the desktop adds its WebView as an extra sink, the headless
 /// server has none beyond the two protocols.
@@ -281,6 +283,31 @@ pub async fn activity_loop(
     }
 }
 
+/// The "consumers" signal `pulpit_spotify::spawn_push` reads: how many
+/// live state consumers exist right now - connected legacy + v2 clients
+/// plus whatever host-local consumer `extra` counts (the desktop adds
+/// its visible editor window). Computed on demand from the poller's own
+/// thread, which asks at most every few seconds; no sampler task, so an
+/// idle host gains no periodic wakeup. A contended legacy hub counts as
+/// one consumer (poll rather than go stale). `v2_hub` is `None` when the
+/// v2 stack failed to start.
+pub fn consumer_reader(
+    legacy: Arc<pulpit_legacy::Hub>,
+    v2_hub: Option<Arc<pulpit_v2::V2Hub>>,
+    extra: Option<Arc<dyn Fn() -> usize + Send + Sync + 'static>>,
+) -> Arc<dyn Fn() -> usize + Send + Sync + 'static> {
+    Arc::new(move || {
+        let legacy = legacy.try_len().unwrap_or(1);
+        let v2 = v2_hub.as_ref().map_or(0, |hub| hub.count());
+        // the host-local check is the expensive one (the desktop asks
+        // the UI thread); skip it when a client already counts
+        if legacy + v2 > 0 {
+            return legacy + v2;
+        }
+        extra.as_deref().map_or(0, |f| f())
+    })
+}
+
 /// The extension packages native code replaces (their JS runtimes were
 /// the heaviest part of the fleet); `ExtManager::load` must skip them.
 /// One list, both hosts.
@@ -351,6 +378,11 @@ pub fn register_inputs(ext: &pulpit_ext::ExtManager) {
     // native AI dev-work display tiles (plan limits, agent progress)
     for (value, icon, color, mode) in pulpit_aidev::input_declarations() {
         register_input(value, Some(icon), Some(color), "fas", Some(mode), None);
+    }
+    // native Spotify (control buttons + the custom-value toggles and
+    // slider/status shapes the pushed state keys drive)
+    for (value, icon, color, mode) in pulpit_spotify::input_declarations() {
+        register_input(value, Some(icon), Some(color), "fas", mode, None);
     }
 }
 

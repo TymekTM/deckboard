@@ -86,6 +86,28 @@ eq("custom-value OFF is inactive", stateActive(cv, {}, { "my-var": "OFF" }, cvMe
 eq("custom-value boolean push", stateActive(cv, {}, { "my-var": true }, cvMeta), true);
 eq("custom-value unpushed stays unknown", stateActive(cv, {}, {}, cvMeta), null);
 
+// ---- spotify-playback: command-scoped like vol_mute ----------------------
+const spotifyPlay = { type: "spotify-playback", command: "play" };
+eq("spotify play ON is active", stateActive(spotifyPlay, {}, { "spotify-playing": "ON" }, {}), true);
+eq("spotify play OFF is inactive", stateActive(spotifyPlay, {}, { "spotify-playing": "OFF" }, {}), false);
+eq("spotify play unpushed stays unknown", stateActive(spotifyPlay, {}, {}, {}), null);
+eq(
+  "spotify next never tracks state",
+  stateActive({ type: "spotify-playback", command: "next" }, {}, { "spotify-playing": "ON" }, {}),
+  null,
+);
+
+// ---- spotify watch bindings (ON/OFF strings, unbound comparison) --------
+const spotifyShuffle = { type: "spotify-shuffle", command: "" };
+eq("spotify-shuffle ON is active", stateActive(spotifyShuffle, {}, { "spotify-shuffle": "ON" }, {}), true);
+eq("spotify-shuffle OFF is inactive", stateActive(spotifyShuffle, {}, { "spotify-shuffle": "OFF" }, {}), false);
+const spotifyRepeat = { type: "spotify-repeat", command: "" };
+eq("spotify repeat-on ON is active", stateActive(spotifyRepeat, {}, { "spotify-repeat-on": "ON" }, {}), true);
+eq("spotify repeat-off is inactive", stateActive(spotifyRepeat, {}, { "spotify-repeat-on": "OFF" }, {}), false);
+const spotifyLike = { type: "spotify-like", command: "" };
+eq("spotify-like ON is active", stateActive(spotifyLike, {}, { "spotify-liked": "ON" }, {}), true);
+eq("spotify-like unpushed stays unknown", stateActive(spotifyLike, {}, {}, {}), null);
+
 // ---- dead lanes never light --------------------------------------------
 eq("empty binding stays on the tap flip", stateActive(obsScene, { scene: "Game" }, { anything: "ON" }, {}), null);
 eq("unbound plain type stays on the tap flip", stateActive({ type: "key", command: "" }, {}, { anything: "ON" }, {}), null);
