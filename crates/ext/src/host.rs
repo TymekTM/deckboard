@@ -240,7 +240,6 @@ impl ExtRuntime {
     pub fn has_timers(&self) -> bool {
         !self.intervals.is_empty()
     }
-
 }
 
 fn run(context: &mut Context, code: &str) -> Result<JsValue> {
