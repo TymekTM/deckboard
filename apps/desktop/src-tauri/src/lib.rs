@@ -707,22 +707,33 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit Pulpit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_hide, &touch, &launch, &quit])?;
 
+    // The check handle must outlive the builder: muda check items do
+    // not self-toggle, so the handler flips it after a successful
+    // enable/disable (DESK-08) - without this the checkmark kept its
+    // build-time state until the next app restart.
+    let launch_item = launch.clone();
     tauri::tray::TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().expect("app icon").clone())
         .tooltip("Pulpit")
         .menu(&menu)
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .on_menu_event(move |app, event| match event.id().as_ref() {
             "show-hide" => toggle_main_window(app),
             "touch-mode" => toggle_touch_mode(app),
             "autostart" => {
                 use tauri_plugin_autostart::ManagerExt;
                 let launch = app.autolaunch();
                 let enabled = launch.is_enabled().unwrap_or(false);
-                let _ = if enabled {
+                let result = if enabled {
                     launch.disable()
                 } else {
                     launch.enable()
                 };
+                match result {
+                    Ok(()) => {
+                        let _ = launch_item.set_checked(!enabled);
+                    }
+                    Err(e) => tracing::warn!(error = %e, "could not toggle autostart"),
+                }
             }
             "quit" => {
                 goodbye_v2(app);
