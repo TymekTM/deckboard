@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { save, open, ask } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
@@ -303,6 +303,23 @@ const kebabOpen = ref(false);
 const editingTile = ref(null); // button being edited
 const createFlow = ref(null); // {x, y, boardId} for the New Button dialog
 const boardModal = ref(null); // {mode: 'create'|'edit', board?}
+
+// Spotify picker lists for the edit dialog: fetched when a dialog opens
+// (login state can change between opens; the command caches playlists
+// for 60 s). Empty on failure - the dialog falls back to free text.
+const spotifyDevices = ref([]);
+const spotifyPlaylists = ref([]);
+watch([editingTile, createFlow], ([edit, create]) => {
+  if (edit || create) refreshSpotifyPickers();
+});
+async function refreshSpotifyPickers() {
+  const [devices, playlists] = await Promise.all([
+    api.spotifyDevices().catch(() => []),
+    api.spotifyPlaylists().catch(() => []),
+  ]);
+  spotifyDevices.value = devices;
+  spotifyPlaylists.value = playlists;
+}
 
 const currentBoard = computed(
   () => boards.value.find((b) => b.id === currentId.value) || null
@@ -777,6 +794,8 @@ function onKeydown(event) {
         :board-background="boardBg"
         :known-inputs="knownInputs"
         :audio-devices="audioDevices"
+        :spotify-devices="spotifyDevices"
+        :spotify-playlists="spotifyPlaylists"
         @save="tileEdited"
         @delete="tileDeleted"
         @close="editingTile = null"
@@ -789,6 +808,8 @@ function onKeydown(event) {
         :board-background="boardBg"
         :known-inputs="knownInputs"
         :audio-devices="audioDevices"
+        :spotify-devices="spotifyDevices"
+        :spotify-playlists="spotifyPlaylists"
         @create="tileCreated"
         @close="createFlow = null"
       />

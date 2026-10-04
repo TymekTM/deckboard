@@ -383,6 +383,94 @@ export const CATALOG = [
     mode: "graph",
   },
   { divider: true },
+  { header: "Spotify" },
+  // native Spotify integration (design §3); styling/icon fallbacks come
+  // from pulpit_spotify::input_declarations via list_known_inputs, these
+  // rows make the fields editable in the dialog
+  {
+    value: "spotify-playback",
+    label: "Playback (Play / Next / Vol)",
+    icon: "play",
+    color: "#1DB954",
+    select: [
+      { value: "play", label: "Play / Pause" },
+      { value: "next", label: "Next" },
+      { value: "prev", label: "Previous" },
+      { value: "vol_up", label: "Increase Volume" },
+      { value: "vol_down", label: "Decrease Volume" },
+      { value: "vol_mute", label: "Mute" },
+    ],
+  },
+  {
+    value: "spotify-shuffle",
+    label: "Shuffle",
+    icon: "random",
+    color: "#1DB954",
+    dual: true,
+  },
+  {
+    value: "spotify-repeat",
+    label: "Repeat",
+    icon: "repeat",
+    color: "#1DB954",
+    dual: true,
+  },
+  {
+    value: "spotify-like",
+    label: "Like Current Track",
+    icon: "heart",
+    color: "#1DB954",
+    dual: true,
+  },
+  {
+    value: "spotify-add",
+    label: "Add Track to Playlist",
+    icon: "plus",
+    color: "#1DB954",
+    fields: [
+      { key: "playlist", label: "Playlist", devices: "spotify-playlists", placeholder: "playlist id or spotify:playlist:..." },
+    ],
+  },
+  {
+    value: "spotify-tracks",
+    label: "Play Playlist / Album / Track",
+    icon: "record-vinyl",
+    color: "#1DB954",
+    fields: [
+      { key: "uri", label: "URI", devices: "spotify-playlists", placeholder: "spotify:playlist:... (also album/track/artist)" },
+    ],
+  },
+  {
+    value: "spotify-device",
+    label: "Transfer Playback to Device",
+    icon: "tv",
+    color: "#1DB954",
+    fields: [
+      { key: "device", label: "Device", devices: "spotify", placeholder: "device name" },
+    ],
+  },
+  {
+    value: "spotify-volume",
+    label: "Volume Control",
+    mode: "slider",
+    icon: "volume-up",
+    color: "#1DB954",
+  },
+  {
+    value: "spotify-seek",
+    label: "Seek",
+    mode: "slider",
+    icon: "clock",
+    color: "#1DB954",
+  },
+  {
+    value: "spotify-now-playing",
+    label: "Now Playing (display)",
+    mode: "status",
+    icon: "music",
+    color: "#1DB954",
+  },
+  { divider: true },
   { header: "Variables & Logic" },
   {
     value: "custom-value",
@@ -435,6 +523,12 @@ export const CATALOG = [
 // decision, and scripts/check-catalog.mjs enforces the pairing.
 export const STATE_BINDINGS = {
   "speaker-device": { watch: "speaker-device", key: "speaker" },
+  // Spotify live toggles: the poller pushes ON/OFF strings under the
+  // design-§4 keys (repeat cycles off/context/track, its ON/OFF label
+  // rides the derived spotify-repeat-on key)
+  "spotify-shuffle": { watch: "spotify-shuffle" },
+  "spotify-repeat": { watch: "spotify-repeat-on" },
+  "spotify-like": { watch: "spotify-liked" },
   // obs/slobs/xsplit/twitch/discord integrations have no live push in
   // Pulpit (the JS-app extensions that owned the app-state lane are
   // gone; exec pushes at most a per-key custom value): their dual tiles
@@ -482,6 +576,11 @@ export function stateActive(tile, cmd, customValues, typeMeta) {
   if (tile.type === "vol") {
     if (tile.command !== "vol_mute") return null;
     value = customValues["speaker-muted"];
+  } else if (tile.type === "spotify-playback") {
+    // command-scoped like vol_mute: only the play/pause half of the
+    // select tracks the pushed playing state; next/prev/vol_* never do
+    if (tile.command !== "play") return null;
+    value = customValues["spotify-playing"];
   } else if (binding?.watch) {
     value = customValues[binding.watch];
   } else if (typeMeta?.[tile.type]?.mode === "custom-value") {
