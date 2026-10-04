@@ -48,6 +48,10 @@ pub struct ExtRuntime {
 }
 
 impl ExtRuntime {
+    /// Loads a package by running its entry module. The entry is always
+    /// `<root>/index.js`: `package.json`'s `main` field is NOT honored
+    /// (the prelude's `__require_entry` hardcodes `index.js`), so a
+    /// package must keep its entry at `index.js`.
     pub fn load(root: &Path, package: &str, configs: &Value) -> Result<ExtRuntime> {
         let mut context = Context::default();
         register_natives(&mut context);
@@ -239,10 +243,6 @@ impl ExtRuntime {
         !self.intervals.is_empty()
     }
 
-    #[allow(dead_code)]
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
 }
 
 fn run(context: &mut Context, code: &str) -> Result<JsValue> {

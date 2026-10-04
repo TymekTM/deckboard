@@ -1030,6 +1030,9 @@ function __load_module(abs_path) {
     return module_obj.exports;
 }
 
+// The package entry is always <EXT_ROOT>/index.js. `package.json`'s
+// `main` field is deliberately NOT honored - packages must keep their
+// entry module at index.js.
 function __require_entry() {
     var entry = __EXT_ROOT + "/index.js";
     __ext_exports = __load_module(entry);
