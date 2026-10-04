@@ -441,10 +441,6 @@ impl ExtManager {
         self.active_clients.store(clients, Ordering::Relaxed);
     }
 
-    /// Runtime threads are spawned at load time and self-manage their
-    /// timers; nothing to start here anymore.
-    pub fn start(&self) {}
-
     fn forward(tx: &tokio_mpsc::UnboundedSender<ExtEvent>, ev: HostEvent) {
         match ev {
             HostEvent::SetValue(v) => {

@@ -75,10 +75,6 @@ pub fn platform_speaker() -> impl Speaker {
     return unsupported::StubSpeaker;
 }
 
-pub fn speaker_is_supported() -> bool {
-    cfg!(windows)
-}
-
 #[cfg(windows)]
 pub(crate) mod win;
 

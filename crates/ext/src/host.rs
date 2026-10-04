@@ -5,7 +5,7 @@
 //! registrations) is drained from JS globals after every eval. This avoids
 //! holding GC'd JS objects on the Rust side.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use boa_engine::{Context, JsResult, JsValue, NativeFunction, Source};
@@ -37,7 +37,6 @@ pub enum HostEvent {
 
 pub struct ExtRuntime {
     context: Context,
-    root: PathBuf,
     pub package: String,
     pub name: String,
     /// action `value` strings this extension handles
@@ -48,6 +47,10 @@ pub struct ExtRuntime {
 }
 
 impl ExtRuntime {
+    /// Loads a package by running its entry module. The entry is always
+    /// `<root>/index.js`: `package.json`'s `main` field is NOT honored
+    /// (the prelude's `__require_entry` hardcodes `index.js`), so a
+    /// package must keep its entry at `index.js`.
     pub fn load(root: &Path, package: &str, configs: &Value) -> Result<ExtRuntime> {
         let mut context = Context::default();
         register_natives(&mut context);
@@ -109,7 +112,6 @@ impl ExtRuntime {
 
         let mut rt = ExtRuntime {
             context,
-            root: root.to_path_buf(),
             package: package.to_string(),
             name,
             actions,
@@ -237,11 +239,6 @@ impl ExtRuntime {
     /// extensions must stay resident or their pushed values stop.
     pub fn has_timers(&self) -> bool {
         !self.intervals.is_empty()
-    }
-
-    #[allow(dead_code)]
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 }
 

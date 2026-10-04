@@ -38,9 +38,13 @@ pub const TYPE_BOARD_OPEN: &str = "board.open";
 pub const TYPE_STATE_SYNC: &str = "state.sync";
 pub const TYPE_STATE_PATCH: &str = "state.patch";
 pub const TYPE_INTERACTION: &str = "interaction";
-/// Reserved for M6 two-step widget flows and web-widget messaging.
+/// Reserved by the protocol for M6 two-step widget flows and web-widget
+/// messaging (docs/protocol-v2.md §8): no code path sends it today and
+/// the server dispatch has no arm for it.
 pub const TYPE_WIDGET_EVENT: &str = "widget.event";
-/// Reserved for a future remote editor; the editor writes in-process.
+/// Reserved by the protocol for a future remote editor; the editor
+/// writes in-process, so nothing sends or dispatches this frame today
+/// (docs/protocol-v2.md §3, "future use").
 pub const TYPE_BOARDS_WRITE: &str = "boards.write";
 /// Server-to-client only: the server is exiting on purpose (app quit or
 /// machine shutdown). The client stops reconnecting; a WS close follows.
@@ -57,6 +61,9 @@ pub mod error_code {
     pub const TOO_LARGE: &str = "too-large";
     pub const UNKNOWN_TILE: &str = "unknown-tile";
     pub const UNSUPPORTED_INTERACTION: &str = "unsupported-interaction";
+    /// Reserved by the protocol as the generic fallback (listed in
+    /// docs/protocol-v2.md §2) but never produced today: every error
+    /// site picks a specific code.
     pub const INTERNAL: &str = "internal";
 }
 

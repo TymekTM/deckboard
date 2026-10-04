@@ -324,14 +324,6 @@ impl V2Session {
         *self.device.lock().expect("session poisoned") = Some(device);
     }
 
-    pub fn device_name(&self) -> Option<String> {
-        self.device
-            .lock()
-            .expect("session poisoned")
-            .as_ref()
-            .map(|d| d.name.clone())
-    }
-
     /// The paired device behind this session, if the handshake got that
     /// far - the revoke path matches sessions on it.
     pub fn device_id(&self) -> Option<String> {

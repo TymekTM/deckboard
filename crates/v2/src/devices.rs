@@ -289,6 +289,8 @@ impl Pairing {
         code
     }
 
+    /// Test-only probe: validate a code without consuming it.
+    #[cfg(test)]
     pub fn peek(&self, code: &str) -> Result<(), PairError> {
         let codes = self.codes.lock().expect("pairing poisoned");
         match codes.get(code) {

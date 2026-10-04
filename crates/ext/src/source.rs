@@ -141,19 +141,6 @@ impl PackageSource {
         (self.root, self.keep)
     }
 
-    pub fn entry_candidates(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let pkg_json = self.root.join("package.json");
-        if let Ok(text) = fs::read_to_string(&pkg_json) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(main) = v.get("main").and_then(|m| m.as_str()) {
-                    out.push(self.root.join(main));
-                }
-            }
-        }
-        out.push(self.root.join("index.js"));
-        out
-    }
 }
 
 /// Temp extraction prefix for the uncached fallback; the directory itself

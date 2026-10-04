@@ -11,7 +11,7 @@ use pulpit_db::ButtonRow;
 use pulpit_legacy::Mapper;
 use pulpit_proto::{Interaction, WidgetKind};
 use pulpit_v2::boards::{build_tile, hold_repeat_config};
-use pulpit_v2::{AssetStore, StateEngine};
+use pulpit_v2::{AssetBody, AssetStore, StateEngine};
 use std::collections::HashMap;
 
 fn row(kind: &str, mode: &str, command: Option<&str>) -> ButtonRow {
@@ -466,13 +466,19 @@ fn state2_image_reaches_the_v2_wire() {
         .asset_hash
         .as_ref()
         .expect("img -> asset_hash");
-    assert_eq!(assets.get(hash).unwrap(), b"face");
+    assert_eq!(
+        assets.read_for_serving(hash, None).unwrap(),
+        AssetBody::Full(b"face".to_vec())
+    );
     let hash2 = tile
         .manifest
         .asset_hash2
         .as_ref()
         .expect("img2 must reach the v2 wire as asset_hash2");
-    assert_eq!(assets.get(hash2).unwrap(), b"face-active");
+    assert_eq!(
+        assets.read_for_serving(hash2, None).unwrap(),
+        AssetBody::Full(b"face-active".to_vec())
+    );
 }
 
 // ---- round-4 Spotify kinds (design §3/§4) ---------------------------------

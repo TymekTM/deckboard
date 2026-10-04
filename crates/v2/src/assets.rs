@@ -106,6 +106,9 @@ impl AssetStore {
         Some(hash)
     }
 
+    /// Convenience reader for tests: the whole file's bytes. Production
+    /// serving goes through `read_for_serving`. Not `#[cfg(test)]`:
+    /// other crates' tests (pulpit-host's art pump) read through it.
     pub fn get(&self, hash: &str) -> Option<Vec<u8>> {
         let ext = self
             .exts

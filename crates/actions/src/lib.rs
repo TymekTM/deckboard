@@ -116,8 +116,6 @@ pub enum Effect {
     OpenUrl(String),
     Spawn(String, Vec<String>),
     Sleep(u64),
-    ChangeBoard(i64),
-    Unsupported(String),
 }
 
 /// OS interaction seam. Implemented by `EnigoInput` (real) and test mocks.
@@ -760,12 +758,6 @@ pub mod test_support {
     #[derive(Default)]
     pub struct MockInput {
         pub effects: Vec<Effect>,
-    }
-
-    impl MockInput {
-        pub fn pressed(&self) -> Vec<&Effect> {
-            self.effects.iter().by_ref().collect()
-        }
     }
 
     impl Input for MockInput {
