@@ -108,6 +108,12 @@ fun Tile(
     status: StatusData? = null,
     image: ImageBitmap? = null,
     image2: ImageBitmap? = null,
+    /** Album art of a status payload (the payload's own asset hash,
+     *  distinct from the tile face images above). */
+    statusImage: ImageBitmap? = null,
+    /** Local receive time of the status payload, for its playback
+     *  progress extrapolation. */
+    statusReceivedAtMs: Long = 0L,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
     onSlider: (Float) -> Unit,
@@ -241,7 +247,13 @@ fun Tile(
                 "list" ->
                     if (status != null) {
                         // ai-dev status push: rows/compact/summary renderer
-                        StatusTile(tile, status, titleColor)
+                        StatusTile(
+                            tile,
+                            status,
+                            titleColor,
+                            art = statusImage,
+                            receivedAtMs = statusReceivedAtMs,
+                        )
                     } else {
                         ListTile(tile, items, titleColor, onPress = onPressEnd)
                     }

@@ -6,6 +6,7 @@
 package app.pulpit.mobile.ui
 
 import android.os.Build
+import android.os.SystemClock
 
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.Canvas
@@ -359,6 +360,18 @@ private fun TileCell(
     }
     t.assetHash?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
     t.assetHash2?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
+    // a status payload's album art rides the same asset fetch + bitmap
+    // LRU as the tile faces above - no second HTTP path
+    val status = statusData(t, live)
+    val statusHash = status?.image
+    statusHash?.let { hash -> LaunchedEffect(hash) { vm.ensureAsset(hash) } }
+    val statusImage by remember(bitmaps, statusHash) {
+        derivedStateOf { statusHash?.let { bitmaps.value[it] } }
+    }
+    // no server timestamp rides the payload (clocks differ): stamp the
+    // local receive time once per payload content, for progress
+    // extrapolation (design §4)
+    val statusReceivedAtMs = remember(live) { SystemClock.elapsedRealtime() }
     val active = when {
         watchChannel != null -> isActiveValue(live)
         else -> positions[t.id] ?: false
@@ -372,9 +385,11 @@ private fun TileCell(
         series = SeriesWindow(points),
         channel = meta,
         items = TileItems(listItems(t, live)),
-        status = statusData(t, live),
+        status = status,
         image = image,
         image2 = image2,
+        statusImage = statusImage,
+        statusReceivedAtMs = statusReceivedAtMs,
         onPressStart = { vm.pressStart(boardId, t) },
         onPressEnd = { vm.pressEnd(boardId, t) },
         onSlider = { v -> vm.slider(boardId, t, v) },

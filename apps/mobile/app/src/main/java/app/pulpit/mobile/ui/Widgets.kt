@@ -5,7 +5,9 @@
 package app.pulpit.mobile.ui
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -40,11 +42,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -575,7 +579,43 @@ fun statusData(tile: Tile, live: kotlinx.serialization.json.JsonElement?): Statu
         }
     }
     val rowStyle = obj["row_style"]?.jsonPrimitive?.contentOrNull ?: "name"
-    return StatusData(rows, compact, summary, rowStyle)
+    return StatusData(rows, compact, summary, rowStyle, statusImage(obj), statusProgress(obj))
+}
+
+/** The payload's album-art asset hash: a non-empty hex-looking string
+ *  (the v2 AssetStore hashes are sha256 hex). Anything else - missing,
+ *  empty, number, object - reads as no art; the strict shape keeps a
+ *  garbage push out of the asset fetch's retry ladder. */
+private fun statusImage(obj: JsonObject): String? {
+    val hash = runCatching { obj["image"]?.jsonPrimitive?.contentOrNull }.getOrNull() ?: return null
+    return hash.takeIf { HASH_SHAPE.matches(it) }
+}
+
+private val HASH_SHAPE = Regex("^[0-9a-fA-F]{8,64}$")
+
+/** The payload's playback progress; null unless the object carries a
+ *  usable position/duration/playing triple (missing or garbage -> null,
+ *  old clients' payloads simply have no such field). */
+private fun statusProgress(obj: JsonObject): StatusProgress? {
+    val p = obj["progress"] as? JsonObject ?: return null
+    val position = runCatching { p["position_ms"]?.jsonPrimitive?.doubleOrNull }.getOrNull()
+    val duration = runCatching { p["duration_ms"]?.jsonPrimitive?.doubleOrNull }.getOrNull()
+    val playing = runCatching { p["playing"]?.jsonPrimitive?.booleanOrNull }.getOrNull()
+    if (position == null || duration == null || playing == null) return null
+    if (duration <= 0.0) return null
+    return StatusProgress(position.toLong(), duration.toLong(), playing)
+}
+
+/** Displayed playback position (ms), the client-side extrapolation of
+ *  design §4: the payload carries no server timestamp (clocks differ),
+ *  so [receivedAtMs] is the local time the payload arrived and the
+ *  position advances by the elapsed local time while playing - clamped
+ *  to the track - and freezes at the reported position when paused. */
+internal fun statusProgressAt(progress: StatusProgress, receivedAtMs: Long, nowMs: Long): Long {
+    val base = progress.positionMs.coerceIn(0L, progress.durationMs)
+    if (!progress.playing) return base
+    val elapsed = (nowMs - receivedAtMs).coerceAtLeast(0L)
+    return minOf(progress.durationMs, base + elapsed)
 }
 
 /** The kept plan windows of this tile ([Tile.params] "windows", an
@@ -658,6 +698,8 @@ fun StatusTile(
     data: StatusData,
     titleColor: Color,
     modifier: Modifier = Modifier,
+    art: ImageBitmap? = null,
+    receivedAtMs: Long = 0L,
 ) {
     val compact = data.compact.isNotEmpty() &&
         (tile.h <= 1 || data.rows.size > tile.h * 4)
@@ -665,6 +707,11 @@ fun StatusTile(
     when {
         compact -> StatusCompactView(data, titleColor, modifier)
         mini -> StatusMiniView(data, modifier)
+        // a payload with album art or playback progress (any producer's,
+        // not only spotify) gets the media layout: art whole, rows and
+        // progress bar below or beside it per the tile's aspect
+        art != null || data.progress != null ->
+            StatusMediaView(tile, data, art, receivedAtMs, titleColor, modifier)
         else -> StatusDetailView(data, titleColor, modifier)
     }
 }
@@ -683,6 +730,15 @@ private fun StatusDetailView(
             .padding(horizontal = 9.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically),
     ) {
+        StatusDetailContent(data, titleColor)
+    }
+}
+
+/** The detail view's rows + summary, shared with the media layout that
+ *  adds album art and the progress bar around it. */
+@Composable
+private fun StatusDetailContent(data: StatusData, titleColor: Color) {
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically)) {
         data.rows.forEach { row ->
             Column {
                 Row(
@@ -769,6 +825,134 @@ private fun StatusDetailView(
             }
         }
     }
+}
+
+/** Album art is shown whole: fit with the aspect kept, never cropped,
+ *  tinted and with nothing drawn on top of it (design §4). */
+@Composable
+private fun StatusArt(bitmap: ImageBitmap, modifier: Modifier = Modifier) {
+    Image(
+        bitmap = bitmap,
+        contentDescription = null,
+        contentScale = ContentScale.Fit,
+        modifier = modifier,
+    )
+}
+
+/** Media layout for a status payload that carries album art and/or
+ *  playback progress: the art whole with the rows and the progress bar
+ *  below it (portrait/square tiles) or beside it (wide tiles), and a
+ *  small brand glyph in a tile corner outside the art. */
+@Composable
+private fun StatusMediaView(
+    tile: Tile,
+    data: StatusData,
+    art: ImageBitmap?,
+    receivedAtMs: Long,
+    titleColor: Color,
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier.fillMaxSize()) {
+        if (tile.w > tile.h) {
+            Row(
+                Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 9.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (art != null) {
+                    StatusArt(art, Modifier.weight(0.42f).fillMaxHeight())
+                }
+                Column(
+                    Modifier.weight(0.58f),
+                    verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically),
+                ) {
+                    StatusDetailContent(data, titleColor)
+                    data.progress?.let {
+                        StatusMediaBar(it, receivedAtMs, showTimes = tile.w >= 2)
+                    }
+                }
+            }
+        } else {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 9.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically),
+            ) {
+                if (art != null) {
+                    StatusArt(art, Modifier.fillMaxWidth().weight(1f))
+                }
+                StatusDetailContent(data, titleColor)
+                data.progress?.let {
+                    StatusMediaBar(it, receivedAtMs, showTimes = tile.w >= 2)
+                }
+            }
+        }
+        if (art != null) {
+            Text(
+                text = "\uf1bc",
+                fontFamily = FaBrands,
+                fontSize = 12.sp,
+                color = Color.White.copy(alpha = 0.8f),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp),
+            )
+        }
+    }
+}
+
+/** Thin playback bar with the payload's position extrapolated locally
+ *  (statusProgressAt). The ~1 s ticker lives in this composable: it runs
+ *  only while the payload says playing, a new payload restarts it, and
+ *  leaving composition (board switch, tile removed) cancels it - paused
+ *  or progress-less tiles never tick. */
+@Composable
+private fun StatusMediaBar(progress: StatusProgress, receivedAtMs: Long, showTimes: Boolean) {
+    var nowMs by remember(progress) { mutableStateOf(SystemClock.elapsedRealtime()) }
+    if (progress.playing) {
+        LaunchedEffect(progress) {
+            while (true) {
+                delay(1_000L)
+                nowMs = SystemClock.elapsedRealtime()
+            }
+        }
+    }
+    val positionMs = statusProgressAt(progress, receivedAtMs, nowMs)
+    val fraction = (positionMs.toFloat() / progress.durationMs.toFloat()).coerceIn(0f, 1f)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .weight(1f)
+                .height(2.dp)
+                .clip(RoundedCornerShape(1.dp))
+                .background(Color.White.copy(alpha = 0.15f)),
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(fraction)
+                    .height(2.dp)
+                    .background(Color.White.copy(alpha = 0.75f)),
+            )
+        }
+        if (showTimes) {
+            Spacer(Modifier.size(6.dp))
+            Text(
+                text = "${mmss(positionMs)} / ${mmss(progress.durationMs)}",
+                fontSize = 9.5.sp,
+                color = Color.White.copy(alpha = 0.7f),
+            )
+        }
+    }
+}
+
+/** m:ss without hours - playback clocks stay under an hour in practice
+ *  and the text has to fit a tile row. */
+internal fun mmss(ms: Long): String {
+    val total = (ms / 1000L).coerceAtLeast(0L)
+    return "${total / 60L}:${(total % 60L).toString().padStart(2, '0')}"
 }
 
 /** Compact: vertical provider stack, each logo with its dot and the

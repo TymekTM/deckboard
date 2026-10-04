@@ -138,4 +138,103 @@ class StatusDataTest {
         assertEquals("claude", laneProvider("Claude week"))
         assertEquals("", laneProvider(""))
     }
+
+    /** The spotify-now-playing round-trip (design §4): the optional
+     *  `image` hash and `progress` object survive the parser; `compact`
+     *  arrives as a string here, which reads as no compact entries. */
+    @Test
+    fun parsesImageAndProgress() {
+        val data = statusData(
+            tile = Tile(id = 1, kind = "list"),
+            live = json.parseToJsonElement(
+                """
+                {
+                  "title": "Spotify",
+                  "rows": [
+                    {"label": "Track", "value": "Song"},
+                    {"label": "Artist", "value": "A, B"}
+                  ],
+                  "compact": "Song — Artist",
+                  "summary": "Song — Artist",
+                  "image": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+                  "progress": {"position_ms": 61234, "duration_ms": 201000, "playing": true}
+                }
+                """.trimIndent(),
+            ),
+        )!!
+        assertEquals(2, data.rows.size)
+        assertEquals(
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            data.image,
+        )
+        assertEquals(StatusProgress(61234, 201000, playing = true), data.progress)
+        assertEquals(0, data.compact.size)
+        assertEquals("Song — Artist", data.summary)
+    }
+
+    @Test
+    fun payloadsWithoutImageOrProgressParseAsBefore() {
+        // ai-dev pushes (and "nothing playing" spotify pushes) carry
+        // neither field - they must keep parsing exactly as before
+        val data = statusData(
+            tile = Tile(id = 1, kind = "list"),
+            live = json.parseToJsonElement(
+                """{"rows": [{"label": "Status", "value": "Nothing playing"}],
+                   "compact": "Nothing playing", "summary": "Nothing playing"}""",
+            ),
+        )!!
+        assertNull(data.image)
+        assertNull(data.progress)
+    }
+
+    @Test
+    fun garbageImageAndProgressReadAsNull() {
+        val tile = Tile(id = 1, kind = "list")
+        val garbage = statusData(
+            tile = tile,
+            live = json.parseToJsonElement(
+                """
+                {
+                  "rows": [{"label": "Track", "value": "Song"}],
+                  "image": "",
+                  "progress": {"position_ms": "x", "duration_ms": 201000, "playing": true}
+                }
+                """.trimIndent(),
+            ),
+        )!!
+        assertNull(garbage.image)
+        assertNull(garbage.progress)
+
+        val junk = statusData(
+            tile = tile,
+            live = json.parseToJsonElement(
+                """
+                {
+                  "rows": [{"label": "Track", "value": "Song"}],
+                  "image": 42,
+                  "progress": {"position_ms": -5, "duration_ms": 0, "playing": "yes"}
+                }
+                """.trimIndent(),
+            ),
+        )!!
+        // 42 is a string primitive, not a hash shape - dropped; duration
+        // 0 can never be a valid track - dropped
+        assertNull(junk.image)
+        assertNull(junk.progress)
+
+        val shapes = statusData(
+            tile = tile,
+            live = json.parseToJsonElement(
+                """
+                {
+                  "rows": [{"label": "Track", "value": "Song"}],
+                  "image": {"hash": "9f86d081"},
+                  "progress": [61234, 201000, true]
+                }
+                """.trimIndent(),
+            ),
+        )!!
+        assertNull(shapes.image)
+        assertNull(shapes.progress)
+    }
 }
