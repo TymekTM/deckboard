@@ -106,6 +106,9 @@ impl AssetStore {
         Some(hash)
     }
 
+    /// Test-only convenience reader: the whole file's bytes. Production
+    /// serving goes through `read_for_serving`.
+    #[cfg(test)]
     pub fn get(&self, hash: &str) -> Option<Vec<u8>> {
         let ext = self
             .exts
