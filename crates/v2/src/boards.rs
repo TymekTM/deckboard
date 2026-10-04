@@ -71,9 +71,35 @@ pub fn build_board(
         background: board_background(board, assets),
         tiles: buttons
             .iter()
-            .map(|row| build_tile(row, names, assets, engine))
+            .map(|row| {
+                let mut tile = build_tile(row, names, assets, engine);
+                clamp_tile_to_board(&mut tile, board.width, board.height);
+                tile
+            })
             .collect(),
     }
+}
+
+/// Pull one built tile's placement back inside its board's grid (DESK-03).
+/// Wire-side defense on top of the DB clamp in `update_board`: rows written
+/// by older builds still carry off-grid placements, which the stock legacy
+/// client filters out and a v2 grid would render off-canvas. Shared with
+/// the `tile-set` op path so deltas obey the same bound.
+pub fn clamp_tile_to_board(tile: &mut Tile, board_width: i64, board_height: i64) {
+    let (x, y, w, h) = pulpit_db::clamp_placement(
+        i64::from(tile.placement.x),
+        i64::from(tile.placement.y),
+        i64::from(tile.placement.w),
+        i64::from(tile.placement.h),
+        board_width,
+        board_height,
+    );
+    tile.placement = Placement {
+        x: x as u32,
+        y: y as u32,
+        w: w as u32,
+        h: h as u32,
+    };
 }
 
 fn board_background(board: &BoardRow, assets: &AssetStore) -> Option<pulpit_proto::Background> {
@@ -717,6 +743,46 @@ mod tests {
         assert_eq!(board.height, 32);
         let degenerate = build_board(&board_row(-5, 0), &[], &HashMap::new(), &assets, &engine);
         assert_eq!((degenerate.width, degenerate.height), (1, 1));
+    }
+
+    #[test]
+    fn tile_placements_are_clamped_to_the_board_grid() {
+        // DESK-03: rows stored before a board shrink still reach the
+        // wire; the stock legacy client drops an off-grid tile outright
+        // and a v2 grid would render it off-canvas
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let b = board_row(4, 3);
+        let mut hangs = row("url", "button", Some("https://example.com"));
+        hangs.x = Some(5);
+        hangs.y = Some(3);
+        let mut huge = row("url", "button", Some("https://example.com"));
+        huge.id = 11;
+        huge.x = Some(2);
+        huge.y = Some(2);
+        huge.w = 20;
+        huge.h = 2;
+        let board = build_board(&b, &[hangs, huge], &HashMap::new(), &assets, &engine);
+        // origin pulled back inside (x <= W-w, y <= H-h)
+        assert_eq!(
+            board.tiles[0].placement,
+            Placement {
+                x: 2,
+                y: 2,
+                w: 2,
+                h: 1
+            }
+        );
+        // a tile larger than the grid shrinks to it
+        assert_eq!(
+            board.tiles[1].placement,
+            Placement {
+                x: 0,
+                y: 1,
+                w: 4,
+                h: 2
+            }
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
+use pulpit_db::MAX_BOARD_DIM;
 use pulpit_proto::{Board, BoardsSync, Frame, MAX_FRAME_BYTES, TYPE_BOARDS_SYNC};
 use serde_json::json;
 
@@ -367,14 +368,18 @@ impl V2State {
     pub fn tile_set_op(&self, board_id: i64, tile_id: i64) -> Option<pulpit_proto::BoardOp> {
         let row = self.backend.get_button(tile_id)?;
         let names = crate::boards::board_names(self.backend.as_ref());
+        let mut tile = crate::boards::build_tile(&row, &names, &self.assets, &self.engine);
+        // Same placement bound as the boards builder (DESK-03): the delta
+        // must not carry an off-grid tile after a board shrink. A board
+        // row that is already gone still bounds the tile by MAX_BOARD_DIM.
+        let (width, height) = match self.backend.get_board(board_id) {
+            Some(board) => (board.width, board.height),
+            None => (MAX_BOARD_DIM, MAX_BOARD_DIM),
+        };
+        crate::boards::clamp_tile_to_board(&mut tile, width, height);
         Some(pulpit_proto::BoardOp::TileSet {
             board: board_id,
-            tile: Box::new(crate::boards::build_tile(
-                &row,
-                &names,
-                &self.assets,
-                &self.engine,
-            )),
+            tile: Box::new(tile),
         })
     }
 
