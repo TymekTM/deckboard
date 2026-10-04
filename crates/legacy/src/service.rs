@@ -299,17 +299,19 @@ async fn handle_event(
         }
         "get_shortcuts" => {
             // Board reads hit SQLite; the server runtime is
-            // single-threaded, so they run on the blocking pool.
+            // single-threaded, so they run on the blocking pool. One
+            // grouped query for every board's shortcuts (NET-09).
             let backend = state.backend.clone();
             let is_pro = session.is_pro;
             let boards = match tokio::task::spawn_blocking(move || {
                 let mapper = Mapper::new();
+                let buttons = backend.all_buttons_by_board();
                 backend
                     .get_boards()
                     .iter()
                     .map(|b| {
-                        let buttons = backend.get_buttons_by_board(b.id);
-                        mapper.board_payload(b, &buttons, is_pro)
+                        let rows = buttons.get(&b.id);
+                        mapper.board_payload(b, rows.map(Vec::as_slice).unwrap_or(&[]), is_pro)
                     })
                     .collect::<Vec<serde_json::Value>>()
             })
