@@ -27,6 +27,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 pulpit-db = { path = "../../../crates/db" }
+pulpit-host = { path = "../../../crates/host" }
 pulpit-backend = { path = "../../../crates/backend" }
 pulpit-actions = { path = "../../../crates/actions" }
 pulpit-legacy = { path = "../../../crates/legacy" }

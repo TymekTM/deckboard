@@ -196,6 +196,7 @@ pub fn run() {
             list_devices,
             revoke_device,
             resolve_operator_ask,
+            take_pending_touch_toggle,
             adb_devices,
             adb_install_apk,
             check_for_updates,
@@ -257,24 +258,46 @@ fn prune_old_logs(log_dir: &std::path::Path, prefix: &str, keep_days: u64) {
     }
 }
 
-/// Register one button-style source (extension input, Voicemeeter or
-/// Discord declaration) so the legacy mapper can style its tiles.
-fn register_ext_input(
-    value: &str,
-    icon: Option<&str>,
-    color: Option<&str>,
-    font_icon: &str,
-    mode: Option<&str>,
-    command: Option<&str>,
-) {
-    pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
-        value: value.to_string(),
-        icon: icon.map(str::to_string),
-        color: color.map(str::to_string),
-        font_icon: Some(font_icon.to_string()),
-        mode: mode.map(str::to_string),
-        command: command.map(str::to_string),
-    });
+/// Emit to the editor WebView only when its window can be seen: a
+/// tray-hidden window cannot render pushes, and every emit is an IPC
+/// round-trip with a second serialization of the payload. Tablets ride
+/// the hub broadcasts and are unaffected. Periodic lanes re-deliver on
+/// their next tick; change-gated callers must NOT advance their gate
+/// when this returns false, or the shown window keeps a stale value.
+fn emit_if_visible(app: &AppHandle, event: &str, payload: &serde_json::Value) -> bool {
+    let visible = app
+        .get_webview_window("main")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    if visible {
+        let _ = app.emit(event, payload);
+    }
+    visible
+}
+
+/// The desktop host's [`pulpit_host::ClientFeed`] impl: the v2 state
+/// engine, the legacy hub, and the editor WebView as the extra sink
+/// (gated on window visibility by [`emit_if_visible`]). `engine` is
+/// `None` when the v2 stack failed to start - pushes still reach the
+/// WebView and the stock clients.
+struct DesktopFeed {
+    app: AppHandle,
+    engine: Option<Arc<pulpit_v2::StateEngine>>,
+    hub: Arc<Hub>,
+}
+
+impl pulpit_host::ClientFeed for DesktopFeed {
+    fn engine_set(&self, key: &str, value: serde_json::Value) {
+        if let Some(engine) = &self.engine {
+            engine.set(&pulpit_v2::ext_channel(key), value);
+        }
+    }
+    async fn broadcast_status(&self, payload: &str) {
+        self.hub.broadcast("app_status_update", Some(payload)).await;
+    }
+    fn emit_status(&self, payload: &serde_json::Value) -> bool {
+        emit_if_visible(&self.app, "app-status-update", payload)
+    }
 }
 
 /// Open the database (read-write: the editor is now the single writer,
@@ -332,36 +355,18 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     let ext_dir = std::env::var_os("PULPIT_EXT_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| data_dir.join("extensions"));
-    // Native system-info and callurl replace their JS packages (the JS
-    // runtimes were the heaviest part of the extension fleet); the manager
-    // must not load them. Mirrors the headless server.
-    let native_replaced = ["deckboard-system-info", "deckboard-callurl"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
-    let (ext_manager, mut ext_events) = ExtManager::load(&ext_dir, &settings, &native_replaced);
+    // Extension inputs and every native declaration (Voicemeeter,
+    // Discord, system-info, callurl, AI dev-work) register through the
+    // shared host module, mirroring the headless server exactly.
+    let (ext_manager, ext_events) =
+        ExtManager::load(&ext_dir, &settings, &pulpit_host::native_replaced());
     for (package, name, error) in ext_manager.summary() {
         match error {
             Some(e) => tracing::warn!(package, name, error = e, "extension disabled"),
             None => tracing::info!(package, name, "extension ready"),
         }
     }
-    for input in ext_manager.inputs() {
-        register_ext_input(
-            &input.value,
-            input.icon.as_deref(),
-            input.color.as_deref(),
-            input.font_icon.as_deref().unwrap_or("fas"),
-            input.mode.as_deref(),
-            input.command.as_deref(),
-        );
-    }
-    for (value, icon, font_icon, color) in pulpit_vm::input_declarations() {
-        register_ext_input(value, icon, Some(color), font_icon, None, None);
-    }
-    for (value, icon, color, mode) in pulpit_discord::input_declarations() {
-        register_ext_input(value, Some(icon), Some(color), "fas", mode, None);
-    }
+    pulpit_host::register_inputs(&ext_manager);
 
     let backend = Arc::new(
         SqlBackend::new(db)
@@ -378,7 +383,6 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
     // /v2/pair. Shares the backend with the legacy layer; a broken devices
     // list or asset store only disables v2, never the whole editor.
-    let feed_v2 = Arc::new(pulpit_v2::StateEngine::new(pulpit_proto::SERIES_CAP));
     let v2 = {
         let devices = pulpit_v2::DeviceStore::load(data_dir.join("devices.json"));
         let assets = pulpit_v2::AssetStore::open(data_dir.join("assets"));
@@ -391,7 +395,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                     devices: Arc::new(devices),
                     pairing: Arc::new(pulpit_v2::Pairing::new()),
                     assets: Arc::new(assets),
-                    engine: feed_v2.clone(),
+                    engine: Arc::new(pulpit_v2::StateEngine::new(pulpit_proto::SERIES_CAP)),
                     generation: pulpit_v2::Generation::starting_at(1),
                     boards_cache: Default::default(),
                     pair_requests: Default::default(),
@@ -444,203 +448,39 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         ));
     }
     // Extension timers stretch to IDLE_TICK_FLOOR while no client is
-    // watching (see ExtManager::set_activity); keep the count current.
-    {
-        let ext = ext_manager.clone();
-        let hub = hub.clone();
-        let v2_hub = v2.as_ref().map(|v2| v2.hub.clone());
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                let mut clients = hub.len().await;
-                if let Some(v2_hub) = &v2_hub {
-                    clients += v2_hub.count();
-                }
-                ext.set_activity(clients);
-            }
-        });
-    }
-    // Extension pushes feed both protocols: the legacy app_status_update
-    // broadcast (stock client) and one v2 channel per data key.
-    fn feed_ext(engine: &pulpit_v2::StateEngine, data: &serde_json::Value) {
-        if let Some(map) = data.as_object() {
-            for (key, value) in map {
-                engine.set(&format!("ext.{key}"), value.clone());
-            }
-        }
-    }
+    // watching (see ExtManager::set_activity); the shared activity loop
+    // keeps the count current.
+    tauri::async_runtime::spawn(pulpit_host::activity_loop(
+        ext_manager.clone(),
+        hub.clone(),
+        v2.as_ref().map(|v2| v2.hub.clone()),
+    ));
 
-    // Emit to the editor WebView only when its window can be seen: a
-    // tray-hidden window cannot render pushes, and every emit is an IPC
-    // round-trip with a second serialization of the payload. Tablets ride
-    // the hub broadcasts and are unaffected. Periodic lanes re-deliver on
-    // their next tick; change-gated callers must NOT advance their gate
-    // when this returns false, or the shown window keeps a stale value.
-    fn emit_if_visible(app: &AppHandle, event: &str, payload: &serde_json::Value) -> bool {
-        let visible = app
-            .get_webview_window("main")
-            .map(|w| w.is_visible().unwrap_or(false))
-            .unwrap_or(false);
-        if visible {
-            let _ = app.emit(event, payload);
-        }
-        visible
-    }
-
-    // extensions push custom values -> app_status_update, like the original
-    {
-        let hub = hub.clone();
-        let app = app.clone();
-        let feed_v2 = feed_v2.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some(pulpit_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
-                tracing::debug!(keys = ?data.as_object().map(|o| o.keys().collect::<Vec<_>>()), "extension value push");
-                feed_ext(&feed_v2, &data);
-                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
-                hub.broadcast("app_status_update", Some(&payload.to_string()))
-                    .await;
-                emit_if_visible(&app, "app-status-update", &payload);
-            }
-        });
-    }
-
-    // native system-info: declarations style si-* tiles like the JS package
-    // did, and its push loop feeds CPU/RAM and friends to both protocols on
-    // the original cadence (the JS runtime itself was dropped in M2).
-    for (value, icon, font_icon, color, mode) in pulpit_sysinfo::input_declarations() {
-        register_ext_input(value, Some(icon), Some(color), font_icon, Some(mode), None);
-    }
-    {
-        let mut sysinfo_values = pulpit_sysinfo::spawn_push();
-        let hub = hub.clone();
-        let app = app.clone();
-        let feed_v2 = feed_v2.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some(data) = sysinfo_values.recv().await {
-                feed_ext(&feed_v2, &data);
-                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
-                hub.broadcast("app_status_update", Some(&payload.to_string()))
-                    .await;
-                emit_if_visible(&app, "app-status-update", &payload);
-            }
-        });
-    }
-
-    // native AI dev-work source: declarations style the ai-* display tiles
-    // (plan limits, agent progress), and its poll loop feeds both protocols
-    // from local transcripts, agent sessions and configured plan APIs.
-    for (value, icon, color, mode) in pulpit_aidev::input_declarations() {
-        register_ext_input(value, Some(icon), Some(color), "fas", Some(mode), None);
-    }
-    {
-        // the config location was resolved at the top of setup_core
-        // (PULPIT_AIDEV_CONFIG override or pulpitApp/aidev.json)
-        let aidev_config = aidev_config.clone();
-        // the transcript sources live in the real user home, not the
-        // pulpitApp data dir
-        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        let paths = pulpit_aidev::Paths {
-            config: aidev_config,
-            zcode_cli: home.join(".zcode").join("cli"),
-            claude_projects: home.join(".claude").join("projects"),
-            codex_sessions: home.join(".codex").join("sessions"),
-            opencode_db: home
-                .join(".local")
-                .join("share")
-                .join("opencode")
-                .join("opencode.db"),
-            antigravity_conversations: home
-                .join(".gemini")
-                .join("antigravity")
-                .join("conversations"),
-        };
-        let mut aidev_values = pulpit_aidev::spawn_push(paths);
-        let hub = hub.clone();
-        let app = app.clone();
-        let feed_v2 = feed_v2.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some(data) = aidev_values.recv().await {
-                feed_ext(&feed_v2, &data);
-                let payload = serde_json::json!({"app": "APP_CUSTOM_VALUE", "data": data});
-                hub.broadcast("app_status_update", Some(&payload.to_string()))
-                    .await;
-                emit_if_visible(&app, "app-status-update", &payload);
-            }
-        });
-    }
-
-    // master audio status watcher: the original polls every 5 s and pushes
-    // speaker-volume/speaker-muted; that is what flips mute tiles live.
-    // The active output device rides along (THIRD_PARTY_APP, like the
-    // original) but is read only every 6th cycle (~30 s, like the headless
-    // server) and pushed only when it changed, so tablets are not spammed.
-    // Volume/mute likewise broadcast only on change: the v2 engine dedupes
-    // anyway, the legacy lane and the WebView do not.
-    {
-        let hub = hub.clone();
-        let app = app.clone();
-        let backend = backend.clone();
-        let feed_v2 = feed_v2.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut last_device: Option<String> = None;
-            let mut last_level: Option<f32> = None;
-            let mut last_muted: Option<bool> = None;
-            let mut tick: u32 = 0;
-            loop {
-                tick = tick.wrapping_add(1);
-                let want_device = tick.is_multiple_of(6);
-                interval.tick().await;
-                // Speaker COM calls block; keep them off the runtime
-                // workers. The shared SqlBackend owns the lazy speaker
-                // instance, so exec switches and watcher reads agree.
-                // `speaker_snapshot` builds ONE COM chain for all values.
-                let snapshot_backend = backend.clone();
-                let snapshot = tauri::async_runtime::spawn_blocking(move || {
-                    snapshot_backend.speaker_snapshot(want_device)
-                })
-                .await
-                .ok();
-                if let Some((Some(volume), Some(muted), _)) = snapshot {
-                    // percent 0..=100 -> fraction like the original n/100
-                    let level = (volume / 100.0 * 1000.0).round() / 1000.0;
-                    feed_v2.set("speaker-volume", serde_json::json!(level));
-                    feed_v2.set("speaker-muted", serde_json::json!(muted));
-                    if last_level != Some(level) || last_muted != Some(muted) {
-                        let payload = serde_json::json!({
-                            "app": "APP_CUSTOM_VALUE",
-                            "data": {"speaker-volume": level, "speaker-muted": muted},
-                        });
-                        hub.broadcast("app_status_update", Some(&payload.to_string()))
-                            .await;
-                        // advance the gate only once the WebView got it; a
-                        // hidden window retries on the next tick (<= 5 s)
-                        if emit_if_visible(&app, "app-status-update", &payload) {
-                            last_level = Some(level);
-                            last_muted = Some(muted);
-                        }
-                    }
-                }
-                if let Some((_, _, Some(id))) = snapshot {
-                    if last_device.as_deref() != Some(id.as_str()) {
-                        feed_v2.set("speaker-device", serde_json::json!(id));
-                        let payload = serde_json::json!({
-                            "app": "THIRD_PARTY_APP",
-                            "data": {"speaker-device": id},
-                        });
-                        hub.broadcast("app_status_update", Some(&payload.to_string()))
-                            .await;
-                        if emit_if_visible(&app, "app-status-update", &payload) {
-                            last_device = Some(id.clone());
-                        }
-                    }
-                }
-            }
-        });
-    }
+    // Producer pumps (extension fleet, native system-info, AI dev-work,
+    // speaker watcher) live in the shared host module too - one
+    // implementation, same lanes and change-gating as the headless
+    // server (CORE-06), with the WebView as this host's extra sink.
+    let feed = Arc::new(DesktopFeed {
+        app: app.clone(),
+        engine: v2.as_ref().map(|v2| v2.engine.clone()),
+        hub: hub.clone(),
+    });
+    tauri::async_runtime::spawn(pulpit_host::forward_ext_events(
+        feed.clone(),
+        ext_events,
+    ));
+    tauri::async_runtime::spawn(pulpit_host::forward_producer(
+        feed.clone(),
+        pulpit_sysinfo::spawn_push(),
+    ));
+    tauri::async_runtime::spawn(pulpit_host::forward_producer(
+        feed.clone(),
+        pulpit_aidev::spawn_push(pulpit_host::aidev_paths(aidev_config.clone())),
+    ));
+    tauri::async_runtime::spawn(pulpit_host::speaker_watch(
+        feed.clone(),
+        backend.clone() as Arc<dyn Backend>,
+    ));
 
     let state = Arc::new(AppState {
         hub: hub.clone(),
@@ -867,24 +707,33 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit Pulpit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_hide, &touch, &launch, &quit])?;
 
+    // The check handle must outlive the builder: muda check items do
+    // not self-toggle, so the handler flips it after a successful
+    // enable/disable (DESK-08) - without this the checkmark kept its
+    // build-time state until the next app restart.
+    let launch_item = launch.clone();
     tauri::tray::TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().expect("app icon").clone())
         .tooltip("Pulpit")
         .menu(&menu)
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .on_menu_event(move |app, event| match event.id().as_ref() {
             "show-hide" => toggle_main_window(app),
-            "touch-mode" => {
-                let _ = app.emit("toggle-touch-mode", ());
-            }
+            "touch-mode" => toggle_touch_mode(app),
             "autostart" => {
                 use tauri_plugin_autostart::ManagerExt;
                 let launch = app.autolaunch();
                 let enabled = launch.is_enabled().unwrap_or(false);
-                let _ = if enabled {
+                let result = if enabled {
                     launch.disable()
                 } else {
                     launch.enable()
                 };
+                match result {
+                    Ok(()) => {
+                        let _ = launch_item.set_checked(!enabled);
+                    }
+                    Err(e) => tracing::warn!(error = %e, "could not toggle autostart"),
+                }
             }
             "quit" => {
                 goodbye_v2(app);
@@ -921,6 +770,37 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
+/// A touch-mode toggle that arrived while the WebView was torn down
+/// (DESK-07): the fresh app takes it once its listeners and boards are
+/// up, via the [`take_pending_touch_toggle`] command.
+static PENDING_TOUCH_TOGGLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Toggle touch mode from the tray item or the global hotkey (DESK-07).
+/// The idle sweep may have torn the WebView down - emitting
+/// `toggle-touch-mode` then reaches nobody and, worse, no window
+/// appears. With a live window the emit is delivered (and the window
+/// surfaced so the flip is visible); without one the window is rebuilt
+/// and the intended toggle parked in [`PENDING_TOUCH_TOGGLE`] for the
+/// fresh app to consume on mount - an emit racing the page load would
+/// be lost.
+fn toggle_touch_mode(app: &AppHandle) {
+    match app.get_webview_window("main") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = app.emit("toggle-touch-mode", ());
+        }
+        None => {
+            tracing::info!("rebuilding the main window WebView for the touch toggle");
+            if let Err(e) = create_main_window(app) {
+                tracing::error!("could not rebuild the main window: {e}");
+                return;
+            }
+            PENDING_TOUCH_TOGGLE.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// Register the touch-mode hotkey. The combo is user-configurable
 /// (`pulpitApp/editor.json`, default Ctrl+Alt+D - the original's
 /// `toggleTouchMode` concept); an unusable stored combo falls back to the
@@ -939,7 +819,7 @@ fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) -> Result<(), String
         .global_shortcut()
         .on_shortcut(shortcut, |app, _s, event| {
             if event.state() == ShortcutState::Pressed {
-                let _ = app.emit("toggle-touch-mode", ());
+                toggle_touch_mode(app);
             }
         });
     match result {
@@ -1072,7 +952,17 @@ const IMAGE_READ_CAP_BYTES: u64 = 10 * 1024 * 1024;
 /// Read an image file and return it as a data URL for tile backgrounds and
 /// icons. Done in Rust so no filesystem plugin/scope is needed.
 #[tauri::command]
-fn read_image_data(path: String) -> Result<String, String> {
+async fn read_image_data(path: String) -> Result<String, String> {
+    // up to a 10 MiB read plus a base64 pass: run it on the blocking
+    // pool, not the main thread (sync commands) or an async worker
+    tauri::async_runtime::spawn_blocking(move || read_image_data_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The blocking half of [`read_image_data`], split out so the size-cap
+/// behavior stays testable without a runtime.
+fn read_image_data_blocking(path: &str) -> Result<String, String> {
     use base64::Engine;
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     let mime = match ext.as_str() {
@@ -1085,7 +975,7 @@ fn read_image_data(path: String) -> Result<String, String> {
     };
     // take() bounds the read itself: a file that grows between the length
     // check and the read still cannot pull more than cap+1 bytes in
-    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     use std::io::Read as _;
     let mut bytes = Vec::new();
     file.take(IMAGE_READ_CAP_BYTES + 1)
@@ -1197,10 +1087,13 @@ fn create_pairing_code(state: State<'_, DesktopState>) -> Result<PairingOffer, S
             }
         })
         .collect();
-    tracing::info!(%code, "pairing code minted from the editor - expires in 5 minutes");
+    // Code-free mint log line, the exact text the v2 routes use (audit
+    // B2 step 1 / CORE-03: logs outlive the 5-minute TTL, and pairing
+    // auto-accepts, so a logged code is a standing invite).
+    tracing::info!("{}", pulpit_v2::pair_minted_message());
     Ok(PairingOffer {
         code,
-        expires_in_secs: 300,
+        expires_in_secs: pulpit_v2::PAIR_CODE_TTL.as_secs(),
         addresses,
     })
 }
@@ -1373,10 +1266,13 @@ fn resolve_update_url(stored: Option<&str>) -> Option<String> {
 }
 
 /// A parsed update manifest: where to fetch and how to verify.
+/// `sha256` is REQUIRED (DESK-02): the digest is the only integrity
+/// mechanism in the flow, so a manifest without it is refused instead
+/// of silently installing an unverified binary.
 struct UpdateManifest {
     version: String,
     url: String,
-    sha256: Option<String>,
+    sha256: String,
 }
 
 fn parse_update_manifest(text: &str) -> Result<UpdateManifest, String> {
@@ -1401,7 +1297,11 @@ fn parse_update_manifest(text: &str) -> Result<UpdateManifest, String> {
     let sha256 = manifest
         .get("sha256")
         .and_then(|v| v.as_str())
-        .map(str::to_string);
+        .ok_or("Manifest nie ma pola \"sha256\" - bez sumy kontrolnej odmowa instalacji.")?
+        .to_string();
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Pole \"sha256\" manifestu nie jest sumą kontrolną (64 znaki hex).".to_string());
+    }
     Ok(UpdateManifest {
         version,
         url,
@@ -1530,23 +1430,58 @@ fn apply_update(exe: &std::path::Path, downloaded: &std::path::Path) -> Result<(
     Ok(())
 }
 
-/// Schedule the freshly swapped exe to start after this process exits
-/// (the single-instance plugin would kill a sibling that starts too
-/// early). `cmd` survives the parent: it waits 2 s, then starts the app.
-fn relaunch_after_swap(exe: &std::path::Path) -> Result<(), String> {
+/// The cmd.exe script the update guard runs (DESK-02): wait out this
+/// process's exit, then either start the swapped exe (the normal path),
+/// or - when the process died between the swap's two renames, leaving
+/// no exe in place - finish the swap first: the staged download (or, as
+/// the last resort, the rolled-back `.old`) takes the exe's name and
+/// starts, so a crash mid-swap cannot leave the machine with no exe.
+/// Every path rides in quotes: spaces, `&` and parentheses in an
+/// install path must stay literal.
+fn relaunch_script(
+    exe: &std::path::Path,
+    staged: &std::path::Path,
+    old: &std::path::Path,
+) -> String {
+    let (exe, staged, old) = (
+        exe.to_string_lossy(),
+        staged.to_string_lossy(),
+        old.to_string_lossy(),
+    );
+    format!(
+        "/C timeout /t 2 /nobreak >nul & \
+         if exist \"{exe}\" (start \"\" \"{exe}\") \
+         else if exist \"{staged}\" (move /y \"{staged}\" \"{exe}\" >nul & start \"\" \"{exe}\") \
+         else if exist \"{old}\" (move /y \"{old}\" \"{exe}\" >nul & start \"\" \"{exe}\")"
+    )
+}
+
+/// Spawn the detached recovery guard BEFORE the swap starts, so the
+/// crash window between the two renames is covered. Returned as a
+/// [`std::process::Child`] so a failed swap can kill it before its
+/// timeout fires; on success the caller must [`std::mem::forget`] the
+/// child - the guard has to outlive this process to relaunch it.
+fn spawn_update_guard(
+    exe: &std::path::Path,
+    staged: &std::path::Path,
+) -> Result<std::process::Child, String> {
     use std::os::windows::process::CommandExt;
     const DETACHED: u32 = 0x0000_0008;
     const NO_WINDOW: u32 = 0x0800_0000;
-    let exe_str = exe.to_string_lossy().into_owned();
-    std::process::Command::new("cmd")
-        .args([
-            "/C",
-            &format!("timeout /t 2 /nobreak >nul & start \"\" \"{exe_str}\""),
-        ])
-        .creation_flags(DETACHED | NO_WINDOW)
-        .spawn()
-        .map_err(|e| format!("Nie udało się zaplanować restartu: {e}"))?;
-    Ok(())
+    // raw_arg passes the script verbatim: Rust's default arg escaping
+    // would wrap it in quotes and backslash-escape the inner ones,
+    // which cmd.exe does not understand - the paths would arrive
+    // mangled. Paths cannot contain a literal `"` on Windows; a
+    // %-sequence in a path would still expand, like in every cmd line.
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.raw_arg(relaunch_script(
+        exe,
+        staged,
+        &exe.with_extension("exe.old"),
+    ))
+    .creation_flags(DETACHED | NO_WINDOW)
+    .spawn()
+    .map_err(|e| format!("Nie udało się zaplanować restartu: {e}"))
 }
 
 /// Download (manifest URL again, so the check cannot go stale), verify
@@ -1588,17 +1523,27 @@ async fn install_update(
         let staged = staging_dir.join("pulpit-desktop.new");
         let _ = std::fs::remove_file(&staged);
         download_update(&manifest.url, &staged)?;
-        if let Some(expected) = &manifest.sha256 {
-            if !sha256_matches(&staged, expected)? {
-                let _ = std::fs::remove_file(&staged);
-                return Err(
-                    "Suma kontrolna pobranego pliku się nie zgadza - instalacja przerwana."
-                        .to_string(),
-                );
+        // unconditional: sha256 is required by the parser, so an
+        // unverified binary can never be swapped in (DESK-02)
+        if !sha256_matches(&staged, &manifest.sha256)? {
+            let _ = std::fs::remove_file(&staged);
+            return Err(
+                "Suma kontrolna pobranego pliku się nie zgadza - instalacja przerwana.".to_string(),
+            );
+        }
+        // The guard is alive BEFORE the first rename: a death between
+        // the swap's two renames (no exe in place) gets healed by its
+        // script instead of bricking the install. A failed swap kills
+        // it before its timeout fires; a successful one forgets it so
+        // it survives this process as the relauncher.
+        let mut guard = spawn_update_guard(&exe, &staged)?;
+        match apply_update(&exe, &staged) {
+            Ok(()) => std::mem::forget(guard),
+            Err(e) => {
+                let _ = guard.kill();
+                return Err(e);
             }
         }
-        apply_update(&exe, &staged)?;
-        relaunch_after_swap(&exe)?;
         Ok(format!(
             "Zainstalowano v{}. Aplikacja uruchomi się ponownie.",
             manifest.version
@@ -1653,14 +1598,20 @@ fn v2_or_err(state: &DesktopState) -> Result<&Arc<pulpit_v2::V2State>, String> {
 }
 
 #[tauri::command]
-fn list_devices(state: State<'_, DesktopState>) -> Result<Vec<DeviceInfo>, String> {
-    Ok(device_infos(&v2_or_err(&state)?.devices))
+async fn list_devices(state: State<'_, DesktopState>) -> Result<Vec<DeviceInfo>, String> {
+    let v2 = v2_or_err(&state)?.clone();
+    tauri::async_runtime::spawn_blocking(move || device_infos(&v2.devices))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn revoke_device(id: String, state: State<'_, DesktopState>) -> Result<bool, String> {
-    let v2 = v2_or_err(&state)?;
-    Ok(revoke_and_teardown(&v2.devices, &v2.hub, &id))
+async fn revoke_device(id: String, state: State<'_, DesktopState>) -> Result<bool, String> {
+    let v2 = v2_or_err(&state)?.clone();
+    // revoke persists devices.json (atomic write): off the worker
+    tauri::async_runtime::spawn_blocking(move || revoke_and_teardown(&v2.devices, &v2.hub, &id))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1691,6 +1642,17 @@ mod tests {
     fn pairing_url_matches_the_protocol_doc() {
         let url = pairing_shape("192.168.0.97", 8500, "ABCD2345");
         assert_eq!(url, "pulpit://192.168.0.97:8500?pair=ABCD2345");
+    }
+
+    #[test]
+    fn pairing_mint_log_and_ttl_stay_code_free() {
+        // CORE-03/DESK-05: the mint log line is the shared static string
+        // (no site interpolates the code into it), and the offer's TTL
+        // is the same constant the v2 routes derive it from.
+        let message = pulpit_v2::pair_minted_message();
+        assert!(message.contains("code suppressed in logs"));
+        assert!(!message.contains("{code}"), "got: {message}");
+        assert_eq!(pulpit_v2::PAIR_CODE_TTL.as_secs(), 300);
     }
 
     #[test]
@@ -1797,18 +1759,74 @@ mod tests {
             resolve_update_url(Some(" https://example.com/feed.json ")).as_deref(),
             Some("https://example.com/feed.json")
         );
-        // manifest: version+url required, url must be https, sha optional
-        let m =
-            parse_update_manifest(r#"{"version":"1.3.0","url":"https://x/y.exe","sha256":"abc"}"#)
-                .expect("parses");
+        // manifest: version+url required, url must be https, sha256 is
+        // REQUIRED and must be a 64-hex digest (DESK-02) - a feed
+        // without a digest must never yield an installable manifest
+        let digest = "a".repeat(64);
+        let m = parse_update_manifest(&format!(
+            r#"{{"version":"1.3.0","url":"https://x/y.exe","sha256":"{digest}"}}"#
+        ))
+        .expect("parses");
         assert_eq!(m.version, "1.3.0");
         assert_eq!(m.url, "https://x/y.exe");
-        assert_eq!(m.sha256.as_deref(), Some("abc"));
+        assert_eq!(m.sha256, digest);
         assert!(parse_update_manifest(r#"{"version":"1.3.0"}"#).is_err());
         assert!(parse_update_manifest(r#"{"version":"1.3.0","url":"http://x/y.exe"}"#).is_err());
+        assert!(parse_update_manifest(r#"{"version":"1.3.0","url":"https://x/y.exe"}"#).is_err());
+        assert!(parse_update_manifest(
+            r#"{"version":"1.3.0","url":"https://x/y.exe","sha256":"abc"}"#
+        )
+        .is_err());
+        assert!(parse_update_manifest(&format!(
+            r#"{{"version":"1.3.0","url":"https://x/y.exe","sha256":"{}"}}"#,
+            "z".repeat(64)
+        ))
+        .is_err());
         // version compare unchanged
         assert!(version_newer("1.3.0", "1.2.9"));
         assert!(!version_newer("1.3.0", "1.3.0"));
+    }
+
+    #[test]
+    fn relaunch_script_quotes_paths_and_heals_a_lost_exe() {
+        // DESK-02: the guard script waits, then either starts the exe,
+        // or finishes a swap that crashed between its two renames
+        // (staged first, .old as the last resort)
+        let exe = std::path::Path::new(r"C:\Program Files\Pulpit\pulpit-desktop.exe");
+        let staged =
+            std::path::Path::new(r"C:\Users\T\AppData\pulpitApp\updates\pulpit-desktop.new");
+        let old = std::path::Path::new(r"C:\Program Files\Pulpit\pulpit-desktop.exe.old");
+        let script = relaunch_script(exe, staged, old);
+        assert!(
+            script.starts_with("/C timeout /t 2 /nobreak >nul & "),
+            "got: {script}"
+        );
+        // spaces and every path mention ride inside quotes
+        assert!(
+            script.contains(
+                r#"if exist "C:\Program Files\Pulpit\pulpit-desktop.exe" (start "" "C:\Program Files\Pulpit\pulpit-desktop.exe")"#
+            ),
+            "got: {script}"
+        );
+        assert!(
+            script.contains(&format!(
+                r#"else if exist "{}" (move /y "{}" "{}" >nul & start "" "{}")"#,
+                staged.display(),
+                staged.display(),
+                exe.display(),
+                exe.display()
+            )),
+            "got: {script}"
+        );
+        assert!(
+            script.contains(&format!(
+                r#"else if exist "{}" (move /y "{}" "{}" >nul"#,
+                old.display(),
+                old.display(),
+                exe.display()
+            )),
+            "got: {script}"
+        );
     }
 
     #[test]
@@ -1898,7 +1916,7 @@ mod tests {
         // set_len extends without writing, so the test stays cheap
         file.set_len(IMAGE_READ_CAP_BYTES + 1).expect("extend");
         drop(file);
-        let err = read_image_data(path.to_string_lossy().into_owned()).expect_err("must refuse");
+        let err = read_image_data_blocking(&path.to_string_lossy()).expect_err("must refuse");
         assert!(err.contains("10 MiB"), "unexpected error: {err}");
         let _ = std::fs::remove_file(&path);
     }
@@ -1908,9 +1926,26 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("pulpit-image-small-{}.png", std::process::id()));
         std::fs::write(&path, b"not-really-png-bytes").expect("write temp file");
-        let url = read_image_data(path.to_string_lossy().into_owned()).expect("must read");
+        let url = read_image_data_blocking(&path.to_string_lossy()).expect("must read");
         assert!(url.starts_with("data:image/png;base64,"), "got: {url}");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn import_rejects_files_over_the_cap_before_reading() {
+        // CORE-09: an oversized pick refuses at the stat - the file is
+        // never read into memory (set_len extends without writing, so
+        // the test stays cheap)
+        let dir = scratch_dir("import-cap");
+        let db = pulpit_db::Db::open_or_create(&dir.join("t.db")).expect("db");
+        let backend = Arc::new(SqlBackend::new(db));
+        let big = dir.join("big.boardjson");
+        let file = std::fs::File::create(&big).expect("create");
+        file.set_len(IMPORT_READ_CAP_BYTES + 1).expect("extend");
+        drop(file);
+        let err = import_boards_blocking(backend, &big.to_string_lossy()).expect_err("must refuse");
+        assert!(err.contains("limit to 64 MiB"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An isolated scratch directory for a test's devices.json.
@@ -1966,6 +2001,14 @@ mod tests {
     }
 }
 
+/// Take (and clear) a touch-mode toggle that was parked while the
+/// WebView was torn down (DESK-07). Called by the fresh app after its
+/// listeners and boards are up.
+#[tauri::command]
+fn take_pending_touch_toggle() -> bool {
+    PENDING_TOUCH_TOGGLE.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The QR payload for pairing, kept separate so the command body stays
 /// thin and the exact `pulpit://` shape is pinned by a test.
 fn pairing_shape(ip: &str, port: u16, code: &str) -> String {
@@ -2001,9 +2044,14 @@ async fn create_board(
     height: i64,
 ) -> Result<i64, String> {
     let backend = state.backend()?;
-    let id = backend
-        .create_board(&name, &background, width, height)
-        .map_err(|e| e.to_string())?;
+    // SQLite writes (and the multi-MB image payloads update_button can
+    // carry) run on the blocking pool, not the tauri async workers
+    let id = tauri::async_runtime::spawn_blocking(move || {
+        backend.create_board(&name, &background, width, height)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
     state.publish_board_set(id);
     Ok(id)
@@ -2012,16 +2060,23 @@ async fn create_board(
 #[tauri::command]
 async fn update_board(state: State<'_, DesktopState>, board: BoardRow) -> Result<(), String> {
     let backend = state.backend()?;
-    backend.update_board(&board).map_err(|e| e.to_string())?;
+    let board_id = board.id;
+    tauri::async_runtime::spawn_blocking(move || backend.update_board(&board))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
-    state.publish_board_set(board.id);
+    state.publish_board_set(board_id);
     Ok(())
 }
 
 #[tauri::command]
 async fn delete_board(state: State<'_, DesktopState>, board_id: i64) -> Result<(), String> {
     let backend = state.backend()?;
-    backend.delete_board(board_id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || backend.delete_board(board_id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
     state.publish_v2(vec![pulpit_proto::BoardOp::BoardRemove { board: board_id }]);
     Ok(())
@@ -2037,9 +2092,12 @@ async fn create_button(
     y: i64,
 ) -> Result<i64, String> {
     let backend = state.backend()?;
-    let id = backend
-        .create_button(board_id, &kind, &mode, x, y)
-        .map_err(|e| e.to_string())?;
+    let id = tauri::async_runtime::spawn_blocking(move || {
+        backend.create_button(board_id, &kind, &mode, x, y)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_tile_set(board_id, id);
     Ok(id)
@@ -2050,7 +2108,10 @@ async fn update_button(state: State<'_, DesktopState>, button: ButtonRow) -> Res
     let backend = state.backend()?;
     let board_id = button.board_id;
     let tile_id = button.id;
-    backend.update_button(&button).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || backend.update_button(&button))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_tile_set(board_id, tile_id);
     Ok(())
@@ -2067,8 +2128,9 @@ async fn move_button(
     h: i64,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    backend
-        .move_button(id, x, y, w, h)
+    tauri::async_runtime::spawn_blocking(move || backend.move_button(id, x, y, w, h))
+        .await
+        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_tile_set(board_id, id);
@@ -2082,7 +2144,10 @@ async fn delete_button(
     board_id: i64,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    backend.delete_button(id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || backend.delete_button(id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_v2(vec![pulpit_proto::BoardOp::TileRemove {
         board: board_id,
@@ -2094,7 +2159,10 @@ async fn delete_button(
 #[tauri::command]
 async fn clear_board(state: State<'_, DesktopState>, board_id: i64) -> Result<(), String> {
     let backend = state.backend()?;
-    backend.clear_board(board_id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || backend.clear_board(board_id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_v2(vec![pulpit_proto::BoardOp::TileClear { board: board_id }]);
     Ok(())
@@ -2111,23 +2179,59 @@ async fn exec_button(
     use pulpit_actions::EventSink;
 
     let backend = state.backend()?;
-    let Some(button) = backend.get_button(id) else {
-        return Ok(());
+    // Value pushes from a desktop-originated exec fan out to every
+    // client lane exactly like a tablet-originated exec (CORE-04): the
+    // v2 engine, the legacy APP_CUSTOM_VALUE / THIRD_PARTY_APP
+    // broadcasts and the WebView.
+    let feed = DesktopFeed {
+        app: app.clone(),
+        engine: state.v2.as_ref().map(|v2| v2.engine.clone()),
+        hub: state
+            .hub
+            .clone()
+            .ok_or_else(|| "database unavailable".to_string())?,
     };
-    struct UiSink(AppHandle);
-    impl EventSink for UiSink {
-        fn change_board(&mut self, board_id: i64) {
-            let _ = self.0.emit("change-board", board_id);
-        }
-        fn app_value(&mut self, _key: &str, _value: &str) {}
-    }
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<(pulpit_host::StatusApp, String, String)>();
     let _ = tauri::async_runtime::spawn_blocking(move || {
-        let mut sink = UiSink(app.clone());
+        struct UiSink(
+            AppHandle,
+            tokio::sync::mpsc::UnboundedSender<(pulpit_host::StatusApp, String, String)>,
+        );
+        impl EventSink for UiSink {
+            fn change_board(&mut self, board_id: i64) {
+                let _ = self.0.emit("change-board", board_id);
+            }
+            fn app_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::CustomValue,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+            fn third_party_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::ThirdParty,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+        }
+        // per-tap lookup, inside the blocking closure and image-less
+        // (CORE-02): exec never reads img/img2, and a tap must not
+        // materialize multi-MB base64 columns on an async worker
+        let Some(button) = backend.get_button_meta(id) else {
+            return;
+        };
+        let mut sink = UiSink(app, tx);
         // full tap sequence (press-start + release): a lone release-phase
         // exec never presses `key` tiles (A1)
         backend.exec_tap(button, &mut sink);
     })
     .await;
+    while let Ok((app_kind, key, value)) = rx.try_recv() {
+        pulpit_host::push_values(&feed, app_kind, &serde_json::json!({ key: value })).await;
+    }
     Ok(())
 }
 
@@ -2137,10 +2241,15 @@ async fn exec_button(
 #[tauri::command]
 async fn exec_slider(state: State<'_, DesktopState>, id: i64, value: f64) -> Result<(), String> {
     let backend = state.backend()?;
-    let Some(button) = backend.get_button(id) else {
-        return Ok(());
-    };
-    let _ = tauri::async_runtime::spawn_blocking(move || backend.slider(button, value)).await;
+    // same per-event meta read as exec_button (CORE-02); the lookup
+    // rides the blocking closure because slides fire per pointer event
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        let Some(button) = backend.get_button_meta(id) else {
+            return;
+        };
+        backend.slider(button, value);
+    })
+    .await;
     Ok(())
 }
 
@@ -2313,22 +2422,28 @@ struct AidevStatusConfig {
 }
 
 #[tauri::command]
-fn aidev_status_config(state: State<'_, DesktopState>) -> Result<AidevStatusConfig, String> {
+async fn aidev_status_config(state: State<'_, DesktopState>) -> Result<AidevStatusConfig, String> {
     let path = state
         .aidev_config
-        .as_ref()
+        .clone()
         .ok_or_else(|| "Brak ścieżki konfiguracji aidev.".to_string())?;
-    let raw: serde_json::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::Value::Null);
-    let selection = aidev_status_selection(&raw);
-    Ok(AidevStatusConfig {
-        detected: pulpit_aidev::detected_rows(),
-        show: selection.show,
-        summary: selection.summary,
-        row_style: selection.row_style,
+    // the config read (and any provider detection) is file IO: run it
+    // off the main thread
+    tauri::async_runtime::spawn_blocking(move || {
+        let raw: serde_json::Value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let selection = aidev_status_selection(&raw);
+        Ok::<AidevStatusConfig, String>(AidevStatusConfig {
+            detected: pulpit_aidev::detected_rows(),
+            show: selection.show,
+            summary: selection.summary,
+            row_style: selection.row_style,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Persist the AI-usage tile settings to aidev.json (read-modify-write,
@@ -2359,12 +2474,55 @@ async fn export_boards(
     path: String,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    let data = tauri::async_runtime::spawn_blocking(move || backend.export_boards(&ids))
-        .await
+    // serialize + write can each walk multi-MB image payloads: keep
+    // both off the async workers
+    tauri::async_runtime::spawn_blocking(move || {
+        let data = backend.export_boards(&ids).map_err(|e| e.to_string())?;
+        let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+        std::fs::write(&path, json).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Hard cap on a `.boardjson` import (CORE-09): the path comes from the
+/// frontend, so a giant file must be rejected before it is read and
+/// parsed into memory - the board/tile count bounds only fire after the
+/// parse. 64 MiB is far above what the 100-board/1024-tile caps allow
+/// an honest export to weigh.
+const IMPORT_READ_CAP_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read, parse and import a `.boardjson` file written by this editor or
+/// the original app. Split out of the command so the size-cap behavior
+/// is testable without a Tauri app; runs on the blocking pool.
+fn import_boards_blocking(
+    backend: Arc<SqlBackend>,
+    path: &str,
+) -> Result<Vec<i64>, String> {
+    // stat first: an oversized file rejects before a single byte is read
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() > IMPORT_READ_CAP_BYTES {
+        return Err(format!(
+            "Plik importu ma {} MiB - limit to {} MiB.",
+            meta.len() / (1024 * 1024),
+            IMPORT_READ_CAP_BYTES / (1024 * 1024)
+        ));
+    }
+    // take() bounds the read itself: a file that grows between the stat
+    // and the read still cannot pull more than cap+1 bytes in
+    use std::io::Read as _;
+    let mut content = String::new();
+    std::fs::File::open(path)
         .map_err(|e| e.to_string())?
+        .take(IMPORT_READ_CAP_BYTES + 1)
+        .read_to_string(&mut content)
         .map_err(|e| e.to_string())?;
-    let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    if content.len() as u64 > IMPORT_READ_CAP_BYTES {
+        return Err("Plik importu przekracza limit 64 MiB.".to_string());
+    }
+    let boards: Vec<serde_json::Value> =
+        serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    backend.import_boards(&boards).map_err(|e| e.to_string())
 }
 
 /// Read and import a `.boardjson` file written by this editor or the
@@ -2372,13 +2530,9 @@ async fn export_boards(
 #[tauri::command]
 async fn import_boards(state: State<'_, DesktopState>, path: String) -> Result<Vec<i64>, String> {
     let backend = state.backend()?;
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let boards: Vec<serde_json::Value> =
-        serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let ids = tauri::async_runtime::spawn_blocking(move || backend.import_boards(&boards))
+    let ids = tauri::async_runtime::spawn_blocking(move || import_boards_blocking(backend, &path))
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())??;
     state.broadcaster()?.sync_boards().await;
     for id in ids.iter().copied() {
         state.publish_board_set(id);

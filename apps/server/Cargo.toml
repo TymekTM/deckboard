@@ -17,6 +17,7 @@ axum = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 pulpit-db = { path = "../../crates/db" }
+pulpit-host = { path = "../../crates/host" }
 pulpit-proto = { path = "../../crates/proto" }
 pulpit-backend = { path = "../../crates/backend" }
 pulpit-actions = { path = "../../crates/actions" }

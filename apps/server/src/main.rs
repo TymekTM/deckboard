@@ -11,6 +11,30 @@ use pulpit_backend::SqlBackend;
 use pulpit_legacy::{AppState, Hub};
 use tracing_subscriber::EnvFilter;
 
+/// The headless host's [`pulpit_host::ClientFeed`] impl: the v2 state
+/// engine and the legacy hub, nothing extra (no UI to feed).
+struct HeadlessFeed {
+    engine: Arc<pulpit_v2::StateEngine>,
+    hub: Arc<Hub>,
+}
+
+impl pulpit_host::ClientFeed for HeadlessFeed {
+    fn engine_set(&self, key: &str, value: serde_json::Value) {
+        self.engine.set(&pulpit_v2::ext_channel(key), value);
+    }
+    async fn broadcast_status(&self, payload: &str) {
+        self.hub.broadcast("app_status_update", Some(payload)).await;
+    }
+    fn emit_status(&self, _payload: &serde_json::Value) -> bool {
+        true
+    }
+}
+
+/// How long the shutdown goodbye waits for the session pumps to put the
+/// `server.shutdown` frame and the WS close on the wire before `main`
+/// returns and the process exits (mirrors the desktop's flush grace).
+const SHUTDOWN_FLUSH_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 // current_thread: the workload is a couple of tablets doing tiny async IO;
 // everything blocking (exec, sliders, extension JS, Discord, Voicemeeter)
 // already runs on spawn_blocking or dedicated extension threads, so the
@@ -42,92 +66,18 @@ async fn main() -> anyhow::Result<()> {
     let ext_dir = std::env::var_os("PULPIT_EXT_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| data_dir.join("extensions"));
-    // Native system-info and callurl replace their JS packages (the JS
-    // runtimes were the heaviest part of the extension fleet); the manager
-    // must not load them.
-    let native_replaced = ["deckboard-system-info", "deckboard-callurl"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
-    let (ext_manager, mut ext_events) =
-        pulpit_ext::ExtManager::load(&ext_dir, &settings, &native_replaced);
+    // Extension inputs and every native declaration (Voicemeeter,
+    // Discord, system-info, callurl, AI dev-work) register through the
+    // shared host module, like the desktop does.
+    let (ext_manager, ext_events) =
+        pulpit_ext::ExtManager::load(&ext_dir, &settings, &pulpit_host::native_replaced());
     for (package, name, error) in ext_manager.summary() {
         match error {
             Some(e) => tracing::warn!(package, name, error = e, "extension disabled"),
             None => tracing::info!(package, name, "extension ready"),
         }
     }
-    // Extension inputs back button styles the same way the original's
-    // getExtensionButton does (e.g. si-cpu tiles take #8E44AD from the
-    // system-info input), so the mapper can resolve them any time later.
-    for input in ext_manager.inputs() {
-        pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
-            value: input.value.clone(),
-            icon: input.icon.clone(),
-            color: input.color.clone(),
-            font_icon: input.font_icon.clone(),
-            mode: input.mode.clone(),
-            command: input.command.clone(),
-        });
-    }
-    // The native Voicemeeter bridge replaces the ffi-napi extension, so its
-    // input declarations register here too (vm tiles otherwise stay gray).
-    for (value, icon, font_icon, color) in pulpit_vm::input_declarations() {
-        pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
-            value: value.to_string(),
-            icon: icon.map(str::to_string),
-            color: Some(color.to_string()),
-            font_icon: Some(font_icon.to_string()),
-            mode: None,
-            command: None,
-        });
-    }
-    // Same for the native Discord RPC (colors/icons/modes from the
-    // discord-deckboard package; the custom-value mode is what makes the
-    // mute/deaf tiles watch their pushed ON/OFF label).
-    for (value, icon, color, mode) in pulpit_discord::input_declarations() {
-        pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
-            value: value.to_string(),
-            icon: Some(icon.to_string()),
-            color: Some(color.to_string()),
-            font_icon: Some("fas".to_string()),
-            mode: mode.map(str::to_string),
-            command: None,
-        });
-    }
-    // Native system-info declarations (values copied from the JS package's
-    // inputs, including its odd `headphones` icon); the graph mode is what
-    // makes the CPU/RAM tiles render as graphs.
-    for (value, icon, font_icon, color, mode) in pulpit_sysinfo::input_declarations() {
-        pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
-            value: value.to_string(),
-            icon: Some(icon.to_string()),
-            color: Some(color.to_string()),
-            font_icon: Some(font_icon.to_string()),
-            mode: Some(mode.to_string()),
-            command: None,
-        });
-    }
-    // Native callurl declaration (from the JS package's single input).
-    pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
-        value: "url-to-call".into(),
-        icon: Some("link".into()),
-        color: Some("#ff29df".into()),
-        font_icon: Some("fas".to_string()),
-        mode: None,
-        command: None,
-    });
-    // Native AI dev-work display tiles (plan limits, agent progress).
-    for (value, icon, color, mode) in pulpit_aidev::input_declarations() {
-        pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
-            value: value.to_string(),
-            icon: Some(icon.to_string()),
-            color: Some(color.to_string()),
-            font_icon: Some("fas".to_string()),
-            mode: Some(mode.to_string()),
-            command: None,
-        });
-    }
+    pulpit_host::register_inputs(&ext_manager);
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -185,133 +135,36 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!("mDNS advertisement failed: {e}"),
     }
 
-    // Extension pushes feed both protocols: the legacy app_status_update
-    // broadcast (stock client) and one v2 channel per data key.
-    let feed_v2 = {
-        let engine = v2.engine.clone();
-        move |data: serde_json::Value| {
-            if let Some(map) = data.as_object() {
-                for (key, value) in map {
-                    engine.set(&format!("ext.{key}"), value.clone());
-                }
-            }
-        }
-    };
-    let hub_legacy = state.hub.clone();
-    let feed = feed_v2.clone();
-    tokio::spawn(async move {
-        while let Some(pulpit_ext::ExtEvent::SetValue(data)) = ext_events.recv().await {
-            feed(data.clone());
-            let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
-            let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
-            hub_legacy
-                .broadcast("app_status_update", Some(&payload))
-                .await;
-        }
+    // Producer pumps (extension fleet, native system-info, AI dev-work,
+    // speaker watcher) and the extension activity loop all live in the
+    // shared host module now - one implementation, same lanes and
+    // change-gating as the desktop (CORE-06).
+    let feed = Arc::new(HeadlessFeed {
+        engine: v2.engine.clone(),
+        hub: state.hub.clone(),
     });
-
-    // Native system-info pushes its four si-* values on the same channel
-    // and cadence the JS extension used.
-    let mut sysinfo_values = pulpit_sysinfo::spawn_push();
-    let feed = feed_v2.clone();
-    let hub_legacy = state.hub.clone();
-    tokio::spawn(async move {
-        while let Some(data) = sysinfo_values.recv().await {
-            feed(data.clone());
-            let data = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
-            let payload = format!(r#"{{"app":"APP_CUSTOM_VALUE","data":{data}}}"#);
-            hub_legacy
-                .broadcast("app_status_update", Some(&payload))
-                .await;
-        }
-    });
-
-    // Native AI dev-work source: plan limits + agent progress, same channel.
+    tokio::spawn(pulpit_host::forward_ext_events(
+        feed.clone(),
+        ext_events,
+    ));
+    tokio::spawn(pulpit_host::forward_producer(
+        feed.clone(),
+        pulpit_sysinfo::spawn_push(),
+    ));
     // PULPIT_AIDEV_CONFIG overrides the config location (hermetic runs).
     let aidev_config = std::env::var_os("PULPIT_AIDEV_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| data_dir.join("aidev.json"));
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let aidev_paths = pulpit_aidev::Paths {
-        config: aidev_config,
-        zcode_cli: home.join(".zcode/cli"),
-        claude_projects: home.join(".claude/projects"),
-        codex_sessions: home.join(".codex/sessions"),
-        opencode_db: home.join(".local/share/opencode/opencode.db"),
-        antigravity_conversations: home.join(".gemini/antigravity/conversations"),
-    };
-    let mut aidev_values = pulpit_aidev::spawn_push(aidev_paths);
-    let feed = feed_v2.clone();
-    let hub_legacy = state.hub.clone();
-    tokio::spawn(async move {
-        while let Some(data) = aidev_values.recv().await {
-            feed(data.clone());
-            // built via json!: the Value is serialized by serde, not
-            // spliced into the JSON text by hand
-            let payload = serde_json::json!({
-                "app": "APP_CUSTOM_VALUE",
-                "data": data,
-            })
-            .to_string();
-            hub_legacy
-                .broadcast("app_status_update", Some(&payload))
-                .await;
-        }
-    });
-
-    // M2 speaker watcher: master volume + mute every 5s, default device
-    // id every 6th cycle (30s) - the original speaker service cadence.
-    {
-        let backend = state.backend.clone();
-        let feed = feed_v2.clone();
-        let hub = state.hub.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-            let mut cycle = 0u32;
-            loop {
-                tick.tick().await;
-                cycle = (cycle + 1) % 6;
-                let backend = backend.clone();
-                // the original fetched the device id on the first fetch
-                // and every 6th cycle after that
-                let snapshot =
-                    tokio::task::spawn_blocking(move || backend.speaker_snapshot(cycle == 1))
-                        .await
-                        .ok();
-                if let Some((volume, muted, device)) = snapshot {
-                    if let (Some(volume), Some(muted)) = (volume, muted) {
-                        // one decimal-free fraction like the original n/100
-                        let level = (volume / 100.0 * 1000.0).round() / 1000.0;
-                        feed(serde_json::json!({
-                            "speaker-volume": level,
-                            "speaker-muted": muted,
-                        }));
-                        // built via json!: the device name and the floats
-                        // are escaped/serialized, not format!-ed into the
-                        // JSON text by hand
-                        let payload = serde_json::json!({
-                            "app": "APP_CUSTOM_VALUE",
-                            "data": {
-                                "speaker-volume": level,
-                                "speaker-muted": muted,
-                            },
-                        })
-                        .to_string();
-                        hub.broadcast("app_status_update", Some(&payload)).await;
-                    }
-                    if let Some(device) = device {
-                        feed(serde_json::json!({ "speaker-device": device }));
-                        let payload = serde_json::json!({
-                            "app": "THIRD_PARTY_APP",
-                            "data": { "speaker-device": device },
-                        })
-                        .to_string();
-                        hub.broadcast("app_status_update", Some(&payload)).await;
-                    }
-                }
-            }
-        });
-    }
+    tokio::spawn(pulpit_host::forward_producer(
+        feed.clone(),
+        pulpit_aidev::spawn_push(pulpit_host::aidev_paths(aidev_config)),
+    ));
+    tokio::spawn(pulpit_host::speaker_watch(feed.clone(), state.backend.clone()));
+    tokio::spawn(pulpit_host::activity_loop(
+        ext_manager.clone(),
+        state.hub.clone(),
+        Some(v2.hub.clone()),
+    ));
 
     // v2 background task: coalesced state patches.
     tokio::spawn(pulpit_v2::run_flusher(
@@ -340,29 +193,45 @@ async fn main() -> anyhow::Result<()> {
         v2.config.ping_interval,
     ));
 
-    // Extension timers stretch to IDLE_TICK_FLOOR while no client is
-    // watching (see ExtManager::set_activity); keep the count current.
-    {
-        let ext = ext_manager.clone();
-        let hub = state.hub.clone();
-        let v2_hub = v2.hub.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                let clients = hub.len().await + v2_hub.count();
-                ext.set_activity(clients);
-            }
-        });
-    }
-
     // ConnectInfo is needed by the loopback guard on POST /v2/pair.
-    let app = pulpit_legacy::router(state).merge(pulpit_v2::router(v2));
+    let app = pulpit_legacy::router(state).merge(pulpit_v2::router(v2.clone()));
+
+    // A deliberate exit (Ctrl+C, service stop) must tell the v2 tablets:
+    // per protocol-v2.md §9 one server.shutdown frame beats a bare WS
+    // drop (NET-04) - a conforming client treats a drop as transient
+    // loss and would keep retrying into the void for minutes.
+    let v2_hub = v2.hub.clone();
+    let goodbye = async move {
+        wait_for_terminate().await;
+        tracing::info!("shutdown requested - saying goodbye to v2 tablets");
+        v2_hub.shutdown();
+        // the session pumps write the frame + close asynchronously; give
+        // them a beat before `main` returns and the process exits
+        tokio::time::sleep(SHUTDOWN_FLUSH_GRACE).await;
+    };
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(goodbye)
     .await?;
     Ok(())
+}
+
+/// Resolve on the process's termination signals: Ctrl+C everywhere,
+/// plus SIGTERM where it exists (service managers).
+async fn wait_for_terminate() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

@@ -16,6 +16,9 @@ use tokio_tungstenite::tungstenite::Message;
 struct MockBackend {
     pub execs: Mutex<Vec<(i64, bool)>>,
     pub sliders: Mutex<Vec<(i64, f64)>>,
+    /// Execs whose dispatched row still carried image columns - must
+    /// stay empty: exec dispatch reads the image-less meta row (CORE-02).
+    pub image_execs: Mutex<Vec<i64>>,
 }
 
 impl Backend for MockBackend {
@@ -52,7 +55,21 @@ impl Backend for MockBackend {
         }
     }
 
+    /// Mimics the production `SqlBackend` meta read: the same row with
+    /// the `img`/`img2` columns stubbed empty - so the exec tests below
+    /// pin that dispatch (which reads meta since CORE-02) never depends
+    /// on the image columns.
+    fn get_button_meta(&self, id: i64) -> Option<ButtonRow> {
+        let mut row = self.get_button(id)?;
+        row.img = Some(String::new());
+        row.img2 = Some(String::new());
+        Some(row)
+    }
+
     fn exec(&self, button: ButtonRow, is_tap_start: bool, _sink: &mut dyn EventSink) {
+        if button.img.as_deref().is_some_and(|i| !i.is_empty()) {
+            self.image_execs.lock().unwrap().push(button.id);
+        }
         self.execs.lock().unwrap().push((button.id, is_tap_start));
     }
 
@@ -535,4 +552,53 @@ async fn recv_text(
         .unwrap();
     let text = msg.to_text().unwrap().to_string();
     text
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_dispatch_rides_the_imageless_meta_row() {
+    // CORE-02: taps and sliders read get_button_meta (img/img2 stubbed
+    // empty like SqlBackend does), never the full base64 columns - and
+    // dispatch itself works identically on that row.
+    let (addr, backend) = spawn_server().await;
+    let (status, open) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
+    assert_eq!(status, 200);
+    let sid: String =
+        serde_json::from_str::<serde_json::Value>(&open[1..]).unwrap()["sid"]
+            .as_str()
+            .unwrap()
+            .into();
+    let _ = http(
+        addr,
+        "GET",
+        &format!("/socket.io/?EIO=3&transport=polling&t=2&sid={sid}"),
+        None,
+    );
+    for body in [
+        r#"42["exec_shortcut",{"id":10,"isTapStart":false}]"#,
+        r#"42["exec_slider",{"id":10,"value":0.5}]"#,
+    ] {
+        let (status, _) = http(
+            addr,
+            "POST",
+            &format!("/socket.io/?EIO=3&transport=polling&t=3&sid={sid}"),
+            Some(body),
+        );
+        assert_eq!(status, 200);
+    }
+    wait_for_execs(&backend, &[(10, false)]);
+    assert!(
+        backend
+            .sliders
+            .lock()
+            .unwrap()
+            .contains(&(10, 0.5)),
+        "slider never landed: {:?}",
+        backend.sliders.lock().unwrap()
+    );
+    // every dispatched row carried the stubbed (empty) image columns
+    assert!(
+        backend.image_execs.lock().unwrap().is_empty(),
+        "exec dispatch received full image rows: {:?}",
+        backend.image_execs.lock().unwrap()
+    );
 }
