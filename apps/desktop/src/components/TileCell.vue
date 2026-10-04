@@ -285,6 +285,37 @@ const progressView = computed(() => {
   };
 });
 
+// Media payloads (album art and/or playback progress) get a card layout
+// instead of the label/value rows: the producer's Track / Artist / Album
+// rows become a stacked title-subtitle block, the duplicated summary
+// drops out, and remaining rows (Device, ...) only render when the tile
+// is wide enough to have room. Matched by label name so any producer's
+// push benefits, not only spotify-now-playing.
+const mediaView = computed(() => {
+  if (!statusArtUrl.value && !progressView.value) return null;
+  const rows = statusRows.value;
+  if (!rows.length) return null;
+  const byLabel = (name) =>
+    rows.find((r) => String(r.label || "").toLowerCase() === name);
+  const track = byLabel("track");
+  const rest = rows.filter(
+    (r) =>
+      r !== track &&
+      !["track", "artist", "album"].includes(
+        String(r.label || "").toLowerCase(),
+      ),
+  );
+  return {
+    title: track?.value || "",
+    artist: byLabel("artist")?.value || "",
+    album: byLabel("album")?.value || "",
+    rest,
+  };
+});
+// Album and the label/value extras need two cells of width to be
+// readable; at one cell only the title, the artist and the bar remain.
+const showMediaMeta = computed(() => props.tile.w >= 2);
+
 // Portrait/square tiles stack the art above the text; wide tiles put the
 // art beside it. The m:ss / m:ss label only fits from two cells wide.
 const artBeside = computed(() => props.tile.w > props.tile.h);
@@ -586,37 +617,75 @@ function onTileKeydown(event) {
           </div>
         </template>
         <template v-else>
-          <!-- album art, shown whole (fit, aspect kept, nothing on top) -->
-          <img v-if="statusArtUrl" class="status-art" :src="statusArtUrl" alt="" />
-          <div class="status-body">
-            <div
-              v-for="(row, i) in statusRows"
-              :key="i"
-              class="status-row"
-              :class="['s-' + (row.state || 'off'), { 'is-header': row.state === 'header' }]"
-            >
-              <span v-if="row.state !== 'header'" class="status-dot"></span>
-              <span v-if="statusGlyph(row)" class="provider-glyph" v-html="statusGlyph(row)"></span>
-              <span v-else-if="row.label" class="status-label">{{ row.label }}</span>
-              <span v-if="row.value" class="status-val">{{ row.value }}</span>
-              <span v-if="row.percent != null" class="status-bar">
-                <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
-              </span>
-            </div>
-            <div v-if="statusSummary" class="status-summary">
-              {{ statusSummary }}
-            </div>
-            <!-- locally extrapolated playback progress, ticked ~1 Hz only
-                 while playing and on screen -->
-            <div v-if="progressView" class="status-progress">
-              <span class="status-progress-track">
-                <i :style="{ width: progressView.percent + '%' }"></i>
-              </span>
-              <span v-if="showProgressTimes" class="status-progress-time">{{
-                progressView.label
+          <!-- Media card: a payload with album art and/or playback
+               progress renders as title + artist (+ album and extra
+               rows from two cells wide) below/beside the art, ending
+               in the playback bar. The art stays whole: fit, aspect
+               kept, nothing on top of it. -->
+          <template v-if="mediaView">
+            <img v-if="statusArtUrl" class="status-art" :src="statusArtUrl" alt="" />
+            <div class="status-body media-body">
+              <span class="media-title">{{ mediaView.title }}</span>
+              <span v-if="mediaView.artist" class="media-sub">{{
+                mediaView.artist
               }}</span>
+              <template v-if="showMediaMeta">
+                <span v-if="mediaView.album" class="media-sub dim">{{
+                  mediaView.album
+                }}</span>
+                <div
+                  v-for="(row, i) in mediaView.rest"
+                  :key="i"
+                  class="status-row"
+                >
+                  <span class="status-dot"></span>
+                  <span class="status-label">{{ row.label }}</span>
+                  <span class="status-val">{{ row.value }}</span>
+                </div>
+              </template>
+              <div v-if="progressView" class="status-progress">
+                <span class="status-progress-track">
+                  <i :style="{ width: progressView.percent + '%' }"></i>
+                </span>
+                <span v-if="showProgressTimes" class="status-progress-time">{{
+                  progressView.label
+                }}</span>
+              </div>
             </div>
-          </div>
+          </template>
+          <template v-else>
+            <!-- album art, shown whole (fit, aspect kept, nothing on top) -->
+            <img v-if="statusArtUrl" class="status-art" :src="statusArtUrl" alt="" />
+            <div class="status-body">
+              <div
+                v-for="(row, i) in statusRows"
+                :key="i"
+                class="status-row"
+                :class="['s-' + (row.state || 'off'), { 'is-header': row.state === 'header' }]"
+              >
+                <span v-if="row.state !== 'header'" class="status-dot"></span>
+                <span v-if="statusGlyph(row)" class="provider-glyph" v-html="statusGlyph(row)"></span>
+                <span v-else-if="row.label" class="status-label">{{ row.label }}</span>
+                <span v-if="row.value" class="status-val">{{ row.value }}</span>
+                <span v-if="row.percent != null" class="status-bar">
+                  <i :style="{ width: Math.min(100, Math.max(0, row.percent)) + '%' }"></i>
+                </span>
+              </div>
+              <div v-if="statusSummary" class="status-summary">
+                {{ statusSummary }}
+              </div>
+              <!-- locally extrapolated playback progress, ticked ~1 Hz only
+                   while playing and on screen -->
+              <div v-if="progressView" class="status-progress">
+                <span class="status-progress-track">
+                  <i :style="{ width: progressView.percent + '%' }"></i>
+                </span>
+                <span v-if="showProgressTimes" class="status-progress-time">{{
+                  progressView.label
+                }}</span>
+              </div>
+            </div>
+          </template>
           <!-- brand mark in a tile corner, outside the art -->
           <span
             v-if="statusArtUrl"
@@ -915,6 +984,35 @@ function onTileKeydown(event) {
 .tile-status.has-art.art-beside .status-body {
   flex: 1 1 0;
   justify-content: center;
+}
+/* media card text block: stacked title / artist / album instead of the
+   label-value rows, each line stepping down in size so a single narrow
+   cell keeps the title readable while the metadata yields */
+.media-body {
+  gap: 4px;
+}
+.media-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+.media-sub {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.65);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.media-sub.dim {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
 }
 .status-progress {
   display: flex;

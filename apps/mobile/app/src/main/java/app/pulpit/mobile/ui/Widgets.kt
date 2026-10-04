@@ -714,7 +714,7 @@ fun StatusTile(
         // not only spotify) gets the media layout: art whole, rows and
         // progress bar below or beside it per the tile's aspect
         art != null || data.progress != null ->
-            StatusMediaView(tile, data, art, receivedAtMs, titleColor, modifier)
+            StatusMediaView(tile, data, art, receivedAtMs, modifier)
         else -> StatusDetailView(data, titleColor, modifier)
     }
 }
@@ -842,19 +842,104 @@ private fun StatusArt(bitmap: ImageBitmap, modifier: Modifier = Modifier) {
     )
 }
 
+/** Label-keyed row lookup (the media payload contract: Track / Artist /
+ *  Album rows carry the card's title, artist and album). */
+private fun StatusData.rowValue(name: String): String =
+    rows.firstOrNull { it.label.equals(name, ignoreCase = true) }?.value.orEmpty()
+
+/** The media card's text block: the track title bold on up to two
+ *  lines, the artist under it, and - only from two cells of width -
+ *  the album plus the payload's extra label/value rows (Device, ...).
+ *  The duplicated summary line never renders here, so one narrow cell
+ *  still reads cleanly. */
+@Composable
+private fun StatusMediaText(data: StatusData, wide: Boolean) {
+    val title = data.rowValue("Track")
+    val artist = data.rowValue("Artist")
+    val extras = data.rows.filter {
+        !it.label.equals("Track", true) &&
+            !it.label.equals("Artist", true) &&
+            !it.label.equals("Album", true)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (title.isNotEmpty()) {
+            Text(
+                text = title,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                lineHeight = 15.sp,
+                color = Color.White,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (artist.isNotEmpty()) {
+            Text(
+                text = artist,
+                fontSize = 10.5.sp,
+                color = Color.White.copy(alpha = 0.65f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (wide) {
+            val album = data.rowValue("Album")
+            if (album.isNotEmpty()) {
+                Text(
+                    text = album,
+                    fontSize = 10.sp,
+                    color = Color.White.copy(alpha = 0.45f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            extras.forEach { row ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    StatusDot(row.state)
+                    Spacer(Modifier.size(7.dp))
+                    Text(
+                        text = row.label,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (row.value.isNotEmpty()) {
+                        Spacer(Modifier.size(6.dp))
+                        Text(
+                            text = row.value,
+                            fontSize = 10.5.sp,
+                            color = Color.White.copy(alpha = 0.85f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** Media layout for a status payload that carries album art and/or
- *  playback progress: the art whole with the rows and the progress bar
- *  below it (portrait/square tiles) or beside it (wide tiles), and a
- *  small brand glyph in a tile corner outside the art. */
+ *  playback progress: the art whole with a title/artist card below it
+ *  (portrait/square tiles) or beside it (wide tiles), ending in the
+ *  playback bar, and a small brand glyph in a tile corner outside the
+ *  art. The art takes the spare height, so the text stays readable at
+ *  any tile size. */
 @Composable
 private fun StatusMediaView(
     tile: Tile,
     data: StatusData,
     art: ImageBitmap?,
     receivedAtMs: Long,
-    titleColor: Color,
     modifier: Modifier = Modifier,
 ) {
+    val wide = tile.w >= 2
     Box(modifier.fillMaxSize()) {
         if (tile.w > tile.h) {
             Row(
@@ -871,9 +956,9 @@ private fun StatusMediaView(
                     Modifier.weight(0.58f),
                     verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically),
                 ) {
-                    StatusDetailContent(data, titleColor)
+                    StatusMediaText(data, wide)
                     data.progress?.let {
-                        StatusMediaBar(it, receivedAtMs, showTimes = tile.w >= 2)
+                        StatusMediaBar(it, receivedAtMs, showTimes = wide)
                     }
                 }
             }
@@ -882,14 +967,14 @@ private fun StatusMediaView(
                 Modifier
                     .fillMaxSize()
                     .padding(horizontal = 9.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterVertically),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 if (art != null) {
                     StatusArt(art, Modifier.fillMaxWidth().weight(1f))
                 }
-                StatusDetailContent(data, titleColor)
+                StatusMediaText(data, wide)
                 data.progress?.let {
-                    StatusMediaBar(it, receivedAtMs, showTimes = tile.w >= 2)
+                    StatusMediaBar(it, receivedAtMs, showTimes = wide)
                 }
             }
         }
