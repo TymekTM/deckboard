@@ -529,6 +529,10 @@ fn classify(op: u32, frame: &Value, nonce: Option<&str>) -> Incoming {
 
 // ------------------------------------------------------------- pipe client
 
+/// Second wait slot in [`Pipe::read_some_wake`]: the wake event (the
+/// first slot, the read event, answers as plain WAIT_OBJECT_0).
+const WAIT_WAKE: u32 = pipe::WAIT_OBJECT_0 + 1;
+
 #[cfg(windows)]
 mod pipe {
     use std::ffi::c_void;
@@ -602,8 +606,30 @@ mod pipe {
             name: *const u16,
         ) -> *mut c_void;
         pub fn CloseHandle(handle: *mut c_void) -> i32;
+        pub fn SetEvent(handle: *mut c_void) -> i32;
         pub fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        pub fn WaitForMultipleObjects(
+            count: u32,
+            handles: *const *mut c_void,
+            wait_all: i32,
+            milliseconds: u32,
+        ) -> u32;
         pub fn GetLastError() -> u32;
+
+        // test-only server side of a fake Discord pipe
+        #[cfg(test)]
+        pub fn CreateNamedPipeW(
+            name: *const u16,
+            open_mode: u32,
+            pipe_mode: u32,
+            instances: u32,
+            out_size: u32,
+            in_size: u32,
+            default_timeout: u32,
+            security: *mut c_void,
+        ) -> *mut c_void;
+        #[cfg(test)]
+        pub fn ConnectNamedPipe(handle: *mut c_void, overlapped: *mut c_void) -> i32;
     }
 }
 
@@ -706,10 +732,19 @@ impl Pipe {
         Ok(written as usize)
     }
 
-    /// Wait up to `timeout` for the next bytes and append them to `buf`.
-    /// Ok(0) means nothing arrived in time (the read was cancelled and the
-    /// pipe stays usable); Err means the pipe is gone.
-    fn read_some(&mut self, buf: &mut Vec<u8>, timeout: Duration) -> Result<usize> {
+    /// Wait up to `timeout` for the next bytes and append them to `buf`,
+    /// also watching the `wake` event when it is not null. Ok(0) (or
+    /// Ok(n, true) for a wake) means nothing arrived in time (the read was
+    /// cancelled and the pipe stays usable); Err means the pipe is gone.
+    /// The bool result says the wake fired: the read was abandoned so the
+    /// caller can re-check the job queue immediately. Any bytes that
+    /// arrived alongside the wake are still appended first.
+    fn read_some_wake(
+        &mut self,
+        buf: &mut Vec<u8>,
+        timeout: Duration,
+        wake: *mut c_void,
+    ) -> Result<(usize, bool)> {
         let event = new_event();
         if event.is_null() {
             return Err(DiscordError::Call("CreateEventW"));
@@ -733,27 +768,42 @@ impl Pipe {
                 unsafe { pipe::CloseHandle(event) };
                 return Err(DiscordError::Call("ReadFile"));
             }
-            let wait = unsafe {
-                pipe::WaitForSingleObject(event, timeout.as_millis().min(u32::MAX as u128) as u32)
+            let wait_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+            // With a wake event, wait on [read event, wake event]; a wake
+            // is reported as a timeout plus the `woke` flag so it takes
+            // the cancel branch below (the read is still pending and must
+            // be abandoned), and the caller re-checks its job queue.
+            let (wait, woke) = if wake.is_null() {
+                (unsafe { pipe::WaitForSingleObject(event, wait_ms) }, false)
+            } else {
+                let handles = [event, wake];
+                let w =
+                    unsafe { pipe::WaitForMultipleObjects(2, handles.as_ptr(), 0, wait_ms) };
+                if w == WAIT_WAKE {
+                    (pipe::WAIT_TIMEOUT, true)
+                } else {
+                    (w, false)
+                }
             };
             if wait != pipe::WAIT_OBJECT_0 {
-                // Timeout: cancel so the pipe is not stuck with a pending
-                // read. Any other wait result also leaves the read posted,
-                // and the kernel must be told to abandon it before `chunk`
-                // goes out of scope - either way drain the aborted call.
+                // Timeout or wake: cancel so the pipe is not stuck with a
+                // pending read. Any other wait result also leaves the read
+                // posted, and the kernel must be told to abandon it before
+                // `chunk` goes out of scope - either way drain the aborted
+                // call.
                 unsafe {
                     pipe::CancelIoEx(self.handle, &mut overlapped);
                     pipe::GetOverlappedResult(self.handle, &mut overlapped, &mut read, 1);
                     pipe::CloseHandle(event);
                 }
-                if wait == pipe::WAIT_TIMEOUT {
+                if wait == pipe::WAIT_TIMEOUT || woke {
                     if read > 0 {
                         // the operation finished with data right as we
                         // cancelled
                         buf.extend_from_slice(&chunk[..read as usize]);
-                        return Ok(read as usize);
+                        return Ok((read as usize, woke));
                     }
-                    return Ok(0);
+                    return Ok((0, woke));
                 }
                 return Err(DiscordError::Call("WaitForSingleObject"));
             }
@@ -764,7 +814,7 @@ impl Pipe {
             return Err(DiscordError::Call("GetOverlappedResult(read)"));
         }
         buf.extend_from_slice(&chunk[..read as usize]);
-        Ok(read as usize)
+        Ok((read as usize, false))
     }
 }
 
@@ -845,7 +895,9 @@ impl Conn {
     }
 
     fn wait_for_ready(&mut self, deadline: Instant) -> Result<()> {
-        let Some((op, frame)) = self.wait_frame(deadline, Duration::from_secs(1))? else {
+        let Some((op, frame)) =
+            self.wait_frame(deadline, Duration::from_secs(1), WakeHandle(std::ptr::null_mut()))?
+        else {
             return Err(DiscordError::Call("timeout"));
         };
         let is_ready = op == OP_FRAME
@@ -864,9 +916,16 @@ impl Conn {
     }
 
     /// Read frames until one complete frame is available or the deadline
-    /// passes. Ok(None) on deadline; single reads never block longer than
-    /// `cap`, so an already-passed deadline is noticed promptly.
-    fn wait_frame(&mut self, deadline: Instant, cap: Duration) -> Result<Option<(u32, Value)>> {
+    /// passes. Ok(None) on deadline (or on `wake` firing - the caller
+    /// re-checks its queue before the deadline matters); single reads
+    /// never block longer than `cap`, so an already-passed deadline is
+    /// noticed promptly.
+    fn wait_frame(
+        &mut self,
+        deadline: Instant,
+        cap: Duration,
+        wake: WakeHandle,
+    ) -> Result<Option<(u32, Value)>> {
         loop {
             if let Some(frame) = self.inbox.pop_front() {
                 return Ok(Some(frame));
@@ -875,12 +934,16 @@ impl Conn {
             if now >= deadline {
                 return Ok(None);
             }
-            if self
-                .pipe
-                .read_some(&mut self.buf, cap.min(deadline - now))?
-                > 0
-            {
+            let (read, woke) =
+                self.pipe
+                    .read_some_wake(&mut self.buf, cap.min(deadline - now), wake.0)?;
+            if read > 0 {
                 self.inbox.extend(extract_frames(&mut self.buf));
+            }
+            if woke {
+                // a job is queued: let the caller see it now instead of
+                // serving the rest of the tick
+                return Ok(None);
             }
         }
     }
@@ -911,7 +974,9 @@ impl Conn {
         self.pipe
             .write_all(&encode_frame(OP_FRAME, &frame.to_string()))?;
         loop {
-            let Some((op, frame)) = self.wait_frame(deadline, Duration::from_secs(1))? else {
+            let Some((op, frame)) =
+                self.wait_frame(deadline, Duration::from_secs(1), WakeHandle(std::ptr::null_mut()))?
+            else {
                 return Err(DiscordError::Call("timeout"));
             };
             if let Some(reply) = self.absorb(op, frame, Some(&nonce))? {
@@ -921,11 +986,14 @@ impl Conn {
     }
 
     /// Answer pings and absorb voice-settings pushes while no action is
-    /// running. Returns on the first transport error.
-    fn serve(&mut self, tick: Duration) -> Result<()> {
+    /// running. Returns on the first transport error, when `tick`
+    /// elapses, or as soon as `wake` fires - the actor passes the wake
+    /// event `execute()` signals, so a queued action ends the idle serve
+    /// immediately no matter how long the tick is.
+    fn serve(&mut self, tick: Duration, wake: WakeHandle) -> Result<()> {
         let deadline = Instant::now() + tick;
         loop {
-            let Some((op, frame)) = self.wait_frame(deadline, tick)? else {
+            let Some((op, frame)) = self.wait_frame(deadline, tick, wake)? else {
                 return Ok(());
             };
             self.absorb(op, frame, None)?;
@@ -1071,6 +1139,7 @@ pub fn apply_flip(current: &Value, what: &Plan) -> Result<Option<FlipOutcome>> {
 
 /// What a finished action wants pushed to tiles: the custom-value key and
 /// the state label (same shape as the original's `_labelMuteDeaf` push).
+#[derive(Debug)]
 pub struct ExecOutcome {
     pub key: String,
     pub label: String,
@@ -1092,25 +1161,76 @@ enum Job {
 /// run one at a time.
 pub struct DiscordClient {
     jobs: std::sync::Mutex<std::sync::mpsc::Sender<Job>>,
+    /// Set after every queued job so the actor's idle pipe read ends at
+    /// once instead of at the tick.
+    wake: WakeEvent,
 }
 
-/// Idle cadence of the actor loop. Queued actions wake the actor
-/// immediately; on each quiet tick it serves Discord's pings and absorbs
-/// state pushes so the connection and its cache stay honest between
-/// clicks.
-const IDLE_TICK: Duration = Duration::from_millis(20);
+/// Non-owning copy of the wake handle for the actor thread and the serve
+/// path; the owning [`WakeEvent`] in [`DiscordClient`] closes it.
+#[derive(Clone, Copy)]
+struct WakeHandle(*mut c_void);
+
+unsafe impl Send for WakeHandle {}
+
+/// Auto-reset event the API threads signal to interrupt the actor's idle
+/// pipe read ([`Conn::serve`] waits on it next to the read event). Owned
+/// by the [`DiscordClient`] handle; the actor thread only borrows the raw
+/// handle, so signaling from the API thread is safe (SetEvent is
+/// thread-safe on Windows) and the actor exits before or concurrently
+/// with the handle being closed.
+struct WakeEvent(*mut c_void);
+
+// SAFETY: the raw handle is only ever passed to SetEvent (any thread) and
+// WaitForMultipleObjects (actor thread); it carries no interior state.
+unsafe impl Send for WakeEvent {}
+
+impl WakeEvent {
+    fn new() -> WakeEvent {
+        // auto-reset: each wait consumes one signal, so a wake fires
+        // exactly one serve interruption
+        WakeEvent(unsafe { pipe::CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null_mut()) })
+    }
+
+    fn handle(&self) -> WakeHandle {
+        WakeHandle(self.0)
+    }
+
+    fn set(&self) {
+        if !self.0.is_null() {
+            unsafe { pipe::SetEvent(self.0) };
+        }
+    }
+}
+
+impl Drop for WakeEvent {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { pipe::CloseHandle(self.0) };
+        }
+    }
+}
+
+/// Idle cadence of the actor loop while a connection is up. The tick only
+/// bounds how long one serve pass may hold the actor; queued actions
+/// interrupt it through the wake event, and with no connection the actor
+/// blocks on the job queue outright - so neither state burns wakeups.
+const IDLE_TICK: Duration = Duration::from_secs(10);
 
 impl DiscordClient {
     /// Spawn the keep-alive actor. The first action pays the ~400 ms
     /// session setup; every later one is a single round trip.
     pub fn spawn() -> DiscordClient {
         let (tx, rx) = std::sync::mpsc::channel();
+        let wake = WakeEvent::new();
+        let thread_wake = wake.handle();
         std::thread::Builder::new()
             .name("discord-rpc".into())
-            .spawn(move || actor_loop(rx))
+            .spawn(move || actor_loop(rx, thread_wake, None))
             .expect("spawn discord rpc actor");
         DiscordClient {
             jobs: std::sync::Mutex::new(tx),
+            wake,
         }
     }
 
@@ -1135,6 +1255,9 @@ impl DiscordClient {
             .unwrap()
             .send(job)
             .map_err(|_| DiscordError::Call("discord actor stopped"))?;
+        // interrupt the actor's idle serve so the job is seen now, not
+        // when the tick elapses
+        self.wake.set();
         reply_rx
             .recv()
             .map_err(|_| DiscordError::Call("discord actor stopped"))?
@@ -1144,39 +1267,78 @@ impl DiscordClient {
 impl Drop for DiscordClient {
     fn drop(&mut self) {
         // Best effort: if the actor already died the send fails and there
-        // is nothing left to stop.
+        // is nothing left to stop. The wake ends a running serve early so
+        // the Close job is noticed without waiting out the tick.
         let _ = self.jobs.lock().unwrap().send(Job::Close);
+        self.wake.set();
     }
 }
 
-fn actor_loop(rx: std::sync::mpsc::Receiver<Job>) {
-    let mut conn: Option<Conn> = None;
+/// One queued action, or None if the actor should stop. The reply is
+/// always sent back (the API thread blocks on it).
+fn handle_job(conn: &mut Option<Conn>, job: Job) -> bool {
+    match job {
+        Job::Close => false,
+        Job::Exec {
+            config,
+            action,
+            args,
+            deadline,
+            reply,
+        } => {
+            let outcome = run_exec(conn, &config, &action, &args, deadline);
+            let _ = reply.send(outcome);
+            true
+        }
+    }
+}
+
+fn actor_loop(
+    rx: std::sync::mpsc::Receiver<Job>,
+    wake: WakeHandle,
+    mut conn: Option<Conn>,
+) {
     loop {
-        match rx.recv_timeout(IDLE_TICK) {
-            Ok(Job::Close) => break,
-            Ok(Job::Exec {
-                config,
-                action,
-                args,
-                deadline,
-                reply,
-            }) => {
-                let outcome = run_exec(&mut conn, &config, &action, &args, deadline);
-                let _ = reply.send(outcome);
-            }
-            // Idle: pings must be answered or Discord drops the session.
-            // A transport failure here means the session died while idle;
-            // drop it so the next action reconnects instead of failing.
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let dead = match conn.as_mut() {
-                    Some(c) => c.serve(IDLE_TICK).is_err(),
-                    None => false,
-                };
-                if dead {
-                    conn = None;
+        if conn.is_none() {
+            // No connection, nothing to serve: block on the queue. A tick
+            // here would be a pure wakeup tax - with Discord closed the
+            // old loop still woke ~50x/s for literally nothing.
+            match rx.recv() {
+                Ok(job) => {
+                    if !handle_job(&mut conn, job) {
+                        break;
+                    }
                 }
+                Err(_) => break,
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            continue;
+        }
+        // Connected: keep the session honest (answer pings, absorb
+        // voice-settings pushes). `wake` ends the serve the moment
+        // execute() queues a job, so the long tick costs no action
+        // latency. A transport failure drops the session so the next
+        // action reconnects instead of failing.
+        if conn.as_mut().unwrap().serve(IDLE_TICK, wake).is_err() {
+            conn = None;
+            continue;
+        }
+        // Serve returned (tick elapsed or wake fired): drain the queue
+        // without blocking again.
+        loop {
+            match rx.try_recv() {
+                Ok(job) => {
+                    if !handle_job(&mut conn, job) {
+                        return;
+                    }
+                    if conn.is_none() {
+                        // the job killed the connection; go back to
+                        // blocking on the queue
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            }
         }
     }
 }
@@ -1606,6 +1768,142 @@ mod tests {
             "the agent must carry a real timeout, got {:?}",
             started.elapsed()
         );
+    }
+
+    /// Stand-in Discord: one named-pipe server instance that accepts a
+    /// client and then never speaks, so the actor's connection sits in an
+    /// idle overlapped read for the whole test.
+    fn spawn_silent_pipe_server(name: &str) {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = std::ffi::OsStr::new(name)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let pipe_access_duplex: u32 = 0x3;
+        // SAFETY: name is NUL-terminated and lives across the call; the
+        // server handle is deliberately leaked - the test process exits
+        // right after
+        let server = unsafe {
+            pipe::CreateNamedPipeW(
+                wide.as_ptr(),
+                pipe_access_duplex,
+                0, // byte mode, wait
+                1,
+                4096,
+                4096,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            !server.is_null() && server != pipe::INVALID_HANDLE_VALUE,
+            "CreateNamedPipeW failed"
+        );
+        // raw handles are not Send; this server handle is only ever passed
+        // to blocking kernel waits on this one thread
+        struct ServerHandle(*mut c_void);
+        unsafe impl Send for ServerHandle {}
+        impl ServerHandle {
+            fn raw(self) -> *mut c_void {
+                self.0
+            }
+        }
+        let server = ServerHandle(server);
+        std::thread::spawn(move || {
+            // a sync server handle: ConnectNamedPipe blocks until the
+            // client shows up
+            unsafe { pipe::ConnectNamedPipe(server.raw(), std::ptr::null_mut()) };
+            std::thread::sleep(Duration::from_secs(60));
+        });
+    }
+
+    #[test]
+    fn execute_completes_while_the_actor_serves_a_silent_connection() {
+        // The old loop only noticed a queued job after its 20 ms tick; a
+        // connected session must instead be interrupted immediately, no
+        // matter how long the idle tick is (now 10 s).
+        let name = format!(
+            "\\\\.\\pipe\\pulpit-discord-wake-test-{}-{}",
+            std::process::id(),
+            line!()
+        );
+        spawn_silent_pipe_server(&name);
+        let conn = Conn {
+            pipe: open_test_pipe(&name),
+            nonce: 0,
+            buf: Vec::new(),
+            inbox: VecDeque::new(),
+            cache: None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wake = WakeEvent::new();
+        let thread_wake = wake.handle();
+        std::thread::spawn(move || actor_loop(rx, thread_wake, Some(conn)));
+        let client = DiscordClient {
+            jobs: std::sync::Mutex::new(tx),
+            wake,
+        };
+        let cfg = DiscordConfig {
+            client_id: "id".into(),
+            client_secret: "sec".into(),
+            access_token: "t".into(),
+            refresh_token: None,
+        };
+        let started = Instant::now();
+        // an unknown action fails at plan() - before any pipe I/O - so the
+        // test isolates exactly one property: the queued job interrupted
+        // the idle serve and was answered, instead of waiting out the tick
+        let result = client.execute(
+            &cfg,
+            "not-an-action",
+            &json!({}),
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert!(
+            matches!(result, Err(DiscordError::BadPayload(_, _))),
+            "got {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the wake must interrupt the idle serve immediately, took {:?}",
+            started.elapsed()
+        );
+        // a second action still flows after the first interrupted serve
+        let started = Instant::now();
+        let result = client.execute(
+            &cfg,
+            "not-an-action",
+            &json!({}),
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// Client end of a test pipe, opened like the real Discord pipe.
+    fn open_test_pipe(name: &str) -> Pipe {
+        use std::os::windows::ffi::OsStrExt;
+        let path: Vec<u16> = std::ffi::OsStr::new(name)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: path is NUL-terminated and lives across the call
+        let handle = unsafe {
+            pipe::CreateFileW(
+                path.as_ptr(),
+                pipe::GENERIC_READ_WRITE,
+                0,
+                std::ptr::null_mut(),
+                pipe::OPEN_EXISTING,
+                pipe::FILE_FLAG_OVERLAPPED,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            handle != pipe::INVALID_HANDLE_VALUE && !handle.is_null(),
+            "client connect to the test pipe failed"
+        );
+        Pipe { handle }
     }
 
     /// Live probe: reads the saved token from settings.json, connects and
