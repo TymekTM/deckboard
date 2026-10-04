@@ -189,9 +189,17 @@ Boards are data. One board:
 
 - Placement is on the 96px cell grid (`x`,`y`,`w`,`h`, integers), tiles may
   be any rectangle (3x1, 3x3, ...). Non-rectangular shapes are out of scope.
+  The server clamps every placement into the board's grid before it goes
+  on the wire (size first, then the origin; added 2026-10, round 4), so a
+  board resize cannot leave a tile off-canvas.
 - `background`: `{"kind":"color","color":...}` or
   `{"kind":"asset","hash":...}` (sha-256 hex, see section 7).
-- `params`: free JSON (widget options, e.g. `hold.repeat`).
+- `params`: free JSON (widget options, e.g. `hold.repeat`). The server
+  also lifts legacy semantics that are not JSON into it: `widget`
+  (`"clock"`) + `clock_format` for clock display tiles, and `windows`
+  (array of `"5h"`/`"week"`) for plan tiles whose options column
+  carries the legacy `windows:` token (added 2026-10, round 4) - the
+  per-tile plan window filter clients apply to the status rows.
 - `asset_hash`: content hash of the tile's image asset (button image,
   photo, video). Legacy `img`/`img2` data URLs are converted to store
   entries on the fly when the server builds a sync; tiles whose image
@@ -204,15 +212,30 @@ Boards are data. One board:
   server-side the same way the legacy mapper resolves them (DB value →
   type default → fallback). `color2`/`icon2` are the active-state pair:
   the client swaps to them while the tile's channel reports its active
-  value (e.g. `"ON"`).
+  value (e.g. `"ON"`). An unset `color2` is filled with the type's
+  default color server-side (the legacy chain) before it goes on the
+  wire; types without a default omit it and the §4 client fallback
+  applies.
 - Style parity fields (added 2026-10, 012 C5): `border_color`,
   `icon_color`, `title_color` and their `*_color2` active-state pairs.
   All optional; a client that does not know them keeps its defaults
   (no border, white glyph/title).
+- Style parity fields (added 2026-10, round 4): `title_position`,
+  `title_position2` (numbers: 0 = bottom - the default, omitted from
+  the wire -, 1 = center, 2 = top), `title_box_color`,
+  `title_box_color2` (background strip behind the title) and `shape2`
+  (active-state shape, stringified like `shape`: `"1"` renders round
+  while active). All optional with the same §4 fallback; the legacy
+  wire has carried all five since the original app.
+- Board-switch tiles (legacy type `board`) with no title of their own
+  get the target board's name in `style.title` (added 2026-10, round
+  4). The legacy wire keeps the empty title and lets the client resolve
+  the name from the command, which the v2 wire does not carry.
 - **State-2 fallback rule (one rule for every field)**: while the tile
   is in its active state, each state-2 field (`color2`, `icon2`,
-  `border_color2`, `icon_color2`, `title_color2`, `asset_hash2`, ...)
-  falls back to its state-1 counterpart **per field** when absent -
+  `border_color2`, `icon_color2`, `title_color2`, `title_position2`,
+  `title_box_color2`, `shape2`, `asset_hash2`, ...) falls back to its
+  state-1 counterpart **per field** when absent -
   `active ? (field2 || field1) : field1`. A fully absent state-2 set
   leaves the tile visually unchanged between states; a partially set
   one changes only the fields that are set.
@@ -329,6 +352,9 @@ Client → server, one frame per user gesture:
   server-side loop re-executing the tile's command (first run immediately,
   then after `delay_ms`, then every `interval_ms`); `press-end` stops it.
   A repeat loop is capped at 120 s and released when the connection dies.
+  Both config values are clamped server-side into 50..=60000 ms (added
+  2026-10, round 4): the options JSON is free-form, and an unbounded
+  interval would run the command ~1000x/s for the whole cap.
   Push-to-talk-style holds (command active while held, no repeat) run from
   `press-start` to `press-end` with no timeout. Key semantics stay with
   the command engine (`press-start` = legacy `isTapStart: true`).
@@ -390,6 +416,17 @@ disconnect and retries as usual.
   `style` and `asset_hash2` to the tile manifest. Purely additive: old
   servers never send them and old clients drop unknown keys, so `v`
   stays 2.
+- Change log: 2026-10 (round 4) added the optional style fields
+  `title_position`/`title_position2` (numbers),
+  `title_box_color`/`title_box_color2` and `shape2` to `style`.
+  Additive optional fields per §10 - `v` stays 2.
+- Change log: 2026-10 (round 4) untitled board-switch tiles now carry
+  the target board's name in `style.title` (filled server-side; the
+  field itself is unchanged). No wire-shape change - `v` stays 2.
+- Change log: 2026-10 (round 4) plan tiles with the legacy
+  `windows:` options token now get `params.windows` (array of
+  `"5h"`/`"week"`; empty = all unticked). Additive optional field per
+  §10 - `v` stays 2.
 - Wire compatibility is pinned by golden fixtures
   (`crates/proto/tests/fixtures/*.json`): Rust round-trips them and the
   Kotlin unit test parses the same files. Both must stay green.

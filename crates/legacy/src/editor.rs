@@ -43,10 +43,8 @@ impl EditorBroadcaster {
     /// the full shortcut list, per room as `{basic: [...], pro: [...]}`.
     pub async fn sync_boards(&self) {
         let boards = self.backend.get_boards();
-        let buttons: Vec<_> = boards
-            .iter()
-            .map(|b| self.backend.get_buttons_by_board(b.id))
-            .collect();
+        // one grouped read for every board's shortcuts (NET-09)
+        let buttons = self.backend.all_buttons_by_board();
         let mapper = Mapper::new();
         let payload = json!({
             "basic": boards_payload(&boards, &buttons, &mapper, false),
@@ -60,13 +58,15 @@ impl EditorBroadcaster {
 
 fn boards_payload(
     boards: &[pulpit_db::BoardRow],
-    buttons: &[Vec<pulpit_db::ButtonRow>],
+    buttons: &std::collections::HashMap<i64, Vec<pulpit_db::ButtonRow>>,
     mapper: &Mapper,
     pro: bool,
 ) -> Vec<Value> {
     boards
         .iter()
-        .zip(buttons)
-        .map(|(b, btns)| mapper.board_payload(b, btns, pro))
+        .map(|b| {
+            let rows = buttons.get(&b.id);
+            mapper.board_payload(b, rows.map(Vec::as_slice).unwrap_or(&[]), pro)
+        })
         .collect()
 }

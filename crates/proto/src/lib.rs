@@ -454,6 +454,26 @@ pub struct Style {
     /// Active-state title color (per-field fallback to `title_color`, §4).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title_color2: Option<String>,
+    /// Where the title sits in the tile: 0 = bottom (default, omitted),
+    /// 1 = center, 2 = top (the editor's "Text Position").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_position: Option<u8>,
+    /// Active-state title pinning (per-field fallback to
+    /// `title_position`, §4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_position2: Option<u8>,
+    /// Background color behind the title (the editor's "Text Box
+    /// Color"); absent means a transparent label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_box_color: Option<String>,
+    /// Active-state title box (per-field fallback to `title_box_color`,
+    /// §4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_box_color2: Option<String>,
+    /// Active-state shape (legacy `shape2`), stringified like `shape`;
+    /// "1" renders round while active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape2: Option<String>,
 }
 
 /// Free placement inside a board grid (pixel-space of the 96px cell grid).

@@ -122,6 +122,12 @@ class ProtoFixturesTest {
         assertEquals("#1db954", button.style!!.iconColor2)
         assertEquals("#ffcc00", button.style!!.titleColor)
         assertEquals("#00ffcc", button.style!!.titleColor2)
+        // round-4 parity wave: title pinning/box + the active-state shape
+        assertEquals(2, button.style!!.titlePosition)
+        assertEquals(1, button.style!!.titlePosition2)
+        assertEquals("#1c1c1c", button.style!!.titleBoxColor)
+        assertEquals("#2c2c2c", button.style!!.titleBoxColor2)
+        assertEquals("1", button.style!!.shape2)
         assertTrue(button.assetHash!!.isNotEmpty())
         assertTrue(button.assetHash2!!.isNotEmpty())
 
@@ -134,6 +140,14 @@ class ProtoFixturesTest {
         assertEquals("#123456", legacyShape.color)
         assertNull(legacyShape.borderColor)
         assertNull(legacyShape.titleColor2)
+
+        // the round-4 fields default the same way: absent title
+        // pinning/box/shape2 keeps the client defaults
+        assertNull(legacyShape.titlePosition)
+        assertNull(legacyShape.titlePosition2)
+        assertNull(legacyShape.titleBoxColor)
+        assertNull(legacyShape.titleBoxColor2)
+        assertNull(legacyShape.shape2)
 
         val slider = board.tiles[1]
         assertEquals(V2.KIND_SLIDER, slider.kind)

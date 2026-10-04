@@ -142,7 +142,17 @@ async fn run_session(
     // 1) hello within the timeout, or the connection dies.
     let frame = match tokio::time::timeout(state.config.hello_timeout, next_text(stream)).await {
         Ok(Some(Ok(frame))) => frame,
-        Ok(Some(Err(_))) | Ok(None) => return End::Closed,
+        // Unparseable text is a protocol violation, not a silent drop:
+        // answer `bad-frame` like the post-handshake loop does (NET-05),
+        // then close - there is no session to continue with.
+        Ok(Some(Err(_))) => {
+            session.send_frame(&Frame::push(
+                TYPE_ERROR,
+                json!({"code": error_code::BAD_FRAME, "message": "hello payload"}),
+            ));
+            return End::Fatal;
+        }
+        Ok(None) => return End::Closed,
         Err(_) => {
             session.send_frame(&Frame::push(
                 TYPE_ERROR,
@@ -744,6 +754,16 @@ mod tests {
             None
         );
         assert_eq!(parse("{}"), None);
+        // NET-06: an imported options JSON is free-form - junk rates are
+        // clamped into 50..=60000 ms instead of trusted
+        assert_eq!(
+            parse(r#"{"hold":{"repeat":{"delay_ms":1,"interval_ms":1}}}"#),
+            Some((50, 50))
+        );
+        assert_eq!(
+            parse(r#"{"hold":{"repeat":{"delay_ms":999999,"interval_ms":120}}}"#),
+            Some((60000, 120))
+        );
     }
 
     #[test]

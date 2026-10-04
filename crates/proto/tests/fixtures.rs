@@ -125,6 +125,14 @@ fn boards_sync() {
     assert_eq!(style.icon_color2.as_deref(), Some("#1db954"));
     assert_eq!(style.title_color.as_deref(), Some("#ffcc00"));
     assert_eq!(style.title_color2.as_deref(), Some("#00ffcc"));
+    // second style-parity wave (round 4): title pinning/box and the
+    // active-state shape travel as optional fields; 0/absent keeps the
+    // client default (bottom-pinned, unboxed, resting shape)
+    assert_eq!(style.title_position, Some(2));
+    assert_eq!(style.title_position2, Some(1));
+    assert_eq!(style.title_box_color.as_deref(), Some("#1c1c1c"));
+    assert_eq!(style.title_box_color2.as_deref(), Some("#2c2c2c"));
+    assert_eq!(style.shape2.as_deref(), Some("1"));
     assert_eq!(style.color2.as_deref(), Some("#ED4245"));
     assert_eq!(style.icon2.as_deref(), Some("\u{f028}"));
     let hash2 = button.manifest.asset_hash2.as_deref().expect("img2 hash");

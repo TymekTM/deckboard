@@ -41,4 +41,29 @@ title_color: string | null,
 /**
  * Active-state title color (per-field fallback to `title_color`, §4).
  */
-title_color2: string | null, };
+title_color2: string | null, 
+/**
+ * Where the title sits in the tile: 0 = bottom (default, omitted),
+ * 1 = center, 2 = top (the editor's "Text Position").
+ */
+title_position: number | null, 
+/**
+ * Active-state title pinning (per-field fallback to
+ * `title_position`, §4).
+ */
+title_position2: number | null, 
+/**
+ * Background color behind the title (the editor's "Text Box
+ * Color"); absent means a transparent label.
+ */
+title_box_color: string | null, 
+/**
+ * Active-state title box (per-field fallback to `title_box_color`,
+ * §4).
+ */
+title_box_color2: string | null, 
+/**
+ * Active-state shape (legacy `shape2`), stringified like `shape`;
+ * "1" renders round while active.
+ */
+shape2: string | null, };

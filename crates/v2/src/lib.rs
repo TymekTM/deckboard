@@ -20,7 +20,7 @@ use pulpit_proto::{Frame, StatePatch, TYPE_STATE_PATCH};
 
 pub use assets::AssetStore;
 pub use boards::build_tile;
-pub use devices::{DeviceEntry, DeviceStore, PairError, Pairing, PAIR_CODE_TTL};
+pub use devices::{DeviceEntry, DeviceStore, PairError, PairRequests, Pairing, PAIR_CODE_TTL};
 pub use hub::V2Hub;
 pub use service::{pair_minted_message, router, Auth, V2Config, V2State};
 pub use state::{ext_channel, StateEngine};

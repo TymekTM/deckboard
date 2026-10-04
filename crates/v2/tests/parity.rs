@@ -12,6 +12,7 @@ use pulpit_legacy::Mapper;
 use pulpit_proto::{Interaction, WidgetKind};
 use pulpit_v2::boards::{build_tile, hold_repeat_config};
 use pulpit_v2::{AssetStore, StateEngine};
+use std::collections::HashMap;
 
 fn row(kind: &str, mode: &str, command: Option<&str>) -> ButtonRow {
     ButtonRow {
@@ -51,10 +52,18 @@ fn row(kind: &str, mode: &str, command: Option<&str>) -> ButtonRow {
 
 /// The same row through both wire builders.
 fn both(row: &ButtonRow) -> (serde_json::Value, pulpit_proto::Tile) {
+    both_with(row, &HashMap::new())
+}
+
+/// `both` with a board-id -> name map for board-switch tile titles.
+fn both_with(
+    row: &ButtonRow,
+    names: &HashMap<i64, String>,
+) -> (serde_json::Value, pulpit_proto::Tile) {
     let legacy = Mapper::new().shortcut_payload(row);
     let dir = tempfile::tempdir().unwrap();
     let assets = AssetStore::open(dir.path().to_path_buf()).unwrap();
-    let tile = build_tile(row, &assets, &StateEngine::new(120));
+    let tile = build_tile(row, names, &assets, &StateEngine::new(120));
     (legacy, tile)
 }
 
@@ -87,13 +96,45 @@ fn colors_icons_and_title_agree_between_the_wires() {
     assert_eq!(style.title.as_deref(), legacy["title"].as_str());
 
     // unset dual-state fields: legacy fills its own defaults (the
-    // client-side fallback), v2 carries None - pinned here so C5's
-    // state-2 fallback rule has a documented starting point
-    let (legacy, tile) = both(&row("url", "button", Some("https://x.co")));
+    // client-side fallback); v2 mirrors color2's resolved default (the
+    // type color, NET-03) and leaves genuinely absent pairs to the §4
+    // client-side per-field fallback - pinned here so the divergence
+    // stays deliberate. clock-display-time is the one basic type
+    // without a default color, so its unset color2 is empty on both.
+    let mut r = row("clock-display-time", "button", None);
+    r.color2 = None;
+    let (legacy, tile) = both(&r);
     let style = style_of(&tile);
     assert_eq!(style.color.as_deref(), legacy["color"].as_str());
-    assert!(style.color2.is_none(), "v2 drops unset color2");
-    assert!(legacy["color2"].as_str().is_some_and(|c| !c.is_empty()));
+    assert_eq!(legacy["color2"].as_str(), Some(""));
+    assert!(style.color2.is_none(), "no type default -> absent on the wire");
+}
+
+#[test]
+fn color2_falls_back_to_the_type_default_like_legacy() {
+    // NET-03: a type with a default color (vol), a custom resting color
+    // and no explicit color2 - the legacy wire carries the type default
+    // while active, and so must v2 (not the tile's own resting color).
+    let mut r = row("vol", "button", Some("vol_up"));
+    r.color = Some("#123456".into());
+    r.color2 = None;
+    let (legacy, tile) = both(&r);
+    let style = style_of(&tile);
+    assert_eq!(
+        legacy["color2"].as_str().unwrap_or_default(),
+        "#F5AB35",
+        "legacy fills the vol type default"
+    );
+    assert_eq!(
+        style.color2.as_deref(),
+        legacy["color2"].as_str(),
+        "v2 mirrors the legacy-resolved color2"
+    );
+    assert_ne!(
+        style.color2.as_deref(),
+        Some("#123456"),
+        "the resting color is not the active-state fallback"
+    );
 }
 
 #[test]
@@ -249,9 +290,9 @@ fn styled_row() -> ButtonRow {
         kind: "toggle-headphone".into(),
         command: None,
         title: Some("Deafen".into()),
-        title_position: 0,
+        title_position: 2,
         title_color: Some("#ffcc00".into()),
-        title_box_color: None,
+        title_box_color: Some("#1c1c1c".into()),
         color: Some("#5865f2".into()),
         icon_color: Some("#ffe0e0".into()),
         icon_color2: Some("#1db954".into()),
@@ -262,10 +303,10 @@ fn styled_row() -> ButtonRow {
         img2: Some(png2),
         icon2: Some("deaf".into()),
         color2: Some("#ED4245".into()),
-        shape2: 0,
+        shape2: 1,
         border_color2: Some("#f0f0f0".into()),
-        title_position2: 0,
-        title_box_color2: None,
+        title_position2: 1,
+        title_box_color2: Some("#2c2c2c".into()),
         title_color2: Some("#00ffcc".into()),
         position: None,
         position2: 0,
@@ -289,7 +330,7 @@ fn shared_style_fields_agree_between_legacy_and_v2() {
     let legacy = Mapper::new().shortcut_payload(&row);
     let (assets, _dir) = store();
     let engine = StateEngine::new(120);
-    let tile = build_tile(&row, &assets, &engine);
+    let tile = build_tile(&row, &HashMap::new(), &assets, &engine);
     let style = tile.manifest.style.as_ref().expect("style present");
 
     let get = |key: &str| -> Option<String> {
@@ -299,6 +340,7 @@ fn shared_style_fields_agree_between_legacy_and_v2() {
             .filter(|v| !v.is_empty())
             .map(str::to_string)
     };
+    let get_int = |key: &str| -> Option<i64> { legacy.get(key).and_then(serde_json::Value::as_i64) };
 
     assert_eq!(get("color").as_deref(), style.color.as_deref(), "color");
     assert_eq!(
@@ -336,6 +378,34 @@ fn shared_style_fields_agree_between_legacy_and_v2() {
         style.title_color2.as_deref(),
         "title_color2 (active-state pair)"
     );
+    // Round-4 parity wave: title pinning/box and the active-state shape.
+    // Legacy carries the raw int columns; v2 mirrors them as optional
+    // numbers/strings (0/absent = the client default).
+    assert_eq!(
+        get_int("title_position").map(|v| v as u8),
+        style.title_position,
+        "title_position must reach the v2 wire"
+    );
+    assert_eq!(
+        get_int("title_position2").map(|v| v as u8),
+        style.title_position2,
+        "title_position2 (active-state pair)"
+    );
+    assert_eq!(
+        get("title_box_color").as_deref(),
+        style.title_box_color.as_deref(),
+        "title_box_color must reach the v2 wire"
+    );
+    assert_eq!(
+        get("title_box_color2").as_deref(),
+        style.title_box_color2.as_deref(),
+        "title_box_color2 (active-state pair)"
+    );
+    assert_eq!(
+        get_int("shape2").map(|v| v.to_string()),
+        style.shape2,
+        "shape2 (active-state pair, stringified like shape)"
+    );
     assert_eq!(
         get("unicode").as_deref(),
         style.icon.as_deref(),
@@ -359,6 +429,27 @@ fn shared_style_fields_agree_between_legacy_and_v2() {
     );
 }
 
+/// The zero defaults stay off the v2 wire (optional fields, §4: absent
+/// means the client default) while legacy always carries the raw 0s.
+#[test]
+fn zero_title_position_and_shape_default_stay_off_the_v2_wire() {
+    let mut r = row("url", "button", Some("https://x.co"));
+    r.title_position = 0;
+    r.title_position2 = 0;
+    r.title_box_color = Some(String::new());
+    r.shape2 = 0;
+    let (legacy, tile) = both(&r);
+    let style = style_of(&tile);
+    assert_eq!(legacy["title_position"], 0);
+    assert_eq!(legacy["title_position2"], 0);
+    assert_eq!(legacy["shape2"], 0);
+    assert!(style.title_position.is_none());
+    assert!(style.title_position2.is_none());
+    // empty strings filter like every other optional color
+    assert!(style.title_box_color.is_none());
+    assert!(style.shape2.is_none());
+}
+
 #[test]
 fn state2_image_reaches_the_v2_wire() {
     let row = styled_row();
@@ -369,7 +460,7 @@ fn state2_image_reaches_the_v2_wire() {
     );
     let (assets, _dir) = store();
     let engine = StateEngine::new(120);
-    let tile = build_tile(&row, &assets, &engine);
+    let tile = build_tile(&row, &HashMap::new(), &assets, &engine);
     let hash = tile
         .manifest
         .asset_hash
@@ -484,6 +575,45 @@ fn spotify_now_playing_is_a_status_tile_on_both_wires() {
         .expect("status mode falls back to the kind");
     assert_eq!(state.channel, "ext.spotify-now-playing");
     assert_eq!(style_of(&tile).color.as_deref(), Some("#1db954"));
+}
+
+#[test]
+fn untitled_board_tile_shows_the_target_board_name() {
+    // MOB-09: an untitled board-switch tile shows the target board's
+    // name on the desktop (TileCell resolves it client-side from the
+    // command) but the v2 wire carried no command, so tablets showed an
+    // empty face. The legacy wire keeps the empty title (the stock
+    // client resolves the name itself); the v2 server resolves it, and
+    // both surfaces end up labeling the tile "Media".
+    let names = HashMap::from([(2, "Media".to_string())]);
+    let mut r = row("board", "button", Some(r#"{"id": 2}"#));
+    r.title = None;
+    let (legacy, tile) = both_with(&r, &names);
+    assert_eq!(legacy["title"].as_str(), None, "legacy title stays raw");
+    assert_eq!(style_of(&tile).title.as_deref(), Some("Media"));
+
+    // an explicit title always wins
+    let r = row("board", "button", Some(r#"{"id": 2}"#)); // title "T"
+    let (_, tile) = both_with(&r, &names);
+    assert_eq!(style_of(&tile).title.as_deref(), Some("T"));
+
+    // unknown target (board deleted): nothing to inject
+    let mut r = row("board", "button", Some(r#"{"id": 9}"#));
+    r.title = None;
+    let (_, tile) = both_with(&r, &names);
+    assert_eq!(style_of(&tile).title, None);
+
+    // junk command JSON: defensive, no injection
+    let mut r = row("board", "button", Some("not json"));
+    r.title = None;
+    let (_, tile) = both_with(&r, &names);
+    assert_eq!(style_of(&tile).title, None);
+
+    // non-board tiles never get a name injected
+    let mut r = row("url", "button", Some("https://x.co"));
+    r.title = None;
+    let (_, tile) = both_with(&r, &names);
+    assert_eq!(style_of(&tile).title, None);
 }
 
 fn store() -> (AssetStore, tempfile::TempDir) {

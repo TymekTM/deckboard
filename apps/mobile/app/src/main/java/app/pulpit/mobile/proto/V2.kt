@@ -209,6 +209,16 @@ data class Style(
     @SerialName("icon_color2") val iconColor2: String? = null,
     @SerialName("title_color") val titleColor: String? = null,
     @SerialName("title_color2") val titleColor2: String? = null,
+    // Round-4 parity wave: title pinning/box and the active-state shape.
+    // Absent keeps the client default (bottom-pinned, unboxed, resting
+    // shape); state 2 falls back to state 1 per field (§4).
+    /** Title pinning: 0 = bottom (omitted), 1 = center, 2 = top. */
+    @SerialName("title_position") val titlePosition: Int? = null,
+    @SerialName("title_position2") val titlePosition2: Int? = null,
+    @SerialName("title_box_color") val titleBoxColor: String? = null,
+    @SerialName("title_box_color2") val titleBoxColor2: String? = null,
+    /** Active-state shape (legacy shape2), stringified like [shape]. */
+    @SerialName("shape2") val shape2: String? = null,
 )
 
 @Serializable

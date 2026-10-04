@@ -74,6 +74,65 @@ class StatusDataTest {
     }
 
     @Test
+    fun planWindowsFilterDropsUntickedRowsAndRecomputesTheSummary() {
+        // MOB-06: params.windows (normalized server-side from the
+        // legacy "windows:5h,week" options token) drops the unticked
+        // window's rows, and the summary names the worst VISIBLE
+        // percent row instead of the producer's raw line
+        val payload = """
+            {
+              "rows": [
+                {"label": "PLANS", "state": "header"},
+                {"label": "GLM 5h", "value": "62.1M", "state": "ok", "percent": 62.4},
+                {"label": "GLM week", "value": "31.0M", "state": "ok", "percent": 31.2}
+              ],
+              "summary": "GLM week 31%"
+            }
+        """.trimIndent()
+        val tile = Tile(
+            id = 1,
+            kind = "list",
+            params = json.parseToJsonElement("""{"windows": ["5h"]}"""),
+        )
+        val data = statusData(tile, json.parseToJsonElement(payload))!!
+        assertEquals(listOf("PLANS", "GLM 5h"), data.rows.map { it.label })
+        assertEquals("GLM 5h 62%", data.summary)
+
+        // no filter on the wire: both rows stay and the summary
+        // recomputes from the worst visible percent row (the desktop
+        // recomputes whenever any percent row is visible, filter or not)
+        val plain = statusData(Tile(id = 1, kind = "list"), json.parseToJsonElement(payload))!!
+        assertEquals(3, plain.rows.size)
+        assertEquals("GLM 5h 62%", plain.summary)
+
+        // empty filter (both unticked): every plan row hides, headers
+        // stay, and with no visible percent row the producer summary is
+        // kept as-is
+        val both = Tile(
+            id = 1,
+            kind = "list",
+            params = json.parseToJsonElement("""{"windows": []}"""),
+        )
+        val filtered = statusData(both, json.parseToJsonElement(payload))!!
+        assertEquals(listOf("PLANS"), filtered.rows.map { it.label })
+        assertEquals("GLM week 31%", filtered.summary)
+    }
+
+    @Test
+    fun hideSummarySilencesTheLineEvenWhenRecomputing() {
+        val tile = Tile(id = 1, kind = "list")
+        val payload = """
+            {
+              "rows": [{"label": "GLM 5h", "state": "ok", "percent": 62.4}],
+              "summary": "GLM 5h 62%",
+              "hide_summary": true
+            }
+        """.trimIndent()
+        val data = statusData(tile, json.parseToJsonElement(payload))!!
+        assertEquals("", data.summary)
+    }
+
+    @Test
     fun laneProviderMapsGlmToZcode() {
         assertEquals("zcode", laneProvider("GLM 5h"))
         assertEquals("claude", laneProvider("Claude week"))

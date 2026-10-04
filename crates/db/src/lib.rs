@@ -54,6 +54,35 @@ pub struct BoardRow {
     pub converted: i64,
 }
 
+/// Largest board grid any surface will build. The import path rejects
+/// wider/taller boards outright; the same bound belongs in the editor
+/// UI and both wire builders (audit item C4). One definition here, so
+/// the import bound and the wire clamps can never drift apart
+/// (`pulpit_backend` re-exports it).
+pub const MAX_BOARD_DIM: i64 = 32;
+
+/// Pull a tile's placement back inside a W*H board grid (DESK-03):
+/// size first (at least one cell, at most the whole board), then the
+/// origin (>= 0, leaving room for the size). The order matters - an
+/// origin-first clamp can still leave the tile overhanging when the
+/// board shrank below the tile's size. Both dimensions are clamped to
+/// [`MAX_BOARD_DIM`] first, so a junk board row cannot stretch a tile
+/// back out.
+pub fn clamp_placement(
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    width: i64,
+    height: i64,
+) -> (i64, i64, i64, i64) {
+    let width = width.clamp(1, MAX_BOARD_DIM);
+    let height = height.clamp(1, MAX_BOARD_DIM);
+    let w = w.clamp(1, width);
+    let h = h.clamp(1, height);
+    (x.clamp(0, width - w), y.clamp(0, height - h), w, h)
+}
+
 /// Row of the `Shortcuts` table (one macro button/slider/wheel). Serde shape
 /// matches the `macros` entries of a `.boardjson` export.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -328,28 +357,33 @@ impl Db {
         Ok(out)
     }
 
-    /// Persist every stored column of the board row.
+    /// Persist every stored column of the board row. A resize runs in one
+    /// transaction with a re-clamp of the board's tiles (DESK-03): tiles
+    /// left outside the new grid are dropped by the legacy wire's pro
+    /// filter and hang off-canvas on the v2 one.
     pub fn update_board(&self, board: &BoardRow) -> Result<()> {
-        self.conn.execute(
-            "UPDATE Boards SET name = ?1, background = ?2, layout = ?3, image = ?4, \
-             sort = ?5, type = ?6, args = ?7, \"order\" = ?8, width = ?9, height = ?10, \
-             converted = ?11 WHERE id = ?12",
-            rusqlite::params![
-                board.name,
-                board.background,
-                board.layout,
-                board.image,
-                board.sort,
-                board.kind,
-                board.args,
-                board.order,
-                board.width,
-                board.height,
-                board.converted,
-                board.id,
-            ],
-        )?;
-        Ok(())
+        self.with_transaction(|tx| {
+            tx.conn.execute(
+                "UPDATE Boards SET name = ?1, background = ?2, layout = ?3, image = ?4, \
+                 sort = ?5, type = ?6, args = ?7, \"order\" = ?8, width = ?9, height = ?10, \
+                 converted = ?11 WHERE id = ?12",
+                rusqlite::params![
+                    board.name,
+                    board.background,
+                    board.layout,
+                    board.image,
+                    board.sort,
+                    board.kind,
+                    board.args,
+                    board.order,
+                    board.width,
+                    board.height,
+                    board.converted,
+                    board.id,
+                ],
+            )?;
+            tx.clamp_board_tiles(board.id, board.width, board.height)
+        })
     }
 
     /// Delete the board together with its shortcuts (the original leaves
@@ -487,6 +521,40 @@ impl DbTx<'_> {
     /// Insert a button row; `row.id` is ignored, returns the new id.
     pub fn insert_button(&self, row: &ButtonRow) -> Result<i64> {
         insert_button_on(self.conn, row)
+    }
+
+    /// Pull every tile of `board_id` back inside a width*height grid
+    /// (DESK-03, [`clamp_placement`]). Rows that already fit are left
+    /// untouched, so a rename does not rewrite the whole board.
+    pub fn clamp_board_tiles(&self, board_id: i64, width: i64, height: i64) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, COALESCE(x, 0), COALESCE(y, 0), COALESCE(w, 1), COALESCE(h, 1) \
+             FROM Shortcuts WHERE board_id = ?1",
+        )?;
+        let outside: Vec<(i64, i64, i64, i64, i64)> = stmt
+            .query_map([board_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .filter_map(|row| {
+                let (id, x, y, w, h) = row.ok()?;
+                let (cx, cy, cw, ch) = clamp_placement(x, y, w, h, width, height);
+                ((cx, cy, cw, ch) != (x, y, w, h)).then_some((id, cx, cy, cw, ch))
+            })
+            .collect();
+        drop(stmt);
+        for (id, x, y, w, h) in outside {
+            self.conn.execute(
+                "UPDATE Shortcuts SET x = ?1, y = ?2, w = ?3, h = ?4 WHERE id = ?5",
+                rusqlite::params![x, y, w, h, id],
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -1058,6 +1126,37 @@ mod tests {
         db.delete_board(a).unwrap();
         assert!(db.get_boards().unwrap().iter().all(|b| b.id != a));
         assert!(db.get_buttons_by_board(a).unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_board_clamps_tiles_to_the_shrunk_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+        let board = db.insert_board("B", "#2c3e50", 8, 8).unwrap();
+        let fits = sample_button(board, 1, 1);
+        let mut hangs = sample_button(board, 5, 3);
+        hangs.w = 2;
+        let mut huge = sample_button(board, 2, 2);
+        huge.w = 20;
+        huge.h = 2;
+        let fits_id = db.insert_button(&fits).unwrap();
+        let hangs_id = db.insert_button(&hangs).unwrap();
+        let huge_id = db.insert_button(&huge).unwrap();
+
+        let mut shrunk = db.get_board(board).unwrap().unwrap();
+        shrunk.width = 4;
+        shrunk.height = 3;
+        db.update_board(&shrunk).unwrap();
+
+        let tiles = db.get_buttons_by_board(board).unwrap();
+        let by_id = |id: i64| tiles.iter().find(|t| t.id == id).unwrap();
+        let place = |t: &ButtonRow| (t.x, t.y, t.w, t.h);
+        // a tile that already fits is left untouched
+        assert_eq!(place(by_id(fits_id)), (Some(1), Some(1), 2, 1));
+        // origin pulled back inside (x <= W-w, y <= H-h)
+        assert_eq!(place(by_id(hangs_id)), (Some(2), Some(2), 2, 1));
+        // a tile larger than the grid shrinks to it
+        assert_eq!(place(by_id(huge_id)), (Some(0), Some(1), 4, 2));
     }
 
     #[test]

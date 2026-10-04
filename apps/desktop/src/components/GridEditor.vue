@@ -154,8 +154,11 @@ function startDrag(tile, mode, event) {
       const y = clamp(tile.y + d.cy, 0, Math.max(0, props.board.height - tile.h));
       if (x !== tile.x || y !== tile.y) emit("tile-moved", tile, x, y, tile.w, tile.h);
     } else {
-      const w = clamp(tile.w + d.cw, 1, props.board.width - tile.x);
-      const h = clamp(tile.h + d.ch, 1, props.board.height - tile.y);
+      // max(1, ...) keeps the floor >= the clamp's min: on a tile dragged
+      // out of a shrunken grid, width - x can go <= 0 and the old clamp
+      // happily persisted w = -1 (DESK-03)
+      const w = clamp(tile.w + d.cw, 1, Math.max(1, props.board.width - tile.x));
+      const h = clamp(tile.h + d.ch, 1, Math.max(1, props.board.height - tile.y));
       if (w !== tile.w || h !== tile.h) emit("tile-moved", tile, tile.x, tile.y, w, h);
     }
   };

@@ -4,23 +4,17 @@
 //! derives state channels and converts legacy data-URL images into the
 //! asset store.
 
-use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_db::{BoardRow, ButtonRow, MAX_BOARD_DIM};
 use pulpit_legacy::{Backend, Mapper};
 use pulpit_proto::{
     background_from_legacy, Board, Interaction, Placement, StateRef, StateShape, Style, Tile,
     WidgetKind, WidgetManifest,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::assets::AssetStore;
 use crate::state::{ext_channel, StateEngine};
-
-/// Defensive ceiling for board dimensions on the wire, matching
-/// `pulpit_backend::MAX_BOARD_DIM` (the import side's bound; a local
-/// constant because the backend crate is not a dependency here). v2
-/// clients lay out a W*H grid from these numbers, so a junk row must
-/// not reach them at stored size (audit C4).
-const MAX_BOARD_DIM: i64 = 32;
 
 /// All boards with their tiles, in legacy `order`.
 pub fn build_boards(
@@ -31,6 +25,7 @@ pub fn build_boards(
     // one grouped read for every board's shortcuts (was: one SELECT per
     // board on each rebuild)
     let buttons = backend.all_buttons_by_board();
+    let names = board_names(backend);
     backend
         .get_boards()
         .iter()
@@ -39,6 +34,7 @@ pub fn build_boards(
             build_board(
                 board,
                 rows.map(Vec::as_slice).unwrap_or(&[]),
+                &names,
                 assets,
                 engine,
             )
@@ -46,10 +42,23 @@ pub fn build_boards(
         .collect()
 }
 
+/// id -> name of every board. Board-switch tiles with no title of their
+/// own display the target's name; the desktop touch mode and the stock
+/// client resolve it client-side from the command, but the v2 wire
+/// carries no command, so the server resolves it here (MOB-09).
+pub fn board_names(backend: &dyn Backend) -> HashMap<i64, String> {
+    backend
+        .get_boards()
+        .into_iter()
+        .map(|board| (board.id, board.name))
+        .collect()
+}
+
 /// One board row plus its shortcuts -> one protocol board.
 pub fn build_board(
     board: &BoardRow,
     buttons: &[ButtonRow],
+    names: &HashMap<i64, String>,
     assets: &AssetStore,
     engine: &StateEngine,
 ) -> Board {
@@ -62,9 +71,35 @@ pub fn build_board(
         background: board_background(board, assets),
         tiles: buttons
             .iter()
-            .map(|row| build_tile(row, assets, engine))
+            .map(|row| {
+                let mut tile = build_tile(row, names, assets, engine);
+                clamp_tile_to_board(&mut tile, board.width, board.height);
+                tile
+            })
             .collect(),
     }
+}
+
+/// Pull one built tile's placement back inside its board's grid (DESK-03).
+/// Wire-side defense on top of the DB clamp in `update_board`: rows written
+/// by older builds still carry off-grid placements, which the stock legacy
+/// client filters out and a v2 grid would render off-canvas. Shared with
+/// the `tile-set` op path so deltas obey the same bound.
+pub fn clamp_tile_to_board(tile: &mut Tile, board_width: i64, board_height: i64) {
+    let (x, y, w, h) = pulpit_db::clamp_placement(
+        i64::from(tile.placement.x),
+        i64::from(tile.placement.y),
+        i64::from(tile.placement.w),
+        i64::from(tile.placement.h),
+        board_width,
+        board_height,
+    );
+    tile.placement = Placement {
+        x: x as u32,
+        y: y as u32,
+        w: w as u32,
+        h: h as u32,
+    };
 }
 
 fn board_background(board: &BoardRow, assets: &AssetStore) -> Option<pulpit_proto::Background> {
@@ -78,12 +113,29 @@ fn board_background(board: &BoardRow, assets: &AssetStore) -> Option<pulpit_prot
     background_from_legacy(&board.background)
 }
 
+/// The tile's options column parsed once (SWEEP-13): `build_tile` and the
+/// per-event paths all want the same JSON, and a non-JSON column (the
+/// legacy `windows:` dialect) reads as Null.
+fn parse_options(row: &ButtonRow) -> Value {
+    row.options
+        .as_deref()
+        .and_then(|o| serde_json::from_str(o).ok())
+        .unwrap_or(Value::Null)
+}
+
 /// One row -> one tile. The legacy payload supplies resolved style fields
 /// and the watch key (`extra`); state channels are namespaced `ext.<key>`
 /// so pushes land on the channel the tile reads.
-pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) -> Tile {
+pub fn build_tile(
+    row: &ButtonRow,
+    names: &HashMap<i64, String>,
+    assets: &AssetStore,
+    engine: &StateEngine,
+) -> Tile {
     let legacy = Mapper::new().shortcut_payload(row);
-    let (kind, interactions) = widget_kind(row, &legacy);
+    let mut params = parse_options(row);
+    let (kind, interactions) =
+        widget_kind_for(row, legacy.get("app").and_then(Value::as_str), &params);
     let state = state_ref(row, &legacy, engine);
     let asset_hash = row
         .img
@@ -97,11 +149,6 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
         .as_deref()
         .filter(|img| !img.is_empty())
         .and_then(|img| assets.import_data_url(img));
-    let mut params: Value = row
-        .options
-        .as_deref()
-        .and_then(|o| serde_json::from_str(o).ok())
-        .unwrap_or(Value::Null);
     apply_implicit_params(row, &mut params);
 
     Tile {
@@ -117,7 +164,7 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
             params,
             state,
             interactions,
-            style: Some(style(row, &legacy)),
+            style: Some(style(row, &legacy, names)),
             web_package: None,
             asset_hash,
             asset_hash2,
@@ -131,50 +178,99 @@ pub fn build_tile(row: &ButtonRow, assets: &AssetStore, engine: &StateEngine) ->
 /// only the `app` marker feeds the kind decision.
 pub fn allowed_interactions(row: &ButtonRow) -> Vec<Interaction> {
     let app = Mapper::new().app_value(row);
-    widget_kind_for(row, app.as_deref()).1
+    widget_kind_for(row, app.as_deref(), &parse_options(row)).1
 }
 
 /// `params.hold.repeat: {delay_ms, interval_ms}` - the server-side
-/// hold-to-repeat configuration.
+/// hold-to-repeat configuration. Both values are clamped to
+/// 50..=60 000 ms (NET-06): an imported options JSON is free-form, and
+/// an unbounded `interval_ms: 1` would run the tile's action ~1000x/s
+/// for the whole 120 s hold cap, each tick on the blocking pool.
 pub fn hold_repeat_config(params: &Value) -> Option<(u64, u64)> {
+    const MIN_MS: u64 = 50;
+    const MAX_MS: u64 = 60_000;
     let repeat = params.get("hold")?.get("repeat")?;
     let delay_ms = repeat.get("delay_ms")?.as_u64()?;
     let interval_ms = repeat.get("interval_ms")?.as_u64()?;
-    (delay_ms > 0 && interval_ms > 0).then_some((delay_ms, interval_ms))
+    // 0 stays "not configured" (the old semantic); anything in between
+    // is pulled inside the bounds instead of trusted.
+    (delay_ms > 0 && interval_ms > 0).then_some((
+        delay_ms.clamp(MIN_MS, MAX_MS),
+        interval_ms.clamp(MIN_MS, MAX_MS),
+    ))
 }
 
 /// Legacy semantics that live outside the widget manifest get an
 /// explicit params hint here, so clients never need to know legacy type
-/// strings: the clock display tile announces itself as a clock widget.
+/// strings: the clock display tile announces itself as a clock widget,
+/// and the plan tile's `windows:` option token is normalized into a
+/// params array.
 fn apply_implicit_params(row: &ButtonRow, params: &mut Value) {
-    if row.kind != "clock-display-time" {
-        return;
+    if row.kind == "clock-display-time" {
+        if !params.is_object() {
+            *params = Value::Object(serde_json::Map::new());
+        }
+        let obj = params.as_object_mut().expect("just made an object");
+        obj.insert("widget".into(), Value::String("clock".into()));
+        let format = if row.command.as_deref() == Some("clock-12h") {
+            "12h"
+        } else {
+            "24h"
+        };
+        obj.insert("clock_format".into(), Value::String(format.into()));
     }
-    if !params.is_object() {
-        *params = Value::Object(serde_json::Map::new());
+    // The plan window filter rides the options column in a legacy
+    // dialect ("windows:5h,week") that JSON parsing drops on the floor
+    // (MOB-06): lift it into params.windows so v2 clients can filter
+    // rows without knowing the dialect. A params key that is already
+    // there wins.
+    if let Some(windows) = windows_filter(row.options.as_deref()) {
+        if !params.is_object() {
+            *params = Value::Object(serde_json::Map::new());
+        }
+        let obj = params.as_object_mut().expect("just made an object");
+        obj.entry("windows").or_insert(Value::Array(
+            windows.into_iter().map(Value::String).collect(),
+        ));
     }
-    let obj = params.as_object_mut().expect("just made an object");
-    obj.insert("widget".into(), Value::String("clock".into()));
-    let format = if row.command.as_deref() == Some("clock-12h") {
-        "12h"
-    } else {
-        "24h"
-    };
-    obj.insert("clock_format".into(), Value::String(format.into()));
+}
+
+/// The `windows:5h,week` token out of the legacy semicolon-separated
+/// options dialect (the editor's plan-tile checkboxes; no token = both
+/// windows shown). `Some(windows)` lists the windows the user kept;
+/// `Some([])` means both were unticked, so every plan row hides.
+pub fn windows_filter(options: Option<&str>) -> Option<Vec<String>> {
+    let token = options?
+        .split(';')
+        .find(|part| part.starts_with("windows:"))?;
+    Some(
+        token["windows:".len()..]
+            .split(',')
+            .map(str::trim)
+            .filter(|window| !window.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// Widget kind from the legacy `mode`/`app` columns: rendering modes map
 /// 1:1, custom-value buttons are toggles, everything else is a button.
+/// Production paths call [`widget_kind_for`] directly; this wrapper
+/// keeps the tests reading the kind off a legacy payload.
+#[cfg(test)]
 fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>) {
-    widget_kind_for(row, legacy.get("app").and_then(Value::as_str))
+    widget_kind_for(
+        row,
+        legacy.get("app").and_then(Value::as_str),
+        &parse_options(row),
+    )
 }
 
-fn widget_kind_for(row: &ButtonRow, app: Option<&str>) -> (WidgetKind, Vec<Interaction>) {
-    let params: Value = row
-        .options
-        .as_deref()
-        .and_then(|o| serde_json::from_str(o).ok())
-        .unwrap_or(Value::Null);
+fn widget_kind_for(
+    row: &ButtonRow,
+    app: Option<&str>,
+    params: &Value,
+) -> (WidgetKind, Vec<Interaction>) {
     let (kind, mut interactions) = match row.mode.as_str() {
         "slider" => (WidgetKind::Slider, vec![Interaction::Slide]),
         "knob" => (WidgetKind::Knob, vec![Interaction::Slide]),
@@ -189,7 +285,7 @@ fn widget_kind_for(row: &ButtonRow, app: Option<&str>) -> (WidgetKind, Vec<Inter
             // press pair for the server-side repeat; every other button
             // fires once on release.
             let press_pair = matches!(row.kind.as_str(), "key" | "advance-key")
-                || hold_repeat_config(&params).is_some();
+                || hold_repeat_config(params).is_some();
             let interactions = if press_pair {
                 vec![
                     Interaction::Tap,
@@ -207,7 +303,7 @@ fn widget_kind_for(row: &ButtonRow, app: Option<&str>) -> (WidgetKind, Vec<Inter
     // defaults. Slider/knob tiles keep the drag surface for the value
     // only. Deduped so a hand-edited `["tap"]` cannot double-declare.
     if !matches!(row.mode.as_str(), "slider" | "knob") {
-        for gesture in declared_gestures(&params) {
+        for gesture in declared_gestures(params) {
             if !interactions.contains(&gesture) {
                 interactions.push(gesture);
             }
@@ -268,18 +364,23 @@ fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<St
     Some(StateRef { channel, shape })
 }
 
-fn style(row: &ButtonRow, legacy: &Value) -> Style {
+fn style(row: &ButtonRow, legacy: &Value, names: &HashMap<i64, String>) -> Style {
     let color = legacy.get("color").and_then(Value::as_str);
     let unicode = legacy.get("unicode").and_then(Value::as_str);
     let unicode2 = legacy.get("unicode2").and_then(Value::as_str);
     let prefix = legacy.get("prefix").and_then(Value::as_str);
     Style {
         color: non_empty(color),
-        color2: non_empty(row.color2.as_deref()),
+        // Unset color2 falls back to the TYPE default (the same chain the
+        // legacy mapper resolves via the style table), not to the tile's
+        // own resting color: both wires must show the same active-state
+        // color, and the §4 client fallback stays a last resort for
+        // types without a default.
+        color2: non_empty(legacy.get("color2").and_then(Value::as_str)),
         icon: non_empty(unicode),
         icon2: non_empty(unicode2),
         icon_family: non_empty(prefix),
-        title: non_empty(row.title.as_deref()),
+        title: tile_title(row, names),
         // Legacy shape column is an int (0 = default); pass non-defaults
         // through so the client can render them.
         shape: (row.shape != 0).then(|| row.shape.to_string()),
@@ -292,11 +393,48 @@ fn style(row: &ButtonRow, legacy: &Value) -> Style {
         icon_color2: non_empty(row.icon_color2.as_deref()),
         title_color: non_empty(row.title_color.as_deref()),
         title_color2: non_empty(row.title_color2.as_deref()),
+        // Title pinning + box color and the active-state shape: edited
+        // against the same DB columns the legacy mapper reads (parity
+        // oracle: crates/v2/tests/parity.rs). Zero is the legacy default
+        // for positions/shapes and stays off the wire; the §4 per-field
+        // state-2 fallback covers the rest client-side.
+        title_position: non_zero_u8(row.title_position),
+        title_position2: non_zero_u8(row.title_position2),
+        title_box_color: non_empty(row.title_box_color.as_deref()),
+        title_box_color2: non_empty(row.title_box_color2.as_deref()),
+        shape2: (row.shape2 != 0).then(|| row.shape2.to_string()),
     }
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
     value.filter(|v| !v.is_empty()).map(str::to_string)
+}
+
+/// The tile's title: the row's own title, else (for board-switch tiles)
+/// the target board's name. The legacy wire leaves the title empty and
+/// lets the client resolve the name from the command; the v2 wire
+/// carries no command, so the server resolves it (MOB-09). An unknown
+/// target (deleted board) or junk command yields no injected title.
+fn tile_title(row: &ButtonRow, names: &HashMap<i64, String>) -> Option<String> {
+    if let Some(title) = non_empty(row.title.as_deref()) {
+        return Some(title);
+    }
+    if row.kind != "board" {
+        return None;
+    }
+    row.command
+        .as_deref()
+        .and_then(|c| serde_json::from_str::<Value>(c).ok())
+        .and_then(|cmd| cmd.get("id").and_then(Value::as_i64))
+        .and_then(|id| names.get(&id))
+        .filter(|name| !name.is_empty())
+        .cloned()
+}
+
+/// Legacy int column -> optional wire number, dropping the 0 default
+/// (and junk that does not fit a u8).
+fn non_zero_u8(value: i64) -> Option<u8> {
+    u8::try_from(value).ok().filter(|v| *v != 0)
 }
 
 #[cfg(test)]
@@ -376,7 +514,7 @@ mod tests {
         // answers with UNSUPPORTED_INTERACTION
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         assert_eq!(tile.manifest.interactions, set);
     }
 
@@ -392,7 +530,12 @@ mod tests {
     fn vol_mute_maps_to_toggle_with_channel() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("vol", "button", Some("vol_mute")), &assets, &engine);
+        let tile = build_tile(
+            &row("vol", "button", Some("vol_mute")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(
             tile.placement,
             Placement {
@@ -447,7 +590,7 @@ mod tests {
         // v2 manifest: style is derived from that same legacy payload.
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         let style = tile.manifest.style.as_ref().unwrap();
         assert_eq!(style.color.as_deref(), Some("#34495e"));
         assert_eq!(style.icon_family.as_deref(), Some("fas"));
@@ -462,7 +605,12 @@ mod tests {
     fn plain_button_press_interactions() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("key", "button", Some("CTRL + K")), &assets, &engine);
+        let tile = build_tile(
+            &row("key", "button", Some("CTRL + K")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(tile.manifest.kind, WidgetKind::Button);
         assert_eq!(
             tile.manifest.interactions,
@@ -479,7 +627,12 @@ mod tests {
     fn graph_mode_becomes_series_channel() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("si-cpu", "graph", Some("cpu-key")), &assets, &engine);
+        let tile = build_tile(
+            &row("si-cpu", "graph", Some("cpu-key")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(tile.manifest.kind, WidgetKind::Graph);
         let state = tile.manifest.state.unwrap();
         assert_eq!(state.channel, "ext.cpu-key"); // raw command wins when set
@@ -491,7 +644,12 @@ mod tests {
     fn key_and_hold_buttons_declare_press_pair() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("key", "button", Some("A")), &assets, &engine);
+        let tile = build_tile(
+            &row("key", "button", Some("A")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(
             tile.manifest.interactions,
             vec![
@@ -502,7 +660,7 @@ mod tests {
         );
         let mut r = row("vol", "button", Some("vol_down"));
         r.options = Some(r#"{"hold":{"repeat":{"delay_ms":400,"interval_ms":120}}}"#.into());
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         assert!(tile
             .manifest
             .interactions
@@ -515,10 +673,42 @@ mod tests {
         let engine = StateEngine::new(120);
         let mut r = row("clock-display-time", "button", Some("clock-12h"));
         r.title = None;
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         let params = tile.manifest.params;
         assert_eq!(params["widget"], "clock");
         assert_eq!(params["clock_format"], "12h");
+    }
+
+    #[test]
+    fn plan_windows_token_reaches_params_as_an_array() {
+        // the legacy "windows:5h,week" options dialect is not JSON, so a
+        // plain parse drops it; it must be lifted into params (MOB-06)
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let mut r = row("ai-plan-limits", "status", None);
+        r.options = Some("windows: 5h, week".into());
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
+        assert_eq!(
+            tile.manifest.params["windows"],
+            serde_json::json!(["5h", "week"])
+        );
+
+        // no token = no params.windows key (both windows shown)
+        let mut r = row("ai-plan-limits", "status", None);
+        r.options = Some("{}".into());
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
+        assert!(tile.manifest.params.get("windows").is_none());
+
+        // token present with everything unticked = empty filter, still
+        // on the wire (hides every plan row)
+        assert_eq!(
+            windows_filter(Some("other:x;windows:")),
+            Some(Vec::<String>::new())
+        );
+        assert_eq!(windows_filter(None), None);
+        assert_eq!(windows_filter(Some("windows:5h")), Some(vec!["5h".into()]));
+        // the token must start a part (a "xwindows:" mid-part is not one)
+        assert_eq!(windows_filter(Some("xwindows:5h")), None);
     }
 
     #[test]
@@ -529,7 +719,7 @@ mod tests {
         r.icon = Some("headphones".into());
         r.icon2 = Some("deaf".into());
         r.color2 = Some("#ED4245".into());
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         let style = tile.manifest.style.unwrap();
         assert_eq!(style.icon_family.as_deref(), Some("fas"));
         assert!(
@@ -543,12 +733,22 @@ mod tests {
     fn slider_and_custom_value_kinds() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("speaker-volume", "slider", None), &assets, &engine);
+        let tile = build_tile(
+            &row("speaker-volume", "slider", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         assert_eq!(tile.manifest.kind, WidgetKind::Slider);
         assert_eq!(tile.manifest.interactions, vec![Interaction::Slide]);
         assert_eq!(tile.manifest.state.unwrap().channel, "ext.speaker-volume");
 
-        let tile = build_tile(&row("toggle-microphone", "button", None), &assets, &engine);
+        let tile = build_tile(
+            &row("toggle-microphone", "button", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         // toggle-microphone resolves through the discord extension input
         // (custom-value app), but without that input registered it stays
         // a button - extension inputs are registered by the host.
@@ -562,7 +762,7 @@ mod tests {
         let mut r = row("url", "button", Some("https://x.co"));
         let png = format!("data:image/png;base64,{}", use_base64(b"img-bytes"));
         r.img = Some(png);
-        let tile = build_tile(&r, &assets, &engine);
+        let tile = build_tile(&r, &HashMap::new(), &assets, &engine);
         assert!(tile.manifest.asset_hash.is_some());
         assert_eq!(
             assets
@@ -578,7 +778,12 @@ mod tests {
         // with no command must still get its channel declared
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
-        let tile = build_tile(&row("ai-plan-limits", "status", Some("")), &assets, &engine);
+        let tile = build_tile(
+            &row("ai-plan-limits", "status", Some("")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
         let state = tile.manifest.state.expect("type channel for status mode");
         assert_eq!(state.channel, "ext.ai-plan-limits");
         assert_eq!(state.shape, StateShape::Scalar);
@@ -593,13 +798,108 @@ mod tests {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
         let b = board_row(1_000_000, 1_000_000);
-        let board = build_board(&b, &[], &assets, &engine);
+        let board = build_board(&b, &[], &HashMap::new(), &assets, &engine);
         // v2 clients lay out a W*H grid from these numbers: a junk row
         // must not reach them at full size (audit C4)
         assert_eq!(board.width, 32);
         assert_eq!(board.height, 32);
-        let degenerate = build_board(&board_row(-5, 0), &[], &assets, &engine);
+        let degenerate = build_board(&board_row(-5, 0), &[], &HashMap::new(), &assets, &engine);
         assert_eq!((degenerate.width, degenerate.height), (1, 1));
+    }
+
+    #[test]
+    fn tile_placements_are_clamped_to_the_board_grid() {
+        // DESK-03: rows stored before a board shrink still reach the
+        // wire; the stock legacy client drops an off-grid tile outright
+        // and a v2 grid would render it off-canvas
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let b = board_row(4, 3);
+        let mut hangs = row("url", "button", Some("https://example.com"));
+        hangs.x = Some(5);
+        hangs.y = Some(3);
+        let mut huge = row("url", "button", Some("https://example.com"));
+        huge.id = 11;
+        huge.x = Some(2);
+        huge.y = Some(2);
+        huge.w = 20;
+        huge.h = 2;
+        let board = build_board(&b, &[hangs, huge], &HashMap::new(), &assets, &engine);
+        // origin pulled back inside (x <= W-w, y <= H-h)
+        assert_eq!(
+            board.tiles[0].placement,
+            Placement {
+                x: 2,
+                y: 2,
+                w: 2,
+                h: 1
+            }
+        );
+        // a tile larger than the grid shrinks to it
+        assert_eq!(
+            board.tiles[1].placement,
+            Placement {
+                x: 0,
+                y: 1,
+                w: 4,
+                h: 2
+            }
+        );
+    }
+
+    #[test]
+    fn build_boards_labels_untitled_board_switch_tiles() {
+        // the production snapshot path: an untitled `board` tile on the
+        // home board must carry the target board's name in style.title
+        // (MOB-09 - the v2 wire carries no command for clients to
+        // resolve it themselves)
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let mut switch = row("board", "button", Some(r#"{"id": 2}"#));
+        switch.title = None;
+        switch.board_id = 7;
+        let mut home = board_row(4, 3);
+        home.id = 7;
+        home.name = "Home".into();
+        let mut media = board_row(2, 2);
+        media.id = 2;
+        media.name = "Media".into();
+        let backend = NamesBackend {
+            boards: vec![home, media],
+            buttons: vec![switch],
+        };
+        let boards = build_boards(&backend, &assets, &engine);
+        assert_eq!(boards[0].tiles.len(), 1);
+        let style = boards[0].tiles[0].manifest.style.as_ref().unwrap();
+        assert_eq!(style.title.as_deref(), Some("Media"));
+    }
+
+    /// Minimal Backend for the board-name wiring test: boards plus their
+    /// rows, everything else inert.
+    struct NamesBackend {
+        boards: Vec<pulpit_db::BoardRow>,
+        buttons: Vec<ButtonRow>,
+    }
+
+    impl Backend for NamesBackend {
+        fn get_boards(&self) -> Vec<pulpit_db::BoardRow> {
+            self.boards.clone()
+        }
+        fn get_board(&self, board_id: i64) -> Option<pulpit_db::BoardRow> {
+            self.boards.iter().find(|b| b.id == board_id).cloned()
+        }
+        fn get_buttons_by_board(&self, board_id: i64) -> Vec<ButtonRow> {
+            self.buttons
+                .iter()
+                .filter(|b| b.board_id == board_id)
+                .cloned()
+                .collect()
+        }
+        fn get_button(&self, _id: i64) -> Option<ButtonRow> {
+            None
+        }
+        fn exec(&self, _button: ButtonRow, _tap_start: bool, _sink: &mut dyn pulpit_actions::EventSink) {}
+        fn slider(&self, _button: ButtonRow, _value: f64) {}
     }
 
     fn board_row(width: i64, height: i64) -> pulpit_db::BoardRow {

@@ -446,12 +446,32 @@ impl PairRequest {
     }
 }
 
-#[derive(Default)]
 pub struct PairRequests {
     current: std::sync::Mutex<Option<std::sync::Arc<PairRequest>>>,
+    /// How long a request holds the slot: `PAIR_CODE_TTL` in production.
+    /// A field so tests can shorten it and exercise the expiry path
+    /// without waiting five minutes.
+    ttl: Duration,
+}
+
+impl Default for PairRequests {
+    fn default() -> Self {
+        PairRequests::with_ttl(PAIR_CODE_TTL)
+    }
 }
 
 impl PairRequests {
+    pub fn with_ttl(ttl: Duration) -> PairRequests {
+        PairRequests {
+            current: std::sync::Mutex::new(None),
+            ttl,
+        }
+    }
+
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
     /// Registers a new request; `None` when one is already live (the
     /// caller answers HTTP 409).
     pub fn begin(
@@ -462,7 +482,7 @@ impl PairRequests {
     ) -> Option<std::sync::Arc<PairRequest>> {
         let mut current = self.current.lock().expect("pair requests poisoned");
         if let Some(existing) = current.as_ref() {
-            if existing.age() < PAIR_CODE_TTL {
+            if existing.age() < self.ttl {
                 return None;
             }
         }
