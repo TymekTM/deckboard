@@ -175,12 +175,22 @@ pub fn allowed_interactions(row: &ButtonRow) -> Vec<Interaction> {
 }
 
 /// `params.hold.repeat: {delay_ms, interval_ms}` - the server-side
-/// hold-to-repeat configuration.
+/// hold-to-repeat configuration. Both values are clamped to
+/// 50..=60 000 ms (NET-06): an imported options JSON is free-form, and
+/// an unbounded `interval_ms: 1` would run the tile's action ~1000x/s
+/// for the whole 120 s hold cap, each tick on the blocking pool.
 pub fn hold_repeat_config(params: &Value) -> Option<(u64, u64)> {
+    const MIN_MS: u64 = 50;
+    const MAX_MS: u64 = 60_000;
     let repeat = params.get("hold")?.get("repeat")?;
     let delay_ms = repeat.get("delay_ms")?.as_u64()?;
     let interval_ms = repeat.get("interval_ms")?.as_u64()?;
-    (delay_ms > 0 && interval_ms > 0).then_some((delay_ms, interval_ms))
+    // 0 stays "not configured" (the old semantic); anything in between
+    // is pulled inside the bounds instead of trusted.
+    (delay_ms > 0 && interval_ms > 0).then_some((
+        delay_ms.clamp(MIN_MS, MAX_MS),
+        interval_ms.clamp(MIN_MS, MAX_MS),
+    ))
 }
 
 /// Legacy semantics that live outside the widget manifest get an

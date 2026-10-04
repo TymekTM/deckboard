@@ -744,6 +744,16 @@ mod tests {
             None
         );
         assert_eq!(parse("{}"), None);
+        // NET-06: an imported options JSON is free-form - junk rates are
+        // clamped into 50..=60000 ms instead of trusted
+        assert_eq!(
+            parse(r#"{"hold":{"repeat":{"delay_ms":1,"interval_ms":1}}}"#),
+            Some((50, 50))
+        );
+        assert_eq!(
+            parse(r#"{"hold":{"repeat":{"delay_ms":999999,"interval_ms":120}}}"#),
+            Some((60000, 120))
+        );
     }
 
     #[test]

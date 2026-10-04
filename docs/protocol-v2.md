@@ -352,6 +352,9 @@ Client → server, one frame per user gesture:
   server-side loop re-executing the tile's command (first run immediately,
   then after `delay_ms`, then every `interval_ms`); `press-end` stops it.
   A repeat loop is capped at 120 s and released when the connection dies.
+  Both config values are clamped server-side into 50..=60000 ms (added
+  2026-10, round 4): the options JSON is free-form, and an unbounded
+  interval would run the command ~1000x/s for the whole cap.
   Push-to-talk-style holds (command active while held, no repeat) run from
   `press-start` to `press-end` with no timeout. Key semantics stay with
   the command engine (`press-start` = legacy `isTapStart: true`).
