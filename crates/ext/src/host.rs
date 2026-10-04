@@ -5,7 +5,7 @@
 //! registrations) is drained from JS globals after every eval. This avoids
 //! holding GC'd JS objects on the Rust side.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use boa_engine::{Context, JsResult, JsValue, NativeFunction, Source};
@@ -37,7 +37,6 @@ pub enum HostEvent {
 
 pub struct ExtRuntime {
     context: Context,
-    root: PathBuf,
     pub package: String,
     pub name: String,
     /// action `value` strings this extension handles
@@ -113,7 +112,6 @@ impl ExtRuntime {
 
         let mut rt = ExtRuntime {
             context,
-            root: root.to_path_buf(),
             package: package.to_string(),
             name,
             actions,
