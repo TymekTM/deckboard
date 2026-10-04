@@ -50,12 +50,15 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import app.pulpit.mobile.proto.ChannelInfo
 import app.pulpit.mobile.proto.Tile
 import kotlinx.coroutines.delay
@@ -906,17 +909,21 @@ private fun StatusMediaView(
 
 /** Thin playback bar with the payload's position extrapolated locally
  *  (statusProgressAt). The ~1 s ticker lives in this composable: it runs
- *  only while the payload says playing, a new payload restarts it, and
- *  leaving composition (board switch, tile removed) cancels it - paused
- *  or progress-less tiles never tick. */
+ *  only while the payload says playing and the activity is started
+ *  (backgrounded app or screen off: no ticks), a new payload restarts
+ *  it, and leaving composition (board switch, tile removed) cancels it -
+ *  paused or progress-less tiles never tick. */
 @Composable
 private fun StatusMediaBar(progress: StatusProgress, receivedAtMs: Long, showTimes: Boolean) {
     var nowMs by remember(progress) { mutableStateOf(SystemClock.elapsedRealtime()) }
     if (progress.playing) {
-        LaunchedEffect(progress) {
-            while (true) {
-                delay(1_000L)
-                nowMs = SystemClock.elapsedRealtime()
+        val lifecycle = LocalLifecycleOwner.current.lifecycle
+        LaunchedEffect(progress, lifecycle) {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    nowMs = SystemClock.elapsedRealtime()
+                    delay(1_000L)
+                }
             }
         }
     }

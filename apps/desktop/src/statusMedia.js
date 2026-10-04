@@ -21,8 +21,19 @@ if (typeof document !== "undefined") {
 // hash -> data URL (null = lookup failed and stays failed; the backend
 // validates the hash, so a failure means the asset is gone). Module
 // level: every TileCell in the WebView shares the memo, so re-renders
-// and sibling tiles on the same album never refetch.
+// and sibling tiles on the same album never refetch. Capped like the
+// host's art LRU: a long listening session would otherwise keep every
+// cover's data URL alive in the WebView.
+const ART_CACHE_CAP = 32;
 const artUrlCache = new Map();
+
+function rememberArt(hash, url) {
+  artUrlCache.delete(hash);
+  artUrlCache.set(hash, url);
+  while (artUrlCache.size > ART_CACHE_CAP) {
+    artUrlCache.delete(artUrlCache.keys().next().value);
+  }
+}
 const artPending = new Map();
 
 /** Resolves a status payload's asset hash through the asset_data_url
@@ -44,11 +55,11 @@ export function resolveStatusArt(hash, done) {
     pending = api
       .assetDataUrl(hash)
       .then((url) => {
-        artUrlCache.set(hash, url);
+        rememberArt(hash, url);
         return url;
       })
       .catch(() => {
-        artUrlCache.set(hash, null);
+        rememberArt(hash, null);
         return null;
       })
       .finally(() => artPending.delete(hash));
