@@ -43,6 +43,10 @@ extensions load in a native runtime.
   whole thing is edited live from Ustawienia → AI usage.
 - Native system-info source (CPU, RAM, audio) replaces the heaviest JS
   extensions.
+- **Spotify**: playback, shuffle/repeat, like, playlists, device switch,
+  volume and seek sliders, and a now-playing tile with cover art and a
+  live progress bar. Talks to the Web API directly; setup and login live
+  in the desktop app (see [Spotify](#spotify)).
 
 **Pairing and clients**
 
@@ -112,8 +116,8 @@ cd apps/mobile && gradle :app:testDebugUnitTest
 ## Data and configuration
 
 Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
-`settings.json`, `editor.json`, `aidev.json`, `devices.json`, `extensions/`,
-`assets/`, `logs/`. Environment overrides:
+`settings.json`, `editor.json`, `aidev.json`, `devices.json`, `spotify.json`,
+`extensions/`, `assets/`, `logs/`. Environment overrides:
 
 | Variable              | Default                   | Purpose                                     |
 | --------------------- | ------------------------- | ------------------------------------------- |
@@ -122,6 +126,51 @@ Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
 | `PULPIT_EXT_DIR`      | `~/pulpitApp/extensions`  | Extension directory                         |
 | `PULPIT_AIDEV_CONFIG` | `~/pulpitApp/aidev.json`  | AI dev-work producer config                 |
 | `PULPIT_NO_SINGLE_INSTANCE` | unset               | Set to `1` to run side-by-side instances    |
+| `PULPIT_SPOTIFY_CONFIG` | `~/pulpitApp/spotify.json` | Spotify client id and tokens           |
+
+## Spotify
+
+Pulpit talks to the Spotify Web API directly (native `crates/spotify`, no
+extension). Login and configuration live only in the desktop app; tablets
+just render and press the tiles.
+
+**Setup (once)**
+
+1. Create an app at <https://developer.spotify.com/dashboard>.
+2. Add the redirect URI `http://127.0.0.1:8502/spotify/callback` exactly as
+   written (the editor shows it with a copy button). Port 8502 is fixed and
+   independent of `PULPIT_PORT`, because Spotify matches the URI exactly.
+3. Paste the app's client id into Ustawienia → Spotify and log in. The
+   browser opens, and after you approve, Pulpit catches the redirect on
+   127.0.0.1:8502 (5-minute window). If something else holds 8502, the
+   login fails with a clear error instead of picking another port.
+
+Tokens are stored in `~/pulpitApp/spotify.json` (override the path with
+`PULPIT_SPOTIFY_CONFIG`). Refresh-token rotation is handled and tokens are
+never logged. Logging out deletes the tokens and keeps the client id. The
+headless server reads the same file; without it Spotify is simply off.
+
+**Tiles** (catalog group "Spotify")
+
+| Kind | Does |
+| --- | --- |
+| `spotify-playback` | play/pause, next, previous, volume ±10 %, mute/restore |
+| `spotify-shuffle` | toggle shuffle (lit while on) |
+| `spotify-repeat` | cycle off → context → track (lit unless off) |
+| `spotify-like` | save/unsave the current track (lit while saved) |
+| `spotify-add` | add the current track to a chosen playlist |
+| `spotify-tracks` | start a playlist, album, track or artist |
+| `spotify-device` | move playback to a device (matched by name) |
+| `spotify-volume` | slider, follows the live volume |
+| `spotify-seek` | slider, follows track progress |
+| `spotify-now-playing` | status tile: title, artist, album, cover, progress |
+
+Playback control requires Spotify Premium (the Web API refuses it for Free
+accounts; the status tiles still work). Spotify must be open on some device
+first — Pulpit controls an existing player, it is not one. State is polled
+about every 3 s while playing and every 20 s while paused. Pulpit sends no
+requests at all while no tablet is connected and the editor window is
+hidden. Tiles extrapolate track progress between polls.
 
 ## Architecture
 
