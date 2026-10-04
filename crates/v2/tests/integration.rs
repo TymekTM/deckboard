@@ -525,6 +525,39 @@ async fn silent_hello_times_out_and_closes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn malformed_hello_gets_bad_frame_then_closes() {
+    // NET-05: garbage inside the hello window is a protocol violation,
+    // not a silent drop - the post-handshake loop answers bad-frame for
+    // the same input, the hello half must not differ.
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let (_device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state).await;
+
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={token}")).await;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        "not json".into(),
+    ))
+    .await
+    .unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(2), next_frame(&mut ws))
+        .await
+        .expect("bad-frame answer for a malformed hello");
+    assert_eq!(err.kind, TYPE_ERROR);
+    let payload: ErrorPayload = serde_json::from_value(err.payload.unwrap()).unwrap();
+    assert_eq!(payload.code, error_code::BAD_FRAME);
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() || matches!(msg, Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "socket must close after a malformed hello");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn unknown_and_revoked_tokens_are_refused_at_the_upgrade() {
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let (device, token) = state.devices.create("Tablet");
