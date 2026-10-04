@@ -19,6 +19,7 @@ pulpit-sysinfo = { path = "../sysinfo" }
 pulpit-vm = { path = "../vm" }
 pulpit-discord = { path = "../discord" }
 pulpit-spotify = { path = "../spotify" }
+ureq = "3"
 
 [dev-dependencies]
 tempfile = "3"

@@ -116,6 +116,30 @@ impl AssetStore {
         std::fs::read(self.dir.join(format!("{hash}.{ext}"))).ok()
     }
 
+    /// Deletes an entry. The store is content-addressed, so callers that
+    /// imported the bytes themselves (the Spotify art LRU) can never
+    /// collide with an image some board references - retention is safe
+    /// when only own imports are removed. Returns whether the entry
+    /// existed; a file already gone counts as removed.
+    pub fn remove(&self, hash: &str) -> bool {
+        let ext = self
+            .exts
+            .lock()
+            .expect("asset store poisoned")
+            .remove(hash);
+        let Some(ext) = ext else {
+            return false;
+        };
+        match std::fs::remove_file(self.dir.join(format!("{hash}.{ext}"))) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                tracing::warn!(hash, error = %e, "could not delete asset file");
+                false
+            }
+        }
+    }
+
     /// What `GET /assets/<hash>` should respond with for the given
     /// (optional) `Range` header value.
     pub fn read_for_serving(&self, hash: &str, range: Option<&str>) -> std::io::Result<AssetBody> {
