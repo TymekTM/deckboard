@@ -251,7 +251,7 @@ async fn pair_request_status(
     let Some(request) = state.pair_requests.get(&id) else {
         return (StatusCode::NOT_FOUND, Json(json!({"status": "unknown"}))).into_response();
     };
-    if request.age() >= crate::devices::PAIR_CODE_TTL {
+    if request.age() >= state.pair_requests.ttl() {
         state.pair_requests.reset(&id);
         return (StatusCode::OK, Json(json!({"status": "expired"}))).into_response();
     }

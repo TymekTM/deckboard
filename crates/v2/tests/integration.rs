@@ -20,7 +20,8 @@ use pulpit_db::{BoardRow, ButtonRow};
 use pulpit_legacy::Backend;
 use pulpit_proto::*;
 use pulpit_v2::{
-    AssetStore, DeviceStore, Generation, Pairing, StateEngine, V2Config, V2Hub, V2State,
+    AssetStore, DeviceStore, Generation, PairRequests, Pairing, StateEngine, V2Config, V2Hub,
+    V2State,
 };
 
 // ---------------------------------------------------------------------------
@@ -168,6 +169,15 @@ fn test_state_with_pairing(
     pairing: Arc<Pairing>,
     tune: impl FnOnce(&mut V2Config),
 ) -> (Arc<V2State>, tempfile::TempDir) {
+    test_state_with_pair_requests(backend, pairing, PairRequests::default(), tune)
+}
+
+fn test_state_with_pair_requests(
+    backend: MockBackend,
+    pairing: Arc<Pairing>,
+    pair_requests: PairRequests,
+    tune: impl FnOnce(&mut V2Config),
+) -> (Arc<V2State>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut config = V2Config {
         patch_interval: Duration::from_millis(20),
@@ -185,7 +195,7 @@ fn test_state_with_pairing(
         engine: Arc::new(StateEngine::new(120)),
         generation: Generation::starting_at(1),
         boards_cache: Default::default(),
-        pair_requests: Default::default(),
+        pair_requests,
         config,
     });
     (state, dir)
@@ -409,27 +419,9 @@ async fn browser_requests_are_rejected_on_the_sockets() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn pair_route_refuses_non_loopback_callers() {
-    // Derive a non-loopback local address the way the OS would route
-    // it (UDP connect picks the source interface; no packet is sent).
-    // Hosts without an external route cannot exercise this guard -
-    // skip rather than flake there.
-    let probe = (|| -> Option<std::net::UdpSocket> {
-        let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-        s.connect("8.8.8.8:80").ok()?;
-        Some(s)
-    })();
-    let probe = match probe {
-        Some(s) => s,
-        None => {
-            eprintln!("skipping: no external route to derive a LAN address");
-            return;
-        }
+    let Some(lan_ip) = lan_bind_ip() else {
+        return; // helper already explains the skip
     };
-    let lan_ip = probe.local_addr().unwrap().ip();
-    if lan_ip.is_loopback() {
-        eprintln!("skipping: no non-loopback address on this host");
-        return;
-    }
 
     let (state, _dir) = test_state(sample_backend(), |_| {});
     let lan_addr = spawn_server_on(state.clone(), &format!("{lan_ip}:0")).await;
@@ -439,6 +431,175 @@ async fn pair_route_refuses_non_loopback_callers() {
     assert_eq!(status, 403, "pairing must be mintable from loopback only");
     let (status, _, _) = http_post_json(loopback_addr, "/v2/pair", "{}").await;
     assert_eq!(status, 200, "loopback callers still mint");
+}
+
+/// A non-loopback local address the way the OS would route it (UDP
+/// connect picks the source interface; no packet is sent). Hosts
+/// without an external route cannot exercise the LAN-side guards -
+/// skip rather than flake there.
+fn lan_bind_ip() -> Option<std::net::IpAddr> {
+    let probe = (|| -> Option<std::net::UdpSocket> {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        s.connect("8.8.8.8:80").ok()?;
+        Some(s)
+    })()?;
+    let ip = probe.local_addr().ok()?.ip();
+    (!ip.is_loopback()).then_some(ip)
+}
+
+fn pair_request_json(body: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(body).expect("pair-request JSON body")
+}
+
+/// Loopback callers are the desktop itself: the route exists for LAN
+/// tablets, and the desktop has the native dialog already (M8/NET-10).
+#[tokio::test(flavor = "current_thread")]
+async fn pair_request_refuses_loopback_callers() {
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let addr = spawn_server(state).await;
+    let (status, _, body) = http_post_json(addr, "/v2/pair-request", r#"{"name":"Deck"}"#).await;
+    assert_eq!(status, 403);
+    assert!(
+        String::from_utf8_lossy(&body).contains("use the desktop pairing UI"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pair_request_conflicts_and_browser_origins_are_refused() {
+    let Some(lan_ip) = lan_bind_ip() else {
+        return;
+    };
+    let (state, _dir) = test_state(sample_backend(), |_| {});
+    let addr = spawn_server_on(state, &format!("{lan_ip}:0")).await;
+
+    let (status, _, body) = http_post_json(addr, "/v2/pair-request", r#"{"name":"Deck"}"#).await;
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+    let created = pair_request_json(&body);
+    let id = created["request_id"].as_str().unwrap();
+    assert_eq!(id.len(), 32, "random 32-hex request id");
+    assert!(!created["code"].as_str().unwrap().is_empty());
+    assert!(created["expires_in_secs"].as_u64().unwrap() > 0);
+
+    // A browser page (any Origin) is refused like the rest of the API,
+    // even from a LAN-shaped caller: the B1 guard runs before the slot.
+    let (status, _, _) = http_post_json_with_headers(
+        addr,
+        "/v2/pair-request",
+        r#"{"name":"Deck"}"#,
+        &[("Origin", "http://evil.example")],
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    // A second live request reads as a conflict until the first one is
+    // polled or expires - this caps dialog-spam from a rogue client.
+    let (status, _, body) = http_post_json(addr, "/v2/pair-request", r#"{"name":"Other"}"#).await;
+    assert_eq!(status, 409, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(pair_request_json(&body)["code"], "request-in-flight");
+
+    // Poll before any decision: pending.
+    let (_, _, body) = http_get(addr, &format!("/v2/pair-request/{id}")).await;
+    assert_eq!(pair_request_json(&body)["status"], "pending");
+}
+
+/// The full M8 flow: create -> operator gate decides -> the tablet polls
+/// the decision -> the slot frees -> the pre-approved code pairs over
+/// the socket and issues a token without a second gate call.
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_request_gate_decision_reaches_the_poll_and_pairs() {
+    let Some(lan_ip) = lan_bind_ip() else {
+        return;
+    };
+    let pairing = Arc::new(Pairing::new());
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel::<(String, String)>();
+    pairing.set_pair_request_gate(move |name, code| {
+        let _ = gate_tx.send((name.to_string(), code.to_string()));
+        true
+    });
+    let (state, _dir) = test_state_with_pairing(sample_backend(), pairing, |_| {});
+    let addr = spawn_server_on(state, &format!("{lan_ip}:0")).await;
+
+    let (status, _, body) = http_post_json(addr, "/v2/pair-request", r#"{"name":"Deck"}"#).await;
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+    let created = pair_request_json(&body);
+    let id = created["request_id"].as_str().unwrap().to_string();
+    let code = created["code"].as_str().unwrap().to_string();
+
+    // the spawned gate task received the sanitized name and the code
+    let (gate_name, gate_code) = gate_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("gate must be consulted");
+    assert_eq!(gate_name, "Deck");
+    assert_eq!(gate_code, code);
+
+    // poll until the decision lands (the gate runs on a spawned task)
+    let mut polled = String::new();
+    for _ in 0..100 {
+        let (_, _, body) = http_get(addr, &format!("/v2/pair-request/{id}")).await;
+        polled = pair_request_json(&body)["status"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        if polled != "pending" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(polled, "approved", "gate approval must reach the poll");
+
+    // the terminal poll freed the slot for the next request
+    let (status, _, _) = http_post_json(addr, "/v2/pair-request", r#"{"name":"Deck"}"#).await;
+    assert_eq!(status, 201, "slot must be freed after a polled decision");
+
+    // the code the tablet already shows pairs without a second gate call
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?pair={code}")).await;
+    send_frame(
+        &mut ws,
+        &Frame::request(
+            TYPE_HELLO,
+            "h1",
+            serde_json::json!({"client": "pulpit-mobile", "version": "0.2.0", "name": "Deck"}),
+        ),
+    )
+    .await;
+    let welcome: Welcome = typed(next_frame(&mut ws).await, TYPE_WELCOME);
+    assert!(
+        welcome.token.is_some(),
+        "an approved pair-request must issue a token"
+    );
+}
+
+/// A request older than the TTL polls as `expired` and the slot frees
+/// without an operator decision - a vanished tablet cannot wedge the
+/// flow (route reads the container's ttl; the test shortens it).
+#[tokio::test(flavor = "current_thread")]
+async fn pair_request_expires_and_frees_the_slot() {
+    let Some(lan_ip) = lan_bind_ip() else {
+        return;
+    };
+    let (state, _dir) = test_state_with_pair_requests(
+        sample_backend(),
+        Arc::new(Pairing::new()),
+        PairRequests::with_ttl(Duration::ZERO),
+        |_| {},
+    );
+    let addr = spawn_server_on(state, &format!("{lan_ip}:0")).await;
+
+    let (status, _, body) = http_post_json(addr, "/v2/pair-request", r#"{"name":"Deck"}"#).await;
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+    let id = pair_request_json(&body)["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (_, _, body) = http_get(addr, &format!("/v2/pair-request/{id}")).await;
+    assert_eq!(pair_request_json(&body)["status"], "expired");
+
+    // the expiry freed the slot: the next request starts at once
+    let (status, _, _) = http_post_json(addr, "/v2/pair-request", r#"{"name":"Deck"}"#).await;
+    assert_eq!(status, 201);
 }
 
 #[tokio::test(flavor = "current_thread")]
