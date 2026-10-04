@@ -1,0 +1,20 @@
+[package]
+name = "pulpit-spotify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+ureq = "3"
+rand = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+pulpit-db = { path = "../db" }
+
+[dev-dependencies]
+tempfile = "3"

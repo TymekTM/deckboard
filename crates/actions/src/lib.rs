@@ -284,15 +284,18 @@ pub fn run_command_dispatched(
             }
         },
         "key" => run_key(input, cmd, is_tap_start),
-        k if k.starts_with("spotify")
-            || k.starts_with("slobs")
+        k if k.starts_with("slobs")
             || k.starts_with("obs")
             || k.starts_with("xsplit")
             || k.contains("twitch")
             || k.starts_with("vmod")
             || k == "play" =>
         {
-            // M0 covers the system-level subset; integrations arrive in M7.
+            // M0 covers the system-level subset; the remaining
+            // integrations arrive in M7. Spotify kinds are NOT here:
+            // the backend's native chain (crates/spotify) claims them
+            // before this dispatcher, and a bare run_command call
+            // without a backend lands in the unknown arm below.
             tracing::warn!(kind = k, "command type not implemented yet");
             Ok(())
         }
@@ -868,10 +871,13 @@ mod tests {
             assert!(is_builtin_kind(kind), "{kind} must be builtin");
         }
         // integration stubs (the dispatcher only warns) and native
-        // backend kinds stay extension/native territory
+        // backend kinds stay extension/native territory: spotify kinds
+        // are claimed by the backend's spotify arm (crates/spotify),
+        // not by the builtin dispatcher
         for kind in [
             "obs-start",
-            "spotify-play",
+            "spotify-playback",
+            "spotify-like",
             "play",
             "vmod-mute",
             "twitch-live",
@@ -1178,6 +1184,10 @@ mod tests {
             false,
         )
         .unwrap();
+        // spotify kinds no longer have a stub branch: hosts claim them
+        // in the native chain (crates/backend -> crates/spotify) before
+        // this dispatcher, so a bare run_command call treats them like
+        // any other unknown kind - warn, no effects, no crash
         run_command(
             &mut input,
             &mut sink,
@@ -1185,5 +1195,6 @@ mod tests {
             false,
         )
         .unwrap();
+        assert!(input.effects.is_empty());
     }
 }

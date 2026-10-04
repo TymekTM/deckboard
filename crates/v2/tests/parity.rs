@@ -384,6 +384,108 @@ fn state2_image_reaches_the_v2_wire() {
     assert_eq!(assets.get(hash2).unwrap(), b"face-active");
 }
 
+// ---- round-4 Spotify kinds (design §3/§4) ---------------------------------
+
+#[test]
+fn spotify_dual_state_kinds_agree_between_the_wires() {
+    // spotify-playback with the "play" command: the legacy payload marks
+    // it app=custom-value watching "spotify-playing" (the vol_mute-style
+    // quirk); v2 must call it a Toggle reading the matching ext channel
+    // and styling it with the playback green
+    let (legacy, tile) = both(&row("spotify-playback", "button", Some("play")));
+    assert_eq!(legacy["app"], "custom-value");
+    assert_eq!(legacy["extra"], "spotify-playing");
+    assert_eq!(tile.manifest.kind, WidgetKind::Toggle);
+    assert_eq!(tile.manifest.interactions, vec![Interaction::Tap]);
+    let state = tile.manifest.state.as_ref().expect("toggle watches a channel");
+    assert_eq!(state.channel, "ext.spotify-playing");
+    assert_eq!(style_of(&tile).color.as_deref(), Some("#1DB954"));
+
+    // other playback commands remain plain buttons on both wires
+    let (legacy, tile) = both(&row("spotify-playback", "button", Some("next")));
+    assert!(legacy.get("app").is_none());
+    assert_eq!(tile.manifest.kind, WidgetKind::Button);
+    assert!(tile.manifest.state.is_none());
+
+    // shuffle watches its own kind; repeat/like watch pushed keys that
+    // differ from the kind - the channel must match the legacy extra on
+    // every one, or the two clients flip different tiles
+    for (kind, key, color) in [
+        ("spotify-shuffle", "spotify-shuffle", "#1db954"),
+        ("spotify-repeat", "spotify-repeat-on", "#1db954"),
+        ("spotify-like", "spotify-liked", "#1db954"),
+    ] {
+        let (legacy, tile) = both(&row(kind, "button", None));
+        assert_eq!(legacy["app"], "custom-value", "{kind}");
+        assert_eq!(legacy["extra"], key, "{kind}");
+        assert_eq!(tile.manifest.kind, WidgetKind::Toggle, "{kind}");
+        let state = tile.manifest.state.as_ref().expect("{kind} watches a channel");
+        assert_eq!(state.channel, format!("ext.{key}"), "{kind}");
+        assert_eq!(style_of(&tile).color.as_deref(), Some(color), "{kind}");
+        assert_eq!(
+            legacy["toggle_key"].as_str(),
+            Some(key),
+            "{kind} carries the pushed key as toggle_key"
+        );
+    }
+}
+
+#[test]
+fn spotify_button_kinds_agree_between_the_wires() {
+    // tracks / add stay plain buttons; device extracts its jsonKey like
+    // speaker-device (the stock client shows the chosen device name)
+    for kind in ["spotify-tracks", "spotify-add"] {
+        let (legacy, tile) = both(&row(kind, "button", None));
+        assert!(legacy.get("app").is_none(), "{kind}");
+        assert_eq!(tile.manifest.kind, WidgetKind::Button, "{kind}");
+        assert!(tile.manifest.state.is_none(), "{kind}");
+    }
+
+    let (legacy, tile) = both(&row(
+        "spotify-device",
+        "button",
+        Some(r#"{"device":"Kitchen"}"#),
+    ));
+    assert_eq!(legacy["command"], "Kitchen");
+    assert_eq!(legacy["extra"], "spotify-device");
+    assert_eq!(tile.manifest.kind, WidgetKind::Button);
+    assert_eq!(tile.manifest.interactions, vec![Interaction::Tap]);
+    assert_eq!(style_of(&tile).color.as_deref(), Some("#1db954"));
+}
+
+#[test]
+fn spotify_slider_kinds_agree_between_the_wires() {
+    // volume watches its own kind, seek watches the pushed progress key
+    for (kind, key) in [("spotify-volume", "spotify-volume"), ("spotify-seek", "spotify-progress")] {
+        let (legacy, tile) = both(&row(kind, "slider", None));
+        assert_eq!(legacy["mode"], "slider", "{kind}");
+        assert_eq!(legacy["extra"], key, "{kind}");
+        assert_eq!(tile.manifest.kind, WidgetKind::Slider, "{kind}");
+        assert_eq!(tile.manifest.interactions, vec![Interaction::Slide], "{kind}");
+        let state = tile.manifest.state.as_ref().expect("{kind} watches a channel");
+        assert_eq!(state.channel, format!("ext.{key}"), "{kind}");
+        assert_eq!(state.shape, pulpit_proto::StateShape::Scalar, "{kind}");
+    }
+}
+
+#[test]
+fn spotify_now_playing_is_a_status_tile_on_both_wires() {
+    let (legacy, tile) = both(&row("spotify-now-playing", "status", None));
+    assert_eq!(legacy["mode"], "status");
+    assert_eq!(legacy["extra"], "");
+    // v2 renders the status payload on List tiles (the aidev display
+    // class) with no gestures, watching the type-named channel
+    assert_eq!(tile.manifest.kind, WidgetKind::List);
+    assert!(tile.manifest.interactions.is_empty());
+    let state = tile
+        .manifest
+        .state
+        .as_ref()
+        .expect("status mode falls back to the kind");
+    assert_eq!(state.channel, "ext.spotify-now-playing");
+    assert_eq!(style_of(&tile).color.as_deref(), Some("#1db954"));
+}
+
 fn store() -> (AssetStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     (

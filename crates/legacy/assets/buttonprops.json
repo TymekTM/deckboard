@@ -79,12 +79,44 @@
     "spotify-like": {
       "unicode": "\uf004",
       "color": "#1db954",
-      "prefix": "fas"
+      "prefix": "fas",
+      "app": "custom-value",
+      "toggle_key": "spotify-liked"
     },
     "spotify-add": {
       "unicode": "\uf51f",
       "color": "#1db954",
       "prefix": "fas"
+    },
+    "spotify-shuffle": {
+      "unicode": "\uf074",
+      "color": "#1db954",
+      "app": "custom-value",
+      "toggle_key": "spotify-shuffle"
+    },
+    "spotify-repeat": {
+      "unicode": "\uf363",
+      "color": "#1db954",
+      "app": "custom-value",
+      "toggle_key": "spotify-repeat-on"
+    },
+    "spotify-device": {
+      "unicode": "\uf26c",
+      "color": "#1db954",
+      "jsonKey": "device"
+    },
+    "spotify-volume": {
+      "unicode": "\uf028",
+      "color": "#1db954"
+    },
+    "spotify-seek": {
+      "unicode": "\uf017",
+      "color": "#1db954"
+    },
+    "spotify-now-playing": {
+      "unicode": "\uf1bc",
+      "color": "#1db954",
+      "prefix": "fab"
     },
     "twitter-post": {
       "unicode": "\uf099",
