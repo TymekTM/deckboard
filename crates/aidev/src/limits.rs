@@ -12,8 +12,6 @@
 //! - Antigravity: the running IDE's local quota endpoint;
 //! - OpenRouter / Anthropic admin / custom endpoints: opt-in API keys.
 
-use std::io::Read;
-
 use crate::util::truncate;
 use crate::{local_usage::fmt_tokens, local_usage::Sums, Apikey, Config, Paths};
 
@@ -207,6 +205,11 @@ pub(crate) fn http_agent() -> ureq::Agent {
     pulpit_db::http_agent(std::time::Duration::from_secs(10), false)
 }
 
+/// Quota and limits responses are small JSON documents; anything bigger is
+/// a misbehaving endpoint, not data worth pulling into the tray process
+/// (panic=abort makes OOM fatal for the whole app).
+pub(crate) const MAX_JSON_BODY_BYTES: u64 = 4 * 1024 * 1024;
+
 fn get_json(url: &str, headers: &[(&str, String)]) -> Result<serde_json::Value, String> {
     let mut req = http_agent().get(url);
     for (name, value) in headers {
@@ -214,10 +217,12 @@ fn get_json(url: &str, headers: &[(&str, String)]) -> Result<serde_json::Value, 
     }
     let resp = req.call().map_err(|e| format!("network: {e}"))?;
     let status = resp.status().as_u16();
-    let mut body = String::new();
-    resp.into_body()
-        .into_reader()
-        .read_to_string(&mut body)
+    let body = resp
+        .into_body()
+        .into_with_config()
+        .limit(MAX_JSON_BODY_BYTES)
+        .lossy_utf8(true)
+        .read_to_string()
         .map_err(|e| format!("body: {e}"))?;
     if !(200..300).contains(&status) {
         return Err(format!("HTTP {status} {}", http_error_note(&body)));
@@ -1550,5 +1555,41 @@ mod tests {
         let rows = plan_rows(&config, &http, &sums, &paths, crate::unix_now());
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["GLM 5h", "GLM week", "Claude 5h", "Claude week"]);
+    }
+
+    #[test]
+    fn oversized_response_bodies_error_instead_of_buffering() {
+        // a misbehaving custom-provider endpoint that streams more than
+        // the body cap must end as an error row, not pull unbounded bytes
+        // into the tray process (panic=abort makes OOM fatal)
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            // the client hangs up once the cap trips, so these writes may
+            // fail with EPIPE/ECONNRESET - that is the point of the test
+            let body = vec![b'a'; (MAX_JSON_BODY_BYTES as usize) + 64 * 1024];
+            let _ = sock.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            let _ = sock.write_all(&body);
+        });
+        let err = get_json(&format!("http://{addr}/limits"), &[]).unwrap_err();
+        assert!(err.starts_with("body:"), "got {err}");
+        server.join().unwrap();
     }
 }

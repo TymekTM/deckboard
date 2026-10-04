@@ -14,7 +14,6 @@
 //! probing the loopback ports Antigravity listens on. No IDE, no quota.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::agents::AgentSession;
@@ -417,10 +416,15 @@ fn ask_port(port: u16) -> Option<Quota> {
     let mut req = agent.post(url);
     req = req.header("content-type", "application/json");
     let resp = req.send("{}").ok()?;
-    let mut body = String::new();
-    resp.into_body()
-        .into_reader()
-        .read_to_string(&mut body)
+    // the quota payload is tiny; any loopback port that streams more than
+    // the cap (ide_ports probes every LISTENING port of the IDE's PIDs)
+    // must not stream into the tray process unbounded
+    let body = resp
+        .into_body()
+        .into_with_config()
+        .limit(crate::limits::MAX_JSON_BODY_BYTES)
+        .lossy_utf8(true)
+        .read_to_string()
         .ok()?;
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     parse_quota(&v)
