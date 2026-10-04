@@ -48,14 +48,14 @@ Impact/effort/risk as judged at audit time; confidence in parentheses.
 | 3 | Whole-grid re-render per state push incl. hidden window; new object identity per unchanged push; `JSON.parse` per helper call; empty cells rendered in touch mode | `apps/desktop/src/{App.vue,GridEditor.vue,catalog.js}` | continuous CPU, 24/7 | M | MED | 003 |
 | 4 | Idle loops: 3 WASAPI COM chains per 5 s tick, device id every tick (desktop), unconditional legacy broadcast + WebView emit incl. hidden, aidev payload sent unchanged every 15 s (age strings defeat v2 dedup) | `apps/desktop/src-tauri/src/lib.rs:307-433`, `crates/os/src/win.rs:184-237`, `crates/aidev/src/lib.rs:210` | constant idle wakeups + IPC | M | LOW-MED | 004 |
 | 5 | v2 sessions: unbounded outbound queue + no watchdog (`silent_for_ms` dead code) → RAM grows forever on stalled peers | `crates/v2/src/{hub,session}.rs` | unbounded RAM leak | M | MED | 005 |
-| 6 | Extension runtimes: 64 MiB stacks per thread, parked forever after first execute; timers tick with zero clients connected (shell-out extensions pay a process spawn per tick); `setTimeout(cb,0)` floored to 100 ms intervals pins one-shot initializers resident | `crates/ext/src/{manager,host,prelude.js}` | tens of MB committed + idle CPU | M | MED | deferred |
-| 7 | Editor WebView2 process tree resident 24/7 while window hidden (~60-150 MB typical) | `apps/desktop/src-tauri/src/lib.rs:110-118,505-518` | largest single idle-RAM item | M | MED | deferred |
-| 8 | First-sight transcript ingest `read_to_string`s whole files; every app restart re-parses up to 8 days of transcripts in one burst; offsets only in memory | `crates/aidev/src/local_usage.rs:112-123` | CPU + RSS spike per launch | M | MED | deferred |
-| 9 | Full FontAwesome CSS + 15 font files shipped; only solid icons used | `apps/desktop/src/main.js:2`, `dist/assets/fa-*` | ~1 MB dead assets, minor parse/retention | S | LOW | deferred |
+| 6 | Extension runtimes: 64 MiB stacks per thread, parked forever after first execute; timers tick with zero clients connected (shell-out extensions pay a process spawn per tick); `setTimeout(cb,0)` floored to 100 ms intervals pins one-shot initializers resident | `crates/ext/src/{manager,host,prelude.js}` | tens of MB committed + idle CPU | M | MED | CPU half done (`162079e`); RAM half open - see Deferred |
+| 7 | Editor WebView2 process tree resident 24/7 while window hidden (~60-150 MB typical) | `apps/desktop/src-tauri/src/lib.rs:110-118,505-518` | largest single idle-RAM item | M | MED | done (`162079e`, 10-min teardown) |
+| 8 | First-sight transcript ingest `read_to_string`s whole files; every app restart re-parses up to 8 days of transcripts in one burst; offsets only in memory | `crates/aidev/src/local_usage.rs:112-123` | CPU + RSS spike per launch | M | MED | deferred (owner, behind 001) |
+| 9 | Full FontAwesome CSS + 15 font files shipped; only solid icons used | `apps/desktop/src/main.js:2`, `dist/assets/fa-*` | ~1 MB dead assets, minor parse/retention | S | LOW | done (`162079e`) |
 | 10 | v2 flusher wakes at 10 Hz with zero dirty channels | `crates/v2/src/lib.rs:56-70` | timer wakeups, µs each | S | LOW | rejected (see below) |
-| 11 | `ureq::Agent` built per HTTP call (ext host shim, aidev limits, backend callurl) | `crates/ext/src/host.rs:469`, `crates/aidev/src/limits.rs:130-136`, `crates/backend/src/lib.rs:373` | TLS+pool churn per poll | S | LOW | deferred |
-| 12 | Log files rotate daily with no retention cap | `apps/desktop/src-tauri/src/lib.rs:61-75` | disk (not RAM/CPU) | S | LOW | deferred |
-| 13 | `/assets/<hash>` reads whole file per request; no streaming/Range (videos refetched whole on scrub) | `crates/v2/src/{assets,service}.rs` | RAM spike per asset fetch | S | LOW | deferred |
+| 11 | `ureq::Agent` built per HTTP call (ext host shim, aidev limits, backend callurl) | `crates/ext/src/host.rs:469`, `crates/aidev/src/limits.rs:130-136`, `crates/backend/src/lib.rs:373` | TLS+pool churn per poll | S | LOW | done for ext + callurl (`162079e`); aidev site frozen with 001 |
+| 12 | Log files rotate daily with no retention cap | `apps/desktop/src-tauri/src/lib.rs:61-75` | disk (not RAM/CPU) | S | LOW | done (`162079e`, 14-day prune at launch) |
+| 13 | `/assets/<hash>` reads whole file per request; no streaming/Range (videos refetched whole on scrub) | `crates/v2/src/{assets,service}.rs` | RAM spike per asset fetch | S | LOW | done (`162079e`, single-range 206/416) |
 | 14 | `get_boards`/`get_board` skip the statement cache; `list_boards` is N+1 | `crates/db/src/lib.rs:152-175`, `apps/desktop/.../lib.rs:860` | ms per editor refresh | S | LOW | 002 (step 4/5) |
 | 15 | Missing `pointercancel` cleanup can orphan a pointermove handler for the session; unused `@tauri-apps/plugin-fs` dep | `GridEditor.vue:275-292,362-368`, `package.json` | rare CPU leak + dead dep | S | LOW | 003 (step 4) |
 
@@ -111,8 +111,27 @@ are implemented. Remaining context:
   boot, and the rebuilt app refetches everything on mount.
 - Finding 8 (persist scanner offsets): still open - aidev crate, owner
   decision, blocked behind plan 001.
-- Findings 9, 11, 12, 13: landed as one commit; multi-range asset
-  requests deliberately still serve a full 200 body.
+- Findings 9, 11, 12, 13: landed as one commit. Multi-range asset
+  requests are refused with 416 (`parse_byte_range` returns `None` on
+  `,`), not served as a full 200 body as this note used to say; the
+  doc comment in `crates/v2/src/assets.rs` has the same drift. Browsers
+  practically never send multi-range, so this is a docs-or-S-fix nit
+  for whoever next touches the assets file.
+
+Update 2026-10-04, round 4 re-verification (`.scratch/round4`, not
+committed): the table's "Planned" column now records the real status.
+Still open after round 4:
+
+- Finding 6, RAM half. The cheap slice is classifying
+  `setTimeout(cb, 0)`-only packages as lazy instead of resident (the
+  wrapper is an interval that clears itself, so the package gets a
+  resident thread and a 64 MiB stack for life). The bigger slice is
+  letting a runtime thread exit once its intervals drain. Do not shrink
+  the stacks without a recursion-depth test on the heaviest package.
+- Finding 11, aidev site: `limits::http_agent()` now goes through the
+  shared `pulpit_db::http_agent` constructor but is still built per
+  request. Pooling it is plan-001 territory (owner freeze).
+- Finding 8: unchanged, owner-deferred behind plan 001.
 
 ## Round 2: mobile battery and bugs (2026-10-01, commit `f07f447`)
 

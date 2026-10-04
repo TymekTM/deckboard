@@ -548,7 +548,7 @@ still open here; E3's AGENTS.md part -> plan 011 (SUPERSEDED).
 | A1 | DONE (`2fc6908` + `exec_tap` helper, lane L2a merged; test `exec_tap_presses_and_releases_keys_and_fires_other_kinds_once` proves KeyDown->KeyUp for keys and single fire for url) |
 | A2 | DONE (`8627a7a`, lane L2a; table test 1..=24, out-of-range is an error not F12) |
 | A3 | DONE (`0f01c39`, lane L5; `claude_oauth_credentials` + fixture tests, fake tokens only) |
-| A4, A9 | TODO (lane L1 in flight) |
+| A4, A9 | DONE (A4 `a2df10f`: a failed hotkey change keeps the old shortcut; A9 `ddaff90`: destructive actions confirm, dirty-guarded overlay close; merged in `96f49c0`) |
 | A5 | DONE - helper `db::write_atomic` `83ad3d7`, discord site `14b1e63` (incl. corrupt-file behavior), hotkey/editor.json site `26815cf` (lane L1; write_atomic). NOTE: the audit's "editor.json in crates/backend" site no longer exists - that persistence moved to apps/desktop/src-tauri before this run and was fixed there, so the item is closed with one desktop site instead of two |
 | A6 | DONE (`a31eb12`, lane L2b; `__fetch` stringifies, headers/timeout_ms honored, one-shot-server test through the Boa runtime) |
 | A8 | DONE (`48402e1`, lane L2b; `with_transaction` + veto-trigger rollback test; discord hardening separately in `d2dfc8f`: timeouts, 1 MiB frame cap, redacted secret Debug) |
@@ -574,6 +574,9 @@ DONE, lane L2b leftovers merged (`25ce1e9` wedged extensions,
 temp dirs, `9fd4170` ADR-012 stub). Desktop lower-priority - DONE
 (`a236f86` early listeners, touchBoardId reset, slider pointer
 capture, failure toasts). Server json! broadcasts - DONE (`c99520c`).
-Remaining lower-priority: os clipboard/capture/MCI, sysinfo push_loop,
-aidev local-midnight option, tiles keyboard-operable (deliberately
-skipped as too large).
+The last four lower-priority items are DONE as well (re-verified in
+round 4, 2026-10-04): os clipboard bounded by `GlobalSize`, atomic
+screenshot writes and per-playback MCI aliases, sysinfo `push_loop`
+exits when its channel closes, and the opt-in aidev `local_midnight`
+day boundary - all `accba9a`; keyboard-operable tiles and grid
+navigation in `d5284ec`. Nothing from this file remains open.
