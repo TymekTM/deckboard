@@ -3,7 +3,7 @@
 //! modules 5981/8742/2836). Field names and defaults are contractual:
 //! the stock Android client renders exactly these fields.
 
-use pulpit_db::{BoardRow, ButtonRow, MAX_BOARD_DIM};
+use pulpit_db::{clamp_placement, BoardRow, ButtonRow, MAX_BOARD_DIM};
 use serde_json::{json, Map, Value};
 
 use crate::props::{Props, StyleResolver, FALLBACK_COLOR};
@@ -62,18 +62,27 @@ impl Mapper {
 
     /// Mapped buttons + filler cells, filtered to the variant's grid.
     /// Fillers and filters run on the clamped dimensions, so an
-    /// oversized row cannot make this loop allocate W*H.
+    /// oversized row cannot make this loop allocate W*H. Tile placements
+    /// are pulled back inside the board grid first (DESK-03): the pro
+    /// filter below drops an out-of-bounds tile entirely, and a filler
+    /// must not be minted for a cell the clamped tile ends up covering.
     fn shortcuts_payload(&self, board: &BoardRow, buttons: &[ButtonRow], pro: bool) -> Vec<Value> {
         let (width, height) = (clamp_dim(board.width), clamp_dim(board.height));
-        let board_buttons: Vec<(i64, i64, i64, i64)> = buttons
+        let placements: Vec<(i64, i64, i64, i64)> = buttons
             .iter()
-            .map(|b| (b.x.unwrap_or(0), b.y.unwrap_or(0), b.w, b.h))
+            .map(|b| clamp_placement(b.x.unwrap_or(0), b.y.unwrap_or(0), b.w, b.h, width, height))
             .collect();
+        let board_buttons: &[(i64, i64, i64, i64)] = &placements;
 
         // Fillers for every cell of the board grid not covered by a button.
         let mut mapped: Vec<Value> = Vec::with_capacity(buttons.len());
-        for b in buttons {
-            mapped.push(self.shortcut_payload(b));
+        for (b, (x, y, w, h)) in buttons.iter().zip(&placements) {
+            let mut payload = self.shortcut_payload(b);
+            payload["x"] = json!(x);
+            payload["y"] = json!(y);
+            payload["w"] = json!(w);
+            payload["h"] = json!(h);
+            mapped.push(payload);
         }
         for y in 0..height {
             for x in 0..width {
@@ -417,7 +426,9 @@ mod tests {
         let b = board();
         let buttons = [
             button("url", Some("https://x.co"), 0, 0, 1, 1),
-            button("url", Some("https://x.co"), 3, 2, 4, 4), // oversized -> cropped
+            // (3,2,4,4) hangs off the 6x5 board; DESK-03 pulls it to
+            // (2,2,4,4) first, then the 4x3 crop trims it to (2,2,2,1)
+            button("url", Some("https://x.co"), 3, 2, 4, 4),
             button("url", Some("https://x.co"), 5, 4, 1, 1), // outside 4x3 -> dropped
         ];
         let basic = m.board_payload(&b, &buttons, false);
@@ -425,16 +436,50 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|s| s["id"].as_i64() == Some(10) && s["x"].as_i64() == Some(3))
+            .find(|s| s["id"].as_i64() == Some(10) && s["x"].as_i64() == Some(2))
             .unwrap();
+        // clamped to (2,1,4,4) inside 6x5 first, then the 4x3 crop
+        // trims it to (2,1,2,2)
         assert_eq!(
             (cropped["w"].as_i64(), cropped["h"].as_i64()),
-            (Some(1), Some(1))
+            (Some(2), Some(2))
         );
-        assert_eq!(
-            basic["shortcuts"].as_array().unwrap().len(),
-            4 * 3 // full 4x3 grid incl. fillers
-        );
+        // 4x3 grid = 12 cells: 2 buttons + 7 fillers (the clamped tile
+        // covers four cells in the visible grid)
+        assert_eq!(basic["shortcuts"].as_array().unwrap().len(), 9);
+    }
+
+    #[test]
+    fn pro_variant_clamps_placements_to_the_board_grid() {
+        let m = Mapper::new();
+        let b = board(); // 6x5
+        let buttons = [
+            // stored row hangs off the right/bottom edge (5+3>6, 4+2>5)
+            button("url", Some("https://x.co"), 5, 4, 3, 2),
+            // a board shrink left this entirely off-grid; the old pro
+            // filter dropped the tile outright
+            button("url", Some("https://x.co"), 9, 0, 1, 1),
+        ];
+        let pro = m.board_payload(&b, &buttons, true);
+        let sc = pro["shortcuts"].as_array().unwrap();
+        let placed: Vec<(i64, i64, i64, i64)> = sc
+            .iter()
+            .filter(|s| !s["id"].is_null())
+            .map(|s| {
+                (
+                    s["x"].as_i64().unwrap(),
+                    s["y"].as_i64().unwrap(),
+                    s["w"].as_i64().unwrap(),
+                    s["h"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        // origin first pulled left/up, then the size trimmed: nothing
+        // overhangs x=6 / y=5 any more (payload order is y then x)
+        assert_eq!(placed, vec![(5, 0, 1, 1), (3, 3, 3, 2)]);
+        // no filler is minted for a cell the clamped tiles now cover
+        let fillers = sc.iter().filter(|s| s["id"].is_null()).count();
+        assert_eq!(fillers, (6 * 5 - (3 * 2 + 1)) as usize);
     }
 
     #[test]

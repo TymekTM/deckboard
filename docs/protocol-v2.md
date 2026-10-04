@@ -189,6 +189,9 @@ Boards are data. One board:
 
 - Placement is on the 96px cell grid (`x`,`y`,`w`,`h`, integers), tiles may
   be any rectangle (3x1, 3x3, ...). Non-rectangular shapes are out of scope.
+  The server clamps every placement into the board's grid before it goes
+  on the wire (size first, then the origin; added 2026-10, round 4), so a
+  board resize cannot leave a tile off-canvas.
 - `background`: `{"kind":"color","color":...}` or
   `{"kind":"asset","hash":...}` (sha-256 hex, see section 7).
 - `params`: free JSON (widget options, e.g. `hold.repeat`). The server
