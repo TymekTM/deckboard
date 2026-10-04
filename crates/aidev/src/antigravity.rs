@@ -13,7 +13,7 @@
 //! local Connect-RPC endpoint (`RetrieveUserQuotaSummary`), discovered by
 //! probing the loopback ports Antigravity listens on. No IDE, no quota.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -89,13 +89,19 @@ impl Usage {
         let Ok(entries) = std::fs::read_dir(conversations_dir) else {
             return;
         };
+        let mut live: HashSet<PathBuf> = HashSet::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("db") {
                 continue;
             }
             self.scan_db(&path, now);
+            live.insert(path);
         }
+        // databases the IDE deleted must not pin their watermark entries
+        // forever (one PathBuf per conversation adds up over weeks);
+        // dropping an entry only re-reads that db once
+        self.watermark.retain(|p, _| live.contains(p));
         let keep_from = (now - self.history_secs).max(0);
         self.samples.retain(|s| s.ts >= keep_from);
     }
@@ -545,6 +551,26 @@ mod tests {
         short.extend(varint(999));
         short.extend_from_slice(&[0x08]);
         assert_eq!(step_timestamp(&short), None);
+    }
+
+    #[test]
+    fn watermark_forgets_deleted_databases() {
+        // one watermark entry per conversation db must not outlive the db:
+        // the IDE garbage-collects old conversations and a weeks-old tray
+        // process would otherwise accumulate thousands of PathBuf keys
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.db");
+        let b = dir.path().join("b.db");
+        std::fs::write(&a, b"").unwrap();
+        std::fs::write(&b, b"").unwrap();
+        let mut usage = Usage::new(7);
+        let now = 1_800_000_000;
+        usage.scan(dir.path(), now);
+        assert_eq!(usage.watermark.len(), 2);
+        std::fs::remove_file(&b).unwrap();
+        usage.scan(dir.path(), now);
+        assert_eq!(usage.watermark.len(), 1);
+        assert!(usage.watermark.contains_key(&a));
     }
 
     #[test]

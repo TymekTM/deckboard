@@ -13,3 +13,6 @@ ureq = "3"
 rusqlite = { workspace = true }
 chrono = "0.4"
 
+[dev-dependencies]
+tempfile = "3"
+
