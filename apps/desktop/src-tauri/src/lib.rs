@@ -4,8 +4,7 @@
 
 use std::sync::Arc;
 
-use pulpit_backend::SqlBackend;
-use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_backend::SqlBackend;use pulpit_db::{BoardRow, ButtonRow};
 use pulpit_ext::ExtManager;
 use pulpit_legacy::{AppState, Backend, EditorBroadcaster, Hub};
 use serde::Serialize;
@@ -2270,6 +2269,7 @@ async fn exec_button(
     use pulpit_actions::EventSink;
 
     let backend = state.backend()?;
+    let backend_for_error = backend.clone();
     // Value pushes from a desktop-originated exec fan out to every
     // client lane exactly like a tablet-originated exec (CORE-04): the
     // v2 engine, the legacy APP_CUSTOM_VALUE / THIRD_PARTY_APP
@@ -2323,15 +2323,20 @@ async fn exec_button(
     while let Ok((app_kind, key, value)) = rx.try_recv() {
         pulpit_host::push_values(&feed, app_kind, &serde_json::json!({ key: value })).await;
     }
+    // Spotify failures (design §3: Premium required / no active device /
+    // needs login) ride the command's own error -> the editor's existing
+    // flash path shows them; other kinds never record anything.
+    if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
     Ok(())
 }
 
-/// Write the selected boards to `path` in the original's `.boardjson`
-/// format. The file IO lives here so the webview needs no fs permissions.
 /// Touch mode slider: forward the 0..1 value to the tile's backend.
 #[tauri::command]
 async fn exec_slider(state: State<'_, DesktopState>, id: i64, value: f64) -> Result<(), String> {
     let backend = state.backend()?;
+    let backend_for_error = backend.clone();
     // same per-event meta read as exec_button (CORE-02); the lookup
     // rides the blocking closure because slides fire per pointer event
     let _ = tauri::async_runtime::spawn_blocking(move || {
@@ -2341,6 +2346,10 @@ async fn exec_slider(state: State<'_, DesktopState>, id: i64, value: f64) -> Res
         backend.slider(button, value);
     })
     .await;
+    // same failure surface as exec_button (spotify slider kinds)
+    if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
     Ok(())
 }
 

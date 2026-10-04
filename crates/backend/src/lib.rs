@@ -11,6 +11,7 @@ use pulpit_db::{BoardRow, ButtonRow, Db};
 use pulpit_discord::DiscordConfig;
 use pulpit_ext::ExtManager;
 use pulpit_legacy::service::Backend;
+use pulpit_spotify::SpotifyError;
 use pulpit_vm::VoicemeeterState;
 
 /// SQLite-backed backend. Executions are synchronous (the original robotjs
@@ -38,6 +39,11 @@ pub struct SqlBackend {
     /// `spotify.json` provides a login; None leaves Spotify actions
     /// claimed-but-logged-out (the design's NeedsLogin surface).
     spotify: Option<pulpit_spotify::Spotify>,
+    /// The user-facing message of the last failed Spotify exec/slider
+    /// (design §3 error mapping). Cleared on every exec/slider entry and
+    /// taken by the host's exec command so a desktop tap surfaces it as
+    /// a toast; tablets keep their log-only path.
+    spotify_last_error: std::sync::Mutex<Option<String>>,
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
     speaker: Mutex<Option<Box<dyn pulpit_os::Speaker>>>,
@@ -57,6 +63,7 @@ impl SqlBackend {
             discord_settings_path: None,
             discord_client: Mutex::new(None),
             spotify: None,
+            spotify_last_error: std::sync::Mutex::new(None),
             speaker: Mutex::new(None),
             http_agent: ureq::Agent::config_builder()
                 .timeout_global(Some(std::time::Duration::from_secs(10)))
@@ -355,6 +362,7 @@ impl Backend for SqlBackend {
         // so a JS extension listing the same action name cannot hijack
         // those tiles.
         let builtin = pulpit_actions::is_builtin_kind(&cmd.kind);
+        self.spotify_last_error.lock().unwrap().take();
         if !builtin && !is_tap_start && self.exec_native(&cmd, sink) {
             return;
         }
@@ -376,6 +384,7 @@ impl Backend for SqlBackend {
             button.options.as_deref(),
             &button.mode,
         );
+        self.spotify_last_error.lock().unwrap().take();
         if self.exec_extension(&cmd, Some(value))
             || self.exec_sysinfo(&cmd)
             || self.exec_aidev(&cmd)
@@ -731,31 +740,36 @@ impl SqlBackend {
     /// (`crates/spotify`). Slider kinds arrive here a second time from
     /// [`Backend::slider`] with their 0..1 value. Failures surface as
     /// the design's typed errors (Premium required / no active device /
-    /// needs login) - logged with the user-facing message for the
-    /// desktop toast / tablet flash path. Returns true when the kind
-    /// belongs to Spotify.
+    /// needs login): logged for the tablet path and stored as the last
+    /// error so the host's exec command can read them out for the
+    /// desktop toast (see [`SqlBackend::take_last_spotify_error`]).
+    /// Returns true when the kind belongs to Spotify.
     fn exec_spotify(&self, cmd: &pulpit_actions::Command, slider_value: Option<f64>) -> bool {
         if !pulpit_spotify::is_spotify_action(&cmd.kind) {
             return false;
         }
         let Some(spotify) = &self.spotify else {
-            tracing::warn!(
-                kind = %cmd.kind,
-                message = "Log in to Spotify in Pulpit settings",
-                "spotify action skipped (not configured)"
-            );
+            let message = pulpit_spotify::user_message(&SpotifyError::NeedsLogin);
+            tracing::warn!(kind = %cmd.kind, message = %message, "spotify action skipped (not configured)");
+            *self.spotify_last_error.lock().unwrap() = Some(message);
             return true;
         };
         let command = cmd.command.as_deref().unwrap_or_default();
         if let Err(e) = spotify.exec(&cmd.kind, command, slider_value) {
-            tracing::warn!(
-                kind = %cmd.kind,
-                error = %e,
-                message = %pulpit_spotify::user_message(&e),
-                "spotify action failed"
-            );
+            let message = pulpit_spotify::user_message(&e);
+            tracing::warn!(kind = %cmd.kind, error = %e, message = %message, "spotify action failed");
+            *self.spotify_last_error.lock().unwrap() = Some(message);
         }
         true
+    }
+
+    /// Take (and clear) the user-facing message of the last failed
+    /// Spotify exec/slider. The desktop's exec commands return it as the
+    /// command error so the editor's existing flash path shows it;
+    /// concurrent taps may race which tap reports, which is fine for a
+    /// toast.
+    pub fn take_last_spotify_error(&self) -> Option<String> {
+        self.spotify_last_error.lock().unwrap().take()
     }
 
     fn with_input(&self, f: impl FnOnce(&mut dyn pulpit_actions::Input)) {
@@ -1113,6 +1127,52 @@ mod tests {
             &mut RecSink::default(),
         );
         assert!(input.effects().is_empty());
+        // the NeedsLogin user message is readable for the desktop toast
+        assert_eq!(
+            backend.take_last_spotify_error().as_deref(),
+            Some("Log in to Spotify in Pulpit settings")
+        );
+        // taken, not peeked: the next exec without a failure reads None
+        assert_eq!(backend.take_last_spotify_error(), None);
+    }
+
+    #[test]
+    fn failed_spotify_exec_records_the_user_message_and_clears_on_next_exec() {
+        let fake = SharedSpotifyFake(std::sync::Arc::new(
+            pulpit_spotify::http::FakeTransport::new(),
+        ));
+        fake.0.push(pulpit_spotify::http::HttpResponse {
+            status: 403,
+            headers: Vec::new(),
+            body: serde_json::to_vec(&serde_json::json!({
+                "error": { "message": "m", "reason": "PREMIUM_REQUIRED" }
+            }))
+            .unwrap(),
+        });
+        let (backend, _path, _dir) = spotify_backend(&fake);
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+
+        backend.exec(
+            button_row("spotify-playback", Some("next")),
+            false,
+            &mut RecSink::default(),
+        );
+        assert_eq!(
+            backend.take_last_spotify_error().as_deref(),
+            Some("Spotify Premium required")
+        );
+
+        // the next exec starts clean even though nothing changed the
+        // error slot since
+        fake.0.push_json(200, serde_json::json!({ "is_playing": false }));
+        fake.0.push(control_answer(204));
+        backend.exec(
+            button_row("spotify-playback", Some("play")),
+            false,
+            &mut RecSink::default(),
+        );
+        assert_eq!(backend.take_last_spotify_error(), None);
     }
 
     #[test]
