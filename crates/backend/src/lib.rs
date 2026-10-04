@@ -531,19 +531,31 @@ impl SqlBackend {
         if what.trim().is_empty() {
             return true;
         }
-        let output = shell_command(what).output();
-        match output {
-            Ok(out) => {
-                tracing::debug!(
-                    command = %what,
-                    stdout = %String::from_utf8_lossy(&out.stdout),
-                    stderr = %String::from_utf8_lossy(&out.stderr),
-                    "run-command executed"
-                );
-                if !out.status.success() {
-                    // the original popped a "Command Failed!" dialog; the
-                    // host has no dialogs, so the failure is logged
-                    tracing::warn!(command = %what, status = %out.status, "run-command failed");
+        // fire and forget like child_process.exec: the press returns as
+        // soon as the shell starts. No pipes either - a program the shell
+        // launches (notepad, a server script) inherits piped handles, and
+        // waiting for their EOF would hold the press until it exits.
+        let child = shell_command(what)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match child {
+            Ok(mut child) => {
+                let what = what.to_string();
+                // the original popped a "Command Failed!" dialog; the host
+                // has no dialogs, so a reaper logs the failure instead
+                let reaper = std::thread::Builder::new()
+                    .name("run-command-reaper".into())
+                    .spawn(move || match child.wait() {
+                        Ok(status) if !status.success() => {
+                            tracing::warn!(command = %what, %status, "run-command failed");
+                        }
+                        Ok(_) => tracing::debug!(command = %what, "run-command finished"),
+                        Err(e) => tracing::warn!(command = %what, error = %e, "run-command wait failed"),
+                    });
+                if let Err(e) = reaper {
+                    tracing::warn!(error = %e, "run-command reaper thread failed to start");
                 }
             }
             Err(e) => tracing::warn!(command = %what, error = %e, "run-command spawn failed"),
@@ -1465,10 +1477,44 @@ mod tests {
             false,
             &mut RecSink::default(),
         );
+        // the executor does not wait for the shell, so poll for its output
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut seen = String::new();
+        while std::time::Instant::now() < deadline {
+            seen = std::fs::read_to_string(&out).unwrap_or_default();
+            if seen.trim() == probe {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         assert_eq!(
-            std::fs::read_to_string(&out).unwrap_or_default().trim(),
+            seen.trim(),
             probe,
             "the native run-command executor must run the shell line"
+        );
+    }
+
+    #[test]
+    fn run_command_press_does_not_wait_for_the_program() {
+        // a long-lived program (notepad, a server script) must not hold the
+        // press: the old JS used async child_process.exec
+        let action = if cfg!(windows) {
+            "ping -n 6 127.0.0.1"
+        } else {
+            "sleep 5"
+        };
+        let backend = test_backend();
+        let command = serde_json::json!({ "commandAction": action }).to_string();
+        let started = std::time::Instant::now();
+        backend.exec(
+            button_row("run-command", Some(&command)),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "press blocked for {:?} on a 5 s command",
+            started.elapsed()
         );
     }
 
