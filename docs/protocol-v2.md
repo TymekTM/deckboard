@@ -427,6 +427,19 @@ disconnect and retries as usual.
   `windows:` options token now get `params.windows` (array of
   `"5h"`/`"week"`; empty = all unticked). Additive optional field per
   §10 - `v` stays 2.
+- Change log: 2026-10 (round 4) status payloads (the object on an
+  `ext.*` channel with `title`/`rows`/`compact`/`summary`) may carry
+  two optional fields, first used by `ext.spotify-now-playing`:
+  - `image`: an asset hash (§7) for a cover picture; fetch it from
+    `/assets/<hash>`. Absent means no picture. When it disappears, the
+    client drops the old picture.
+  - `progress`: `{ "position_ms", "duration_ms", "playing" }`, a
+    snapshot taken at poll time. While `playing` is true the client
+    advances `position_ms` locally (clamped to `duration_ms`) until the
+    next patch replaces it. The server polls every few seconds and does
+    not push per-second ticks. Absent means no progress bar.
+
+  Additive optional fields per §10 - `v` stays 2.
 - Wire compatibility is pinned by golden fixtures
   (`crates/proto/tests/fixtures/*.json`): Rust round-trips them and the
   Kotlin unit test parses the same files. Both must stay green.
