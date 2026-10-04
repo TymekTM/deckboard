@@ -150,11 +150,7 @@ fn find_endpoint() -> Result<String> {
 /// HTTP client that returns every status as a Response (Discord's local
 /// API answers 404/400 on purpose), with a per-call timeout.
 fn http_agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(timeout))
-        .build()
-        .new_agent()
+    pulpit_db::http_agent(timeout, false)
 }
 
 /// x-www-form-urlencoded body from key/value pairs.

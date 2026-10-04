@@ -683,6 +683,27 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// Shared HTTP client constructor: one place for the timeout policy and
+/// the user agent every Pulpit HTTP call carries. `status_as_error` picks
+/// ureq's default behavior (4xx/5xx become `ureq::Error::Status`) or the
+/// tolerant one APIs like Discord's local RPC need (every status comes
+/// back as a `Response`).
+///
+/// Users today: pulpit-discord (OAuth calls), pulpit-aidev (provider
+/// limits + Antigravity quota), pulpit-backend (third-party app pings).
+/// Skip-sized timeouts on purpose: Discord's local pipe API answers
+/// instantly, quota/limits endpoints can be slow. New HTTP consumers -
+/// `crates/spotify` is next - must build their agents through this
+/// instead of rolling another `Agent::config_builder()` chain.
+pub fn http_agent(global_timeout: std::time::Duration, status_as_error: bool) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(global_timeout))
+        .http_status_as_error(status_as_error)
+        .user_agent(concat!("pulpit/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .new_agent()
+}
+
 /// `<path>.tmp` in the same directory, so the rename stays on one volume.
 fn temp_sibling(path: &Path) -> PathBuf {
     let mut name = path
@@ -1290,5 +1311,43 @@ mod tests {
         assert_eq!((b.x, b.y), (None, Some(1)));
         assert_eq!(b.position, None);
         assert_eq!(b.position2, 2);
+    }
+
+    #[test]
+    fn http_agent_carries_the_pulpit_user_agent() {
+        // one shared constructor means one user agent: assert it survives
+        // onto the wire so the policy stays in this one place
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = std::io::Read::read(&mut sock, &mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            let _ = std::io::Write::write_all(
+                &mut sock,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+            );
+            String::from_utf8_lossy(&head).into_owned()
+        });
+        let mut resp = http_agent(std::time::Duration::from_secs(10), true)
+            .get(&format!("http://{addr}/ua"))
+            .call()
+            .unwrap();
+        let _ = resp.body_mut().read_to_string();
+        let head = server.join().unwrap();
+        let header = head
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("user-agent:"))
+            .expect("user agent header present");
+        let (name, value) = header.split_once(':').unwrap();
+        assert_eq!(name.to_ascii_lowercase(), "user-agent");
+        assert_eq!(value.trim(), format!("pulpit/{}", env!("CARGO_PKG_VERSION")));
     }
 }

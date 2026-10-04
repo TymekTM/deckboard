@@ -204,11 +204,7 @@ fn resolve_key(cfg: Option<&Apikey>, env: &str) -> Option<String> {
 // ---- HTTP plumbing -----------------------------------------------------------
 
 pub(crate) fn http_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(10)))
-        .http_status_as_error(false)
-        .build()
-        .new_agent()
+    pulpit_db::http_agent(std::time::Duration::from_secs(10), false)
 }
 
 fn get_json(url: &str, headers: &[(&str, String)]) -> Result<serde_json::Value, String> {
