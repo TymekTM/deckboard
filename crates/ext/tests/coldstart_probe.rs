@@ -11,6 +11,8 @@
 //!
 //! It prints per-phase timings for the first press (extract + JS load +
 //! execute) and the warm second press, plus the end-to-end manager path.
+//! The extraction cache is a scratch temp dir, so the cold numbers are
+//! deterministic and the user's real extraction cache is never touched.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -35,13 +37,29 @@ fn coldstart_phases() {
         panic!("PULPIT_COLDSTART_ASAR not set or not a file");
     };
 
-    // Phase A: open the package (asar -> temp-dir extraction).
+    // Phase A: open the package. Cold pass: extraction into a scratch
+    // cache; warm pass: same cache root again (cache hit), which is what
+    // the second app session (or a second lazy spawn) pays.
+    let cache = tempfile::tempdir().unwrap();
     let t = Instant::now();
-    let source = pulpit_ext::PackageSource::open(&asar, "deckboard-commands".into()).unwrap();
+    let source =
+        pulpit_ext::PackageSource::open_with_cache_root(&asar, "deckboard-commands".into(), Some(cache.path()))
+            .unwrap();
     let extract_ms = ms(t);
     let (root, _keep) = source.into_root();
     let file_count = walk_count(&root);
-    println!("phase A  PackageSource::open (extract): {extract_ms:8.1} ms  ({file_count} files)");
+    println!("phase A  open cold (extract -> scratch cache): {extract_ms:8.1} ms  ({file_count} files)");
+
+    let t = Instant::now();
+    let warm = pulpit_ext::PackageSource::open_with_cache_root(
+        &asar,
+        "deckboard-commands".into(),
+        Some(cache.path()),
+    )
+    .unwrap();
+    let warm_open_ms = ms(t);
+    println!("phase A' open warm (cache hit): {warm_open_ms:8.1} ms");
+    drop(warm);
 
     // Phase B: evaluate prelude + entry module.
     let t = Instant::now();

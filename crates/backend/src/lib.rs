@@ -805,7 +805,6 @@ fn shell_command(command: &str) -> std::process::Command {
     c
 }
 
-
 /// Multiaction step dispatcher: every step goes through the same
 /// native/extension chain as a top-level tile press ([`SqlBackend::exec_native`]),
 /// then falls back to the builtin dispatcher. Nested multiactions keep
@@ -1318,13 +1317,18 @@ mod tests {
         std::fs::write(
             pkg.join("index.js"),
             format!(
-                r#"module.exports = {{
+                r##"module.exports = {{
                     name: "commands lookalike",
-                    inputs: [{{ value: "run-command" }}],
+                    inputs: [{{
+                        value: "run-command",
+                        label: "Run Command",
+                        icon: "terminal",
+                        color: "#34495e"
+                    }}],
                     execute: function (action, args) {{
                         __host_write_file("{}", "js");
                     }}
-                }};"#,
+                }};"##,
                 marker.display().to_string().replace('\\', "\\\\")
             ),
         )
@@ -1332,6 +1336,17 @@ mod tests {
         let (manager, _events) =
             pulpit_ext::ExtManager::load(dir.path(), &serde_json::Value::Null, &[]);
         assert!(manager.has_action("run-command"));
+        // The editor's action picker and tile styling read exactly this
+        // listing (list_known_inputs / register_extension_input), so the
+        // declaration must survive even though the press never runs JS.
+        let input = manager
+            .inputs()
+            .iter()
+            .find(|i| i.value == "run-command")
+            .expect("run-command stays listed for the editor");
+        assert_eq!(input.label.as_deref(), Some("Run Command"));
+        assert_eq!(input.icon.as_deref(), Some("terminal"));
+        assert_eq!(input.color.as_deref(), Some("#34495e"));
 
         let backend = test_backend().with_extensions(manager);
         backend.exec(

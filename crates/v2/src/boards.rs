@@ -420,6 +420,45 @@ mod tests {
     }
 
     #[test]
+    fn run_command_keeps_its_extension_style_on_both_wire_builders() {
+        // The declaration as deckboard-commands ships it (extracted from
+        // the package's metadata): the package stays loaded for its input
+        // declarations even though the press itself is native now, and
+        // this test pins the style those declarations must produce.
+        pulpit_legacy::props::register_extension_input(pulpit_legacy::props::ExtInput {
+            value: "run-command".into(),
+            icon: Some("terminal".into()),
+            color: Some("#34495e".into()),
+            font_icon: None,
+            mode: None,
+            command: None,
+        });
+        let r = row("run-command", "button", Some(r#"{"commandAction":"calc.exe"}"#));
+
+        // Legacy payload (stock Deckboard tablets): color/icon resolved
+        // through the extension-input registry, like getExtensionButton.
+        let legacy = Mapper::new().shortcut_payload(&r);
+        assert_eq!(legacy["color"], "#34495e");
+        assert_eq!(legacy["prefix"], "fas");
+        let unicode = legacy["unicode"].as_str().unwrap();
+        let glyph: Vec<u32> = unicode.chars().map(|c| c as u32).collect();
+        assert_eq!(glyph, vec![0xf120], "the terminal glyph (fas f120)");
+
+        // v2 manifest: style is derived from that same legacy payload.
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let tile = build_tile(&r, &assets, &engine);
+        let style = tile.manifest.style.as_ref().unwrap();
+        assert_eq!(style.color.as_deref(), Some("#34495e"));
+        assert_eq!(style.icon_family.as_deref(), Some("fas"));
+        let icon = style.icon.as_deref().expect("terminal icon carried");
+        assert_eq!(
+            icon.chars().map(|c| c as u32).collect::<Vec<_>>(),
+            vec![0xf120]
+        );
+    }
+
+    #[test]
     fn plain_button_press_interactions() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
