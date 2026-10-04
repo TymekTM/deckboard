@@ -811,6 +811,7 @@ function onKeydown(event) {
       <SettingsOverlay
         v-if="settingsOpen"
         :status="status"
+        :custom-values="customValues"
         @close="settingsOpen = false"
       />
     </Transition>
