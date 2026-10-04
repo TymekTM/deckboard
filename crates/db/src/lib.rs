@@ -245,10 +245,11 @@ impl Db {
     }
 
     /// Open the database for reading and writing, creating an empty
-    /// schema when the file does not exist (a clean install has no legacy
-    /// copy to migrate). The caller becomes the single writer - the
-    /// original desktop app must not have the file open (docs/decisions.md
-    /// ADR-001).
+    /// schema when the file does not exist - or when it exists but has
+    /// none (an empty or hand-created placeholder must not open into a
+    /// database every query fails on). The caller becomes the single
+    /// writer - the original desktop app must not have the file open
+    /// (docs/decisions.md ADR-001).
     pub fn open_read_write(path: Option<&Path>) -> Result<Db> {
         let path = match path {
             Some(p) => p.to_path_buf(),
@@ -269,6 +270,23 @@ impl Db {
             return Ok(Db { conn });
         }
         let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        // A file that merely exists may be empty or junk (torn third-party
+        // write): probe the schema instead of trusting the file. A real
+        // database answers "tables present" and nothing is written;
+        // create_schema's CREATE TABLE IF NOT EXISTS makes the other case
+        // idempotent.
+        let has_boards: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'Boards')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_boards {
+            create_schema(&conn)?;
+            tracing::info!(
+                path = %path.display(),
+                "existing database file had no schema - created it"
+            );
+        }
         tracing::info!(path = %path.display(), "opened pulpitApp database (read-write)");
         Ok(Db { conn })
     }
@@ -1258,6 +1276,33 @@ mod tests {
         drop(db);
         let db = Db::open_read_write(Some(&path)).unwrap();
         assert_eq!(db.get_boards().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn open_read_write_creates_schema_for_an_empty_existing_file() {
+        // the file merely existing must not count as "schema present": a
+        // 0-byte placeholder (or torn write) used to open "successfully"
+        // and then fail every query with "no such table"
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        std::fs::write(&path, b"").unwrap();
+
+        let db = Db::open_read_write(Some(&path)).unwrap();
+        assert!(db.get_boards().unwrap().is_empty());
+        let id = db.insert_board("First", "#2c3e50", 4, 3).unwrap();
+        assert!(db.get_board(id).unwrap().is_some());
+    }
+
+    #[test]
+    fn open_read_write_rejects_a_non_sqlite_file() {
+        // junk bytes are not rescuable: say so at open instead of handing
+        // back a database whose every query fails with "not a database"
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        std::fs::write(&path, b"this is not sqlite at all").unwrap();
+
+        let err = Db::open_read_write(Some(&path)).unwrap_err();
+        assert!(matches!(err, DbError::Sqlite(_)), "got {err:?}");
     }
 
     #[test]
