@@ -1,4 +1,4 @@
-# AI dev work source (`deckboard-aidev`)
+# AI dev work source (`pulpit-aidev`)
 
 Native read-only display tiles for AI coding-agent activity: plan limits,
 agent progress and token burn. Ships four catalog entries under
@@ -67,7 +67,7 @@ endpoint, and the z.ai monitor API for GLM (CodexBar's mapping:
 `data.limits[]`, TOKENS_LIMIT / CREDIT_LIMIT windows; `usage` +
 `currentValue`/`remaining` counts only refine the percentage the API
 reports). Without any of those, GLM and Claude fall back to token sums
-against ceilings configured in `~/deckboard/aidev.json`
+against ceilings configured in `~/pulpitApp/aidev.json`
 (`glm_five_hour_tokens` / `glm_week_tokens` and the `claude_*` pair) - a
 ceiling turns the local sum into a percentage bar. With neither source nor
 ceiling there is no percentage to show, so the row stays a raw sum; ZCode
@@ -141,7 +141,8 @@ disk - they prune their own logs, so "today" counts what is retrievable.
 
 ## Configuration
 
-`~/deckboard/aidev.json`, all keys optional (defaults shown):
+`~/pulpitApp/aidev.json` (`PULPIT_AIDEV_CONFIG` overrides the location),
+all keys optional (defaults shown):
 
 ```json
 {
@@ -174,5 +175,5 @@ needed for mainland BigModel plans.
 Live smoke check against the real user directories:
 
 ```
-cargo test -p deckboard-aidev -- --ignored live --nocapture
+cargo test -p pulpit-aidev -- --ignored live --nocapture
 ```

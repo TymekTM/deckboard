@@ -14,7 +14,7 @@ once:
 | --- | --- | --- |
 | Desktop (editor + touch mode) | `apps/desktop` (Tauri + Vue) | backend JSON via Tauri commands |
 | Server (embedded in desktop, headless `apps/server`) | `crates/legacy`, `crates/v2` | DB rows mapped to wire payloads |
-| Android client | `apps/mobile` (Kotlin/Compose) | legacy payload; `proto/Models.kt` mirrors `crates/legacy/src/mapping.rs` |
+| Android client | `apps/mobile` (Kotlin/Compose) | v2 payload; `proto/V2.kt` mirrors `crates/proto`, checked against `crates/proto/tests/fixtures` |
 
 Tile behavior and styling - press modes (`button` / `toggle` / `slider`),
 dual states, live-state fields - must be implemented in every surface
@@ -25,8 +25,11 @@ the work counts as done:
   or touch mode when the change is visible in the UI.
 - Rust crates (backend, mappers, server): `cargo test --workspace` and
   `cargo clippy --workspace --all-targets` from the repo root.
-- Android: run the Gradle unit tests in `apps/mobile` whenever its code
-  moved.
+- Android: Gradle unit tests in `apps/mobile` whenever its code moved
+  (`gradle :app:testDebugUnitTest` from `apps/mobile`, JDK 17; Gradle is
+  not always on PATH - on the owner's machine it lives in
+  `C:/Users/Tymek/gradle-8.7/bin`, the JDK in
+  `C:/Users/Tymek/.jdks/openjdk-17.0.1`, the SDK in `C:/android-sdk`).
 
 Passing one surface is not completion. A change that edits only the layer
 where the bug was found is suspect by default: check what the other two
@@ -53,10 +56,15 @@ appends to its `logs/` - there is no data-dir override.
 New or changed tile fields must reach BOTH wire builders: the legacy
 mapper (`crates/legacy/src/mapping.rs`) and the v2 manifest builder
 (`crates/v2/src/boards.rs`). Legacy field names are contractual - the
-stock Deckboard Android client renders exactly those fields - and the
-native client (`apps/mobile`) parses the legacy shape, so a field that
-skips the mapper silently vanishes from every tablet while the desktop
-editor still looks fine.
+stock Deckboard Android client renders exactly those fields. The native
+client (`apps/mobile`) speaks only v2: a field reaches it through
+`crates/v2/src/boards.rs` and the `crates/proto` types, which
+`apps/mobile/.../proto/V2.kt` mirrors by hand. A field missing from
+either path silently vanishes from that group of tablets while the
+desktop editor still looks fine - so add it to `crates/proto`, both
+builders, and `V2.kt`, and extend a golden fixture in
+`crates/proto/tests/fixtures` so `ProtoFixturesTest` proves the client
+parses it.
 
 ## Agent skills
 
