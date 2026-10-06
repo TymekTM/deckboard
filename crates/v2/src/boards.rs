@@ -493,7 +493,12 @@ mod tests {
             let legacy = Mapper::new().shortcut_payload(&r);
             assert_eq!(
                 allowed_interactions(&r),
-                widget_kind(&r, &legacy).1,
+                widget_kind_for(
+                    &r,
+                    legacy.get("app").and_then(Value::as_str),
+                    &parse_options(&r)
+                )
+                .1,
                 "{kind}/{mode}/{command:?}"
             );
         }
