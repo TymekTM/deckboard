@@ -253,19 +253,6 @@ pub fn windows_filter(options: Option<&str>) -> Option<Vec<String>> {
     )
 }
 
-/// Widget kind from the legacy `mode`/`app` columns: rendering modes map
-/// 1:1, custom-value buttons are toggles, everything else is a button.
-/// Production paths call [`widget_kind_for`] directly; this wrapper
-/// keeps the tests reading the kind off a legacy payload.
-#[cfg(test)]
-fn widget_kind(row: &ButtonRow, legacy: &Value) -> (WidgetKind, Vec<Interaction>) {
-    widget_kind_for(
-        row,
-        legacy.get("app").and_then(Value::as_str),
-        &parse_options(row),
-    )
-}
-
 fn widget_kind_for(
     row: &ButtonRow,
     app: Option<&str>,
