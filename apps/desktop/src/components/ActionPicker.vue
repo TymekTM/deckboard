@@ -142,7 +142,14 @@ watch(hlIdx, scrollHl);
 function moveHl(delta) {
   const n = flat.value.length;
   if (!n) return;
-  hlIdx.value = (hlIdx.value + delta + n) % n;
+  // unavailable entries are skipped: highlight lands on a pickable one
+  for (let i = 0; i < n; i += 1) {
+    const next = (hlIdx.value + delta * i + delta + n * 2) % n;
+    if (!flat.value[next].unavailable) {
+      hlIdx.value = next;
+      return;
+    }
+  }
 }
 function idxOfItem(it) {
   return flat.value.indexOf(it);
@@ -422,6 +429,15 @@ function onSearchKeydown(e) {
 .item.hl.sel { background: #dcf3ec; }
 .ilabel { flex: 1; min-width: 0; }
 .selcheck { flex: none; font-size: 12px; color: #0f7e69; }
+/* unavailable integrations: listed for honesty, not pickable */
+.item.dead { cursor: default; opacity: 0.45; }
+.item.dead .chip { filter: grayscale(0.7); }
+.deadhint {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--modal-muted);
+  text-align: right;
+}
 .empty {
   padding: 16px 10px;
   font-size: 13px;

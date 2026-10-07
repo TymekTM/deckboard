@@ -27,6 +27,7 @@ pulpit-vm = { path = "../../crates/vm" }
 pulpit-discord = { path = "../../crates/discord" }
 pulpit-spotify = { path = "../../crates/spotify" }
 pulpit-os = { path = "../../crates/os" }
+pulpit-obs = { path = "../../crates/obs" }
 pulpit-sysinfo = { path = "../../crates/sysinfo" }
 pulpit-aidev = { path = "../../crates/aidev" }
 pulpit-tools = { path = "../../crates/tools" }

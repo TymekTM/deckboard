@@ -378,31 +378,54 @@ export const CATALOG = [
   },
   { divider: true },
   { header: "OBS Studio" },
+  // native OBS integration (obs-websocket v5); the `devices: "obs-*"`
+  // pickers are fed from the live connection when OBS is connected and
+  // fall back to free text otherwise. The dual tiles read the pushed
+  // OBS state via the STATE_BINDINGS entries below.
   { value: "obs-scene", label: "Switch Scene", icon: "video", color: "#2980b9", dual: true,
-    fields: [{ key: "scene", label: "Scene name" }] },
+    fields: [{ key: "scene", label: "Scene name", devices: "obs-scenes" }] },
   { value: "obs-source", label: "Toggle Source", icon: "photo-video", color: "#2980b9", dual: true,
-    fields: [{ key: "source", label: "Source name" }] },
+    fields: [{ key: "source", label: "Source name", devices: "obs-sources" }] },
   { value: "obs-device-audio", label: "Toggle Audio Source", icon: "volume-up", color: "#2980b9", dual: true,
-    fields: [{ key: "device", label: "Source name" }] },
+    fields: [{ key: "device", label: "Source name", devices: "obs-inputs" }] },
   { value: "obs-filter", label: "Toggle Filter", icon: "filter", color: "#2980b9", dual: true,
-    fields: [{ key: "filter", label: "Filter name" }] },
+    fields: [
+      { key: "filter", label: "Filter name", devices: "obs-filters" },
+      { key: "source", label: "Source (optional)", devices: "obs-inputs" },
+    ] },
   { value: "obs-studio-mode", label: "Toggle Studio Mode", icon: "columns", color: "#2980b9", dual: true },
+  { value: "obs-record", label: "Toggle Record", icon: "dot-circle", color: "#2980b9", dual: true },
+  { value: "obs-stream", label: "Toggle Stream", icon: "broadcast-tower", color: "#2980b9", dual: true },
+  { value: "obs-replay-save", label: "Save Replay Buffer", icon: "save", color: "#2980b9" },
+  { value: "obs-audio-slider", label: "Audio Slider", mode: "slider", icon: "sliders-h", color: "#2980b9",
+    fields: [{ key: "device", label: "Source name", devices: "obs-inputs" }] },
   { divider: true },
   { header: "Streamlabs & XSplit" },
+  // no native integration: stock boards carry these kinds, so they stay
+  // listed but the picker greys them out (see unavailable in
+  // ActionPicker.vue) and the backend warns once per kind, not per press
   { value: "slobs-scene", label: "SLOBS: Switch Scene", icon: "video", color: "#3070b0", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)",
     fields: [{ key: "scene", label: "Scene name" }] },
   { value: "slobs-source", label: "SLOBS: Toggle Source", icon: "photo-video", color: "#3070b0", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)",
     fields: [{ key: "source", label: "Source name" }] },
   { value: "slobs-device-audio", label: "SLOBS: Toggle Audio Source", icon: "volume-up", color: "#3070b0", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)",
     fields: [{ key: "device", label: "Source name" }] },
   { value: "xsplit-scene", label: "XSplit: Switch Scene", icon: "video", color: "#2d7dd2", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)",
     fields: [{ key: "scene", label: "Scene name" }] },
   { divider: true },
   { header: "Twitch" },
-  { value: "twitch-slow", label: "Slow Mode", icon: "hourglass-half", color: "#9146ff", dual: true },
-  { value: "twitch-follow-only", label: "Followers-Only Mode", icon: "user-plus", color: "#9146ff", dual: true },
-  { value: "twitch-subs-only", label: "Subs-Only Mode", icon: "star", color: "#9146ff", dual: true },
-  { value: "twitch-emote-only", label: "Emote-Only Mode", icon: "smile", color: "#9146ff", dual: true },
+  { value: "twitch-slow", label: "Slow Mode", icon: "hourglass-half", color: "#9146ff", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)" },
+  { value: "twitch-follow-only", label: "Followers-Only Mode", icon: "user-plus", color: "#9146ff", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)" },
+  { value: "twitch-subs-only", label: "Subs-Only Mode", icon: "star", color: "#9146ff", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)" },
+  { value: "twitch-emote-only", label: "Emote-Only Mode", icon: "smile", color: "#9146ff", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)" },
   { divider: true },
   { header: "AI dev work" },
   {
@@ -693,15 +716,22 @@ export const STATE_BINDINGS = {
   "spotify-shuffle": { watch: "spotify-shuffle" },
   "spotify-repeat": { watch: "spotify-repeat-on" },
   "spotify-like": { watch: "spotify-liked" },
-  // obs/slobs/xsplit/twitch/discord integrations have no live push in
-  // Pulpit (the JS-app extensions that owned the app-state lane are
-  // gone; exec pushes at most a per-key custom value): their dual tiles
-  // fall back to the session tap flip, like the vm toggles below.
-  "obs-studio-mode": {},
-  "obs-scene": {},
-  "obs-source": {},
-  "obs-device-audio": {},
-  "obs-filter": {},
+  // Native OBS (round 5): the connection worker pushes the live state
+  // under the `obs-*` semantic keys (crates/obs/src/state.rs). Scene
+  // pushes the current scene name (compared against the tile's scene),
+  // source/filter/device push name arrays (membership decides), the
+  // argument-less toggles push booleans. OBS offline pushes the empty
+  // values, which read as "unknown" and fall back to the tap flip.
+  "obs-scene": { watch: "obs-scene", cmd: "scene" },
+  "obs-source": { watch: "obs-source", cmd: "source" },
+  "obs-device-audio": { watch: "obs-device-audio", cmd: "device" },
+  "obs-filter": { watch: "obs-filter", cmd: "filter" },
+  "obs-studio-mode": { watch: "obs-studio-mode" },
+  "obs-record": { watch: "obs-record" },
+  "obs-stream": { watch: "obs-stream" },
+  // slobs/xsplit/twitch integrations have no live push in Pulpit (the
+  // JS-app extensions that owned the app-state lane are gone): their
+  // dual tiles fall back to the session tap flip.
   "slobs-scene": {},
   "slobs-source": {},
   "slobs-device-audio": {},

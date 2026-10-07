@@ -551,6 +551,15 @@ function sliderValue() {
     const live = Number(props.customValues["speaker-volume"]);
     if (Number.isFinite(live)) return Math.min(1, Math.max(0, live));
   }
+  // OBS audio slider: the live input volume rides the pushed
+  // obs-audio-slider_<source> key (crates/obs snapshot)
+  if (props.tile.type === "obs-audio-slider") {
+    const device = cmd.value.device || cmd.value.source;
+    if (device) {
+      const live = Number(props.customValues[`obs-audio-slider_${device}`]);
+      if (Number.isFinite(live)) return Math.min(1, Math.max(0, live));
+    }
+  }
   return 0.5;
 }
 function startSlider(event) {

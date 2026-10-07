@@ -42,6 +42,9 @@ pub struct SqlBackend {
     /// `spotify.json` provides a login; None leaves Spotify actions
     /// claimed-but-logged-out (the design's NeedsLogin surface).
     spotify: Option<pulpit_spotify::Spotify>,
+    /// Native OBS websocket handle, injected by the host when it built
+    /// the producer pump; None leaves OBS actions claimed-but-warned.
+    obs: Option<pulpit_obs::Obs>,
     /// The user-facing message of the last failed Spotify exec/slider
     /// (design §3 error mapping). Cleared on every exec/slider entry and
     /// taken by the host's exec command so a desktop tap surfaces it as
@@ -50,6 +53,10 @@ pub struct SqlBackend {
     http_last_error: std::sync::Mutex<Option<String>>,
     custom_values: std::sync::Mutex<std::collections::HashMap<String, String>>,
     tools: Option<std::sync::Arc<pulpit_tools::ToolManager>>,
+    /// Kinds already greeted with the one "not available in Pulpit"
+    /// warning this run (SLOBS / XSplit / Twitch): the warning is per
+    /// kind per run, never per press.
+    unavailable_warned: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
     speaker: Mutex<Option<Box<dyn pulpit_os::Speaker>>>,
@@ -70,10 +77,12 @@ impl SqlBackend {
             discord_settings_mtime: Mutex::new(None),
             discord_client: Mutex::new(None),
             spotify: None,
+            obs: None,
             spotify_last_error: std::sync::Mutex::new(None),
             http_last_error: std::sync::Mutex::new(None),
             custom_values: std::sync::Mutex::new(std::collections::HashMap::new()),
             tools: None,
+            unavailable_warned: std::sync::Mutex::new(std::collections::HashSet::new()),
             speaker: Mutex::new(None),
             http_agent: pulpit_db::http_agent(std::time::Duration::from_secs(10), true),
         }
@@ -146,6 +155,14 @@ impl SqlBackend {
 
     pub fn with_tools(mut self, tools: Option<std::sync::Arc<pulpit_tools::ToolManager>>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// Attach the native OBS integration (None = no obs.json / disabled
+    /// at the file level is still Some - the handle parks itself; None
+    /// means the host could not build the producer pump at all).
+    pub fn with_obs(mut self, obs: Option<pulpit_obs::Obs>) -> Self {
+        self.obs = obs;
         self
     }
 
@@ -510,6 +527,7 @@ impl Backend for SqlBackend {
             || self.exec_callurl(&cmd)
             || self.exec_voicemeeter(&cmd, Some(value))
             || self.exec_spotify(&cmd, Some(value))
+            || self.exec_obs(&cmd, Some(value))
             || self.exec_speaker_volume(&cmd, value)
             || self.exec_media(&cmd, Some(value))
         {
@@ -531,6 +549,9 @@ impl SqlBackend {
     fn exec_native(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
         self.exec_runcommand(cmd)
             || self.exec_extension(cmd, None)
+            // unavailable integrations sit right behind the extensions:
+            // a package that actually provides slobs-*/twitch-* must win
+            || self.exec_unavailable(cmd)
             || self.exec_sysinfo(cmd)
             || self.exec_aidev(cmd)
             || self.exec_callurl(cmd)
@@ -538,6 +559,7 @@ impl SqlBackend {
             || self.exec_voicemeeter(cmd, None)
             || self.exec_discord(cmd, sink)
             || self.exec_spotify(cmd, None)
+            || self.exec_obs(cmd, None)
             || self.exec_speaker(cmd, sink)
             || self.exec_play(cmd)
             || self.exec_tool(cmd)
@@ -1010,6 +1032,58 @@ impl SqlBackend {
         true
     }
 
+    /// Run one OBS tile action through the native websocket handle
+    /// (`crates/obs`). The exec is fire-and-forget: the handle queues
+    /// the action for its connection actor and returns immediately, so
+    /// a slow OBS never blocks the input thread. Slider kinds arrive
+    /// here a second time from [`Backend::slider`] with their 0..1
+    /// value. Returns true when the kind belongs to OBS.
+    fn exec_obs(&self, cmd: &pulpit_actions::Command, slider_value: Option<f64>) -> bool {
+        if !pulpit_obs::is_obs_action(&cmd.kind) {
+            return false;
+        }
+        let Some(obs) = &self.obs else {
+            // like Spotify's NeedsLogin: claimed, told once, never
+            // falling through to the macro dispatcher
+            tracing::warn!(
+                kind = %cmd.kind,
+                "obs action skipped - OBS is not configured (enable it in the Pulpit settings)"
+            );
+            return true;
+        };
+        obs.exec(
+            &cmd.kind,
+            cmd.command.as_deref().unwrap_or_default(),
+            slider_value,
+        );
+        true
+    }
+
+    /// Claim the integration kinds Pulpit does not implement (SLOBS,
+    /// XSplit, Twitch): stock boards carry those tiles, so they stay
+    /// loadable, but a press can only warn - once per kind per run,
+    /// not per press. An installed extension that actually provides
+    /// the kind wins before this arm runs (see [`SqlBackend::exec_native`]).
+    /// Returns whether THIS call emitted the run's single warning.
+    fn exec_unavailable(&self, cmd: &pulpit_actions::Command) -> bool {
+        let owned = cmd.kind.starts_with("slobs")
+            || cmd.kind.starts_with("xsplit")
+            || cmd.kind.contains("twitch");
+        if !owned {
+            return false;
+        }
+        let mut warned = self.unavailable_warned.lock().unwrap();
+        if warned.insert(cmd.kind.clone()) {
+            tracing::warn!(
+                kind = %cmd.kind,
+                "integration not available in Pulpit - it needs an extension that provides it"
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Take (and clear) the user-facing message of the last failed
     /// Spotify exec/slider. The desktop's exec commands return it as the
     /// command error so the editor's existing flash path shows it;
@@ -1460,6 +1534,109 @@ mod tests {
         );
         // taken, not peeked: the next exec without a failure reads None
         assert_eq!(backend.take_last_spotify_error(), None);
+    }
+
+    // ---- obs native arm + unavailable integrations ----------------------
+
+    fn plain_command(kind: &str) -> pulpit_actions::Command {
+        pulpit_actions::Command::from_row(kind, None, None, "button")
+    }
+
+    #[test]
+    fn obs_kinds_stay_claimed_without_configuration() {
+        let backend = test_backend();
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+        backend.exec(
+            button_row("obs-scene", Some(r#"{"scene":"Game"}"#)),
+            false,
+            &mut RecSink::default(),
+        );
+        backend.exec(
+            button_row("obs-studio-mode", None),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(
+            input.effects().is_empty(),
+            "obs kinds are claimed (warned about), never dispatched to the macro layer"
+        );
+        // unimplemented obs kinds are NOT claimed: they fall through to
+        // the builtin dispatcher's stub arm, like before this integration
+        backend.exec(
+            button_row("obs-transition", None),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(input.effects().is_empty());
+        // the audio slider is claimed on the slider path, with the value
+        let mut row = button_row("obs-audio-slider", Some(r#"{"device":"Mic"}"#));
+        row.mode = "slider".into();
+        backend.slider(row, 0.4);
+        assert!(input.effects().is_empty());
+    }
+
+    #[test]
+    fn unavailable_integrations_warn_once_per_kind_and_stay_claimed() {
+        let backend = test_backend();
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+        for kind in ["slobs-scene", "xsplit-scene", "twitch-slow"] {
+            backend.exec(
+                button_row(kind, Some(r#"{"scene":"S"}"#)),
+                false,
+                &mut RecSink::default(),
+            );
+        }
+        assert!(
+            input.effects().is_empty(),
+            "slobs/xsplit/twitch kinds stay claimed so no macro dispatcher ever fires"
+        );
+        // the presses above carried each kind's single warning for this
+        // run: repeating them stays silent
+        assert!(!backend.exec_unavailable(&plain_command("slobs-scene")));
+        assert!(!backend.exec_unavailable(&plain_command("slobs-scene")));
+        assert!(!backend.exec_unavailable(&plain_command("xsplit-scene")));
+        // a kind not seen yet warns exactly once
+        assert!(backend.exec_unavailable(&plain_command("twitch-emote-only")));
+        assert!(!backend.exec_unavailable(&plain_command("twitch-emote-only")));
+        assert!(backend.exec_unavailable(&plain_command("slobs-source")));
+        // kinds outside the dead integrations are never claimed here
+        assert!(!backend.exec_unavailable(&plain_command("key")));
+        assert!(!backend.exec_unavailable(&plain_command("obs-scene")));
+    }
+
+    #[test]
+    fn an_extension_providing_an_unavailable_kind_wins_over_the_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("slobs-provider");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("index.js"),
+            r#"module.exports = ({ setValue }) => ({
+                name: "slobs provider",
+                inputs: [{ value: "slobs-scene" }],
+                execute: function (action) { setValue({ "slobs-taken": action }); }
+            });"#,
+        )
+        .unwrap();
+        let (manager, mut events) =
+            pulpit_ext::ExtManager::load(dir.path(), &serde_json::Value::Null, &[]);
+        let backend = test_backend().with_extensions(manager);
+        let input = SharedRecInput::default();
+        inject(&backend, input, SharedFakeSpeaker::default());
+
+        backend.exec(
+            button_row("slobs-scene", Some(r#"{"scene":"S"}"#)),
+            false,
+            &mut RecSink::default(),
+        );
+        // the extension's setValue push proves the extension executed -
+        // the unavailable stub never ran for this press
+        match events.try_recv() {
+            Ok(pulpit_ext::ExtEvent::SetValue(v)) => assert_eq!(v["slobs-taken"], "slobs-scene"),
+            other => panic!("expected the extension's setValue event, got {other:?}"),
+        }
     }
 
     #[test]

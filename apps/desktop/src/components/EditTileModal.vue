@@ -184,9 +184,11 @@ const actionGroups = computed(() => {
 
 // catalog fields may declare a dynamic option source; "audio" is the
 // audio endpoint list for speaker-device tiles, "spotify"/
-// "spotify-playlists" the Spotify device/playlist pickers. A picker
-// whose list is empty or failed to load (not logged in, API error)
-// falls back to the raw text field, so the URI/name can always be typed.
+// "spotify-playlists" the Spotify device/playlist pickers, "obs-*" the
+// live OBS connection (scenes / sources / inputs / filters). A picker
+// whose list is empty or failed to load (not logged in, OBS offline,
+// API error) falls back to the raw text field, so the URI/name can
+// always be typed.
 function catalogFieldShape(f) {
   if (f.devices === "audio") {
     return {
@@ -228,6 +230,24 @@ function catalogFieldShape(f) {
       options: vmDevicesState.value.buses,
     };
   }
+  if (String(f.devices || "").startsWith("obs-")) {
+    const list =
+      f.devices === "obs-scenes"
+        ? obsChoices.value.scenes
+        : f.devices === "obs-sources"
+          ? obsChoices.value.sources
+          : f.devices === "obs-filters"
+            ? obsChoices.value.filters
+            : obsChoices.value.inputs;
+    if (list.length) {
+      return {
+        key: f.key,
+        label: f.label,
+        kind: "select",
+        options: list.map((n) => ({ value: n, label: n })),
+      };
+    }
+  }
   return f;
 }
 // catalog entry for any action type (static catalog or extension group);
@@ -247,6 +267,22 @@ function fieldsShapeFor(type) {
 const catalogFields = computed(() => fieldsShapeFor(form.type));
 
 const catalogEntry = computed(() => catalogEntryFor(form.type));
+
+// OBS pickers: fetched once per dialog open when the selected action's
+// fields ask for them (`devices: "obs-*"`); empty when OBS is offline,
+// which leaves the fields as free text.
+const obsChoices = ref({ scenes: [], sources: [], inputs: [], filters: [] });
+watch(
+  () => (catalogEntry.value?.fields || []).some((f) => String(f.devices || "").startsWith("obs-")),
+  (need) => {
+    if (!need) return;
+    api
+      .obsChoices()
+      .then((c) => (obsChoices.value = c))
+      .catch(() => (obsChoices.value = { scenes: [], sources: [], inputs: [], filters: [] }));
+  },
+  { immediate: true },
+);
 const showDual = computed(
   () =>
     Boolean(catalogEntry.value?.dual) ||

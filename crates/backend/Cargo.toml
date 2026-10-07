@@ -15,6 +15,7 @@ pulpit-ext = { path = "../ext" }
 pulpit-vm = { path = "../vm" }
 pulpit-discord = { path = "../discord" }
 pulpit-spotify = { path = "../spotify" }
+pulpit-obs = { path = "../obs" }
 pulpit-os = { path = "../os" }
 pulpit-tools = { path = "../tools" }
 pulpit-sysinfo = { path = "../sysinfo" }

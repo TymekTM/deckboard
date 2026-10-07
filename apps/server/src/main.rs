@@ -107,6 +107,24 @@ async fn main() -> anyhow::Result<()> {
     let (tools_board_tx, mut tools_board_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
     tools.set_board_sink(tools_board_tx);
 
+    // OBS: the same `obs.json` the desktop writes. `PULPIT_OBS_CONFIG`
+    // overrides the location (hermetic runs). A disabled config parks
+    // the connection worker - zero traffic until it is enabled.
+    let obs_path = std::env::var_os("PULPIT_OBS_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("obs.json"));
+    let obs_config = match pulpit_obs::ObsConfig::load(&obs_path) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("obs.json exists but cannot be read: {e} - OBS disabled");
+            pulpit_obs::ObsConfig::default()
+        }
+    };
+    let (obs_push_tx, obs_push_rx) = tokio::sync::mpsc::unbounded_channel();
+    let obs = pulpit_obs::Obs::new(obs_config, Some(obs_path.clone()), obs_push_tx);
+    if !obs.status().await.enabled {
+        tracing::info!("OBS not enabled in obs.json - OBS integration idle");
+    }
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -116,7 +134,8 @@ async fn main() -> anyhow::Result<()> {
             )
             .with_voicemeeter_override(pulpit_vm::load_dll_override(&settings))
             .with_spotify(spotify.clone())
-            .with_tools(Some(tools.clone())),
+            .with_tools(Some(tools.clone()))
+            .with_obs(Some(obs)),
     );
 
     let concrete_backend = backend.clone();
@@ -235,6 +254,10 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // OBS producer: the connection worker's live-state snapshots ride
+    // the shared producer pump (same lanes and change-gating as every
+    // other producer).
+    tokio::spawn(pulpit_host::forward_producer(feed.clone(), obs_push_rx));
     // Spotify poller: consumers = connected legacy + v2 clients (no
     // host-local UI on the headless server). Snapshots ride the shared
     // spotify pump (internal art key stripped, album art imported).

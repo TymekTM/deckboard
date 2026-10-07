@@ -53,6 +53,12 @@ export const api = {
   spotifyPlaylists: () => invoke("spotify_playlists"),
   spotifyDevices: () => invoke("spotify_devices"),
   mediaSessions: () => invoke("media_sessions"),
+  obsStatus: () => invoke("obs_status"),
+  obsApplyConfig: (enabled, host, port, password) =>
+    invoke("obs_apply_config", { enabled, host, port, password }),
+  obsTestConnection: (host, port, password) =>
+    invoke("obs_test_connection", { host, port, password }),
+  obsChoices: () => invoke("obs_choices"),
   assetDataUrl: (hash) => invoke("asset_data_url", { hash }),
   discordStatus: () => invoke("discord_status"),
   discordSaveConfig: (clientId, clientSecret) =>

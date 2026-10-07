@@ -41,6 +41,11 @@ struct DesktopState {
     spotify: Option<pulpit_spotify::Spotify>,
     /// `pulpitApp/spotify.json` - the Spotify config (client id + tokens).
     spotify_path: Option<std::path::PathBuf>,
+    /// Native OBS websocket handle (cheap clone; the backend exec chain
+    /// and the Settings panel share it). Always present unless the
+    /// runtime itself failed to start. The obs.json path travels inside
+    /// the handle (`ObsConfig::save` on apply).
+    obs: Option<pulpit_obs::Obs>,
     /// Editor picker cache: the user's playlists (the `spotify_playlists`
     /// command caches them for 60 s so opening the tile dialog does not
     /// hammer the API).
@@ -225,6 +230,10 @@ pub fn run() {
             spotify_playlists,
             spotify_devices,
             media_sessions,
+            obs_status,
+            obs_apply_config,
+            obs_test_connection,
+            obs_choices,
             asset_data_url,
             discord_status,
             discord_save_config,
@@ -377,6 +386,8 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             aidev_config: Some(aidev_config),
             spotify: None,
             spotify_path: None,
+            obs: None,
+
             spotify_playlists: std::sync::Mutex::new(None),
             tools: None,
         };
@@ -399,6 +410,25 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             None
         }
     };
+
+    // PULPIT_OBS_CONFIG overrides the config location (profiling /
+    // hermetic runs), like PULPIT_SPOTIFY_CONFIG for Spotify. The handle
+    // is always built: a disabled or missing obs.json parks its
+    // connection worker (zero traffic) and the Settings panel can enable
+    // it without an app restart. Only an unreadable file starts from the
+    // defaults - failing closed instead of overwriting the user's config.
+    let obs_path = std::env::var_os("PULPIT_OBS_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("obs.json"));
+    let obs_config = match pulpit_obs::ObsConfig::load(&obs_path) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("obs.json exists but cannot be read: {e} - starting from defaults");
+            pulpit_obs::ObsConfig::default()
+        }
+    };
+    let (obs_push_tx, obs_push_rx) = tokio::sync::mpsc::unbounded_channel();
+    let obs_handle = pulpit_obs::Obs::new(obs_config, Some(obs_path.clone()), obs_push_tx);
 
     let settings: serde_json::Value = std::fs::read_to_string(data_dir.join("settings.json"))
         .ok()
@@ -443,7 +473,8 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             )
             .with_voicemeeter_override(pulpit_vm::load_dll_override(&settings))
             .with_spotify(spotify.clone())
-            .with_tools(Some(tools.clone())),
+            .with_tools(Some(tools.clone()))
+            .with_obs(Some(obs_handle.clone())),
     );
     let broadcaster = EditorBroadcaster::new(hub.clone(), backend.clone());
 
@@ -634,6 +665,14 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         ));
     }
 
+    // OBS producer: the connection worker's live-state snapshots ride
+    // the shared producer pump (same lanes and change-gating as every
+    // other producer, CORE-06).
+    tauri::async_runtime::spawn(pulpit_host::forward_producer(
+        feed.clone(),
+        obs_push_rx,
+    ));
+
     let state = Arc::new(AppState {
         hub: hub.clone(),
         backend: backend.clone() as Arc<dyn Backend>,
@@ -717,6 +756,8 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         aidev_config: Some(aidev_config),
         spotify,
         spotify_path: Some(spotify_path),
+        obs: Some(obs_handle),
+
         spotify_playlists: std::sync::Mutex::new(None),
         tools: Some(tools),
     }
@@ -3009,6 +3050,79 @@ async fn media_sessions() -> Result<Vec<String>, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ---- OBS Studio (Ustawienia; round 5) ---------------------------------------
+
+/// OBS connection state for the settings panel: enabled, live connection
+/// outcome (connected / auth failed / unreachable), the OBS version once
+/// identified, and whether a password is stored (never the value).
+#[tauri::command]
+async fn obs_status(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let obs = state.obs.as_ref().ok_or_else(|| "OBS wyłączony.".to_string())?;
+    let status = obs.status().await;
+    Ok(serde_json::json!({
+        "enabled": status.enabled,
+        "connected": status.connected,
+        "authFailed": status.auth_failed,
+        "version": status.version,
+        "host": status.host,
+        "port": status.port,
+        "hasPassword": status.has_password,
+    }))
+}
+
+/// Persist and apply the OBS settings (obs.json, written atomically);
+/// the connection worker reconnects - or parks - without an app
+/// restart. Password handling: `None` keeps the stored one (the editor
+/// never receives it back), an empty string clears it, text replaces it.
+#[tauri::command]
+async fn obs_apply_config(
+    state: State<'_, DesktopState>,
+    enabled: bool,
+    host: String,
+    port: u16,
+    password: Option<String>,
+) -> Result<(), String> {
+    let obs = state.obs.as_ref().ok_or_else(|| "OBS wyłączony.".to_string())?;
+    let mut config = obs.config_async().await;
+    config.enabled = enabled;
+    let host = host.trim().to_string();
+    config.host = if host.is_empty() { "127.0.0.1".to_string() } else { host };
+    config.port = port;
+    match password {
+        None => {}
+        Some(p) if p.is_empty() => config.password = None,
+        Some(p) => config.password = Some(p),
+    }
+    obs.apply_config(config).await
+}
+
+/// One-shot connect + auth probe for "Testuj połączenie": reads what the
+/// form holds right now, independent of the stored config. Returns the
+/// OBS websocket version on success.
+#[tauri::command]
+async fn obs_test_connection(
+    host: String,
+    port: u16,
+    password: Option<String>,
+) -> Result<String, String> {
+    let config = pulpit_obs::ObsConfig {
+        enabled: false,
+        host: if host.trim().is_empty() { "127.0.0.1".to_string() } else { host.trim().to_string() },
+        port,
+        password: password.filter(|p| !p.is_empty()),
+    };
+    pulpit_obs::Obs::test_connection(&config).await
+}
+
+/// Scene / source / input / filter names for the tile dialog's OBS
+/// pickers; empty lists while OBS is offline, so the fields fall back
+/// to free text.
+#[tauri::command]
+async fn obs_choices(state: State<'_, DesktopState>) -> Result<pulpit_obs::ObsChoices, String> {
+    let obs = state.obs.as_ref().ok_or_else(|| "OBS wyłączony.".to_string())?;
+    Ok(obs.choices().await)
 }
 
 /// One stored asset as a data URL for the WebView (the desktop TileCell
