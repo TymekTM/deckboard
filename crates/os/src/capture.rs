@@ -148,7 +148,7 @@ fn grab_screen_rgba() -> Result<image::RgbaImage> {
             return Err(OsError::Failed("screen bit copy failed".into()));
         }
         // GDI gives BGRA; the PNG wants RGBA with opaque alpha
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
             px[3] = 255;
         }
