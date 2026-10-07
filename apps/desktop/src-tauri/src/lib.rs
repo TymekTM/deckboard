@@ -88,6 +88,18 @@ impl DesktopState {
             }
         }
     }
+
+    /// Delta after a reorder: `board-set` for each board whose order value
+    /// changed, built from the post-commit DB state.
+    fn publish_board_set_many(&self, board_ids: &[i64]) {
+        if let Some(v2) = self.v2.as_ref() {
+            let ops = board_ids
+                .iter()
+                .filter_map(|id| v2.board_set_op(*id))
+                .collect();
+            self.publish_v2(ops);
+        }
+    }
 }
 
 /// One board together with its tiles - the editor's full state payload.
@@ -187,6 +199,7 @@ pub fn run() {
             create_board,
             update_board,
             delete_board,
+            reorder_boards,
             create_button,
             update_button,
             move_button,
@@ -2168,6 +2181,24 @@ async fn delete_board(state: State<'_, DesktopState>, board_id: i64) -> Result<(
         .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
     state.publish_v2(vec![pulpit_proto::BoardOp::BoardRemove { board: board_id }]);
+    Ok(())
+}
+
+/// Sidebar drag & drop: persist a new board order. Legacy clients get the
+/// full `get_shortcuts` broadcast (their only board-list view); v2 tablets
+/// get `board-set` deltas for the boards that actually moved.
+#[tauri::command]
+async fn reorder_boards(
+    state: State<'_, DesktopState>,
+    ordered_ids: Vec<i64>,
+) -> Result<(), String> {
+    let backend = state.backend()?;
+    let changed = tauri::async_runtime::spawn_blocking(move || backend.reorder_boards(&ordered_ids))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    state.broadcaster()?.sync_boards().await;
+    state.publish_board_set_many(&changed);
     Ok(())
 }
 

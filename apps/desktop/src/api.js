@@ -7,6 +7,7 @@ export const api = {
     invoke("create_board", { name, background, width, height }),
   updateBoard: (board) => invoke("update_board", { board }),
   deleteBoard: (boardId) => invoke("delete_board", { boardId }),
+  reorderBoards: (orderedIds) => invoke("reorder_boards", { orderedIds }),
   createButton: (boardId, kind, mode, x, y) =>
     invoke("create_button", { boardId, kind, mode, x, y }),
   updateButton: (button) => invoke("update_button", { button }),

@@ -386,6 +386,41 @@ impl Db {
         })
     }
 
+    /// Persist a new board order: `ordered_ids[0]` sorts first, and so on.
+    /// One transaction, so a failure mid-way leaves the old order intact.
+    /// Returns the ids whose stored order actually changed, so the editor
+    /// broadcasts deltas only for the boards that moved. Ids that name no
+    /// board row are ignored.
+    pub fn set_board_order(&self, ordered_ids: &[i64]) -> Result<Vec<i64>> {
+        self.with_transaction(|tx| {
+            let mut changed = Vec::new();
+            for (index, id) in ordered_ids.iter().enumerate() {
+                let index = index as i64;
+                // the column is nullable (original-app rows), so compare
+                // through Option - NULL means "not this index" like any
+                // other value
+                let current: Option<i64> = tx
+                    .conn
+                    .query_row(
+                        "SELECT COALESCE(\"order\", 0) FROM Boards WHERE id = ?1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(Some(-1));
+                if current != Some(index) {
+                    tx.conn.execute(
+                        "UPDATE Boards SET \"order\" = ?1 WHERE id = ?2",
+                        rusqlite::params![index, id],
+                    )?;
+                    if tx.conn.changes() > 0 {
+                        changed.push(*id);
+                    }
+                }
+            }
+            Ok(changed)
+        })
+    }
+
     /// Delete the board together with its shortcuts (the original leaves
     /// orphans behind; we prefer the clean invariant). One transaction, so
     /// a failure mid-way never strands the shortcuts of a live board.
@@ -1157,6 +1192,36 @@ mod tests {
         assert_eq!(place(by_id(hangs_id)), (Some(2), Some(2), 2, 1));
         // a tile larger than the grid shrinks to it
         assert_eq!(place(by_id(huge_id)), (Some(0), Some(1), 4, 2));
+    }
+
+    #[test]
+    fn set_board_order_persists_and_reports_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_create(&dir.path().join("t.db")).unwrap();
+        let a = db.insert_board("A", "#2c3e50", 4, 3).unwrap();
+        let b = db.insert_board("B", "#2c3e50", 4, 3).unwrap();
+        let c = db.insert_board("C", "#2c3e50", 4, 3).unwrap();
+
+        // move the last board to the front: the whole list shifts, so every
+        // board gets a new order value
+        let changed = db.set_board_order(&[c, a, b]).unwrap();
+        assert_eq!(changed.len(), 3);
+        let listed: Vec<i64> = db.get_boards().unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(listed, [c, a, b]);
+
+        // swap the last two back: only the swapped boards change
+        let changed = db.set_board_order(&[c, b, a]).unwrap();
+        assert_eq!(changed, [b, a]);
+        let listed: Vec<i64> = db.get_boards().unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(listed, [c, b, a]);
+
+        // replaying the same order reports no changes (no wasted deltas)
+        assert_eq!(db.set_board_order(&[c, b, a]).unwrap(), Vec::<i64>::new());
+
+        // an id that names no board is ignored, order stays intact
+        assert_eq!(db.set_board_order(&[c, b, a, 999]).unwrap(), Vec::<i64>::new());
+        let listed: Vec<i64> = db.get_boards().unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(listed, [c, b, a]);
     }
 
     #[test]

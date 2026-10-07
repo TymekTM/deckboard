@@ -374,6 +374,79 @@ async function editBoard() {
   if (currentBoard.value) boardModal.value = { mode: "edit", board: currentBoard.value };
 }
 
+// Sidebar drag & drop reordering: HTML5 drag on the board entries. While
+// hovering, the other entries slide aside (transform transition) to open a
+// gap at the drop position - the gap IS the indicator. Hit-testing reads
+// the container's geometry, never the transformed entries, so the shift
+// animation cannot feed back into the drop-index computation.
+const dragBoardId = ref(null); // board being dragged
+const dropIndex = ref(null); // insertion position 0..boards.length
+const dragSlotH = ref(0); // one row's height, measured at dragstart
+
+function boardDragStart(board, event) {
+  dragBoardId.value = board.id;
+  dragSlotH.value = event.currentTarget.getBoundingClientRect().height;
+  event.dataTransfer.effectAllowed = "move";
+  // Firefox refuses to start a drag without a payload; any text does
+  event.dataTransfer.setData("text/plain", board.name || "");
+}
+
+function boardDragEnd() {
+  dragBoardId.value = null;
+  dropIndex.value = null;
+  dragSlotH.value = 0;
+}
+
+// Cursor position -> insertion index, split by half-slot like a per-entry
+// top/bottom split: the upper half of a row inserts before it, the lower
+// half after it.
+function boardDragOver(event) {
+  if (dragBoardId.value === null || !dragSlotH.value) return;
+  const list = event.currentTarget;
+  const rect = list.getBoundingClientRect();
+  const inner =
+    event.clientY - rect.top - parseFloat(getComputedStyle(list).paddingTop);
+  const at = Math.round(inner / dragSlotH.value);
+  dropIndex.value = Math.max(0, Math.min(boards.value.length, at));
+}
+
+// Entries between the dragged board and the insertion point slide by one
+// row, so a gap opens exactly where the drop would land.
+function boardShift(i) {
+  if (dragBoardId.value === null || dropIndex.value === null) return null;
+  const from = boards.value.findIndex((b) => b.id === dragBoardId.value);
+  if (from < 0 || i === from) return null;
+  const t = dropIndex.value;
+  if (t > from + 1 && i > from && i < t) {
+    return { transform: `translateY(${-dragSlotH.value}px)` };
+  }
+  if (t < from && i >= t && i < from) {
+    return { transform: `translateY(${dragSlotH.value}px)` };
+  }
+  return null;
+}
+
+async function boardDrop() {
+  const target = dropIndex.value;
+  const from = boards.value.findIndex((b) => b.id === dragBoardId.value);
+  boardDragEnd();
+  if (from < 0 || target === null || boards.value.length < 2) return;
+  const next = boards.value.slice();
+  const [moved] = next.splice(from, 1);
+  // target indexes the full list; after the removal the insertion slot
+  // shifts left when it sat behind the dragged entry
+  const at = target > from ? target - 1 : target;
+  if (at === from) return; // dropped back where it was
+  next.splice(at, 0, moved);
+  boards.value = next;
+  try {
+    await api.reorderBoards(next.map((b) => b.id));
+  } catch (e) {
+    flashError("Reordering boards failed", e);
+    loadBoards();
+  }
+}
+
 // New Button flow: create the row with the chosen type, then apply the
 // dialog's full payload (label, styling, command) in one update.
 async function tileCreated(form) {
@@ -658,14 +731,18 @@ function onKeydown(event) {
     <!-- board list -->
     <aside v-if="!touchMode && sidebarVisible" class="sidebar">
       <div class="side-caption">Boards</div>
-      <div class="boards">
+      <div class="boards" @dragover.prevent="boardDragOver" @drop.prevent="boardDrop">
         <button
-          v-for="b in boards"
+          v-for="(b, i) in boards"
           :key="b.id"
           class="board-entry"
-          :class="{ active: b.id === currentId }"
+          :class="{ active: b.id === currentId, 'drag-src': b.id === dragBoardId }"
+          :style="boardShift(i)"
+          draggable="true"
           @click="currentId = b.id"
           @contextmenu.prevent="boardContextMenu(b, $event)"
+          @dragstart="boardDragStart(b, $event)"
+          @dragend="boardDragEnd"
         >
           {{ b.name || "Untitled" }}
         </button>
@@ -995,6 +1072,7 @@ function onKeydown(event) {
   padding: 2px 8px 12px;
 }
 .board-entry {
+  position: relative;
   text-align: left;
   font-size: 14px;
   color: inherit;
@@ -1003,13 +1081,22 @@ function onKeydown(event) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  transition: background 120ms ease-out, color 120ms ease-out;
+  cursor: grab;
+  transition: background 120ms ease-out, color 120ms ease-out,
+    transform 180ms cubic-bezier(0.2, 0.7, 0.3, 1), opacity 180ms ease;
 }
 .board-entry:hover { background: rgba(0, 0, 0, 0.07); }
+.board-entry:active { cursor: grabbing; }
 .board-entry.active {
   background: var(--accent);
   color: #fff;
   font-weight: 500;
+}
+/* the dragged entry lifts out of the list; the gap the others open marks
+   the drop position */
+.board-entry.drag-src {
+  opacity: 0.2;
+  transform: scale(0.96);
 }
 .side-empty {
   font-size: 12.5px;

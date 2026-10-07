@@ -113,6 +113,12 @@ impl SqlBackend {
         self.db.lock().unwrap().update_board(board)
     }
 
+    /// Persist a new board order (sidebar drag & drop); returns the ids
+    /// whose stored order actually changed.
+    pub fn reorder_boards(&self, ordered_ids: &[i64]) -> pulpit_db::Result<Vec<i64>> {
+        self.db.lock().unwrap().set_board_order(ordered_ids)
+    }
+
     /// Delete the board and its shortcuts.
     pub fn delete_board(&self, board_id: i64) -> pulpit_db::Result<()> {
         self.db.lock().unwrap().delete_board(board_id)
