@@ -3653,6 +3653,7 @@ dependencies = [
  "pulpit-discord",
  "pulpit-ext",
  "pulpit-legacy",
+ "pulpit-obs",
  "pulpit-os",
  "pulpit-spotify",
  "pulpit-sysinfo",
@@ -3695,6 +3696,7 @@ dependencies = [
  "pulpit-ext",
  "pulpit-host",
  "pulpit-legacy",
+ "pulpit-obs",
  "pulpit-proto",
  "pulpit-spotify",
  "pulpit-sysinfo",
@@ -3785,6 +3787,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulpit-obs"
+version = "1.4.0"
+dependencies = [
+ "base64 0.23.1",
+ "futures-util",
+ "pulpit-db",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
 name = "pulpit-os"
 version = "1.4.0"
 dependencies = [
@@ -3818,6 +3837,7 @@ dependencies = [
  "pulpit-ext",
  "pulpit-host",
  "pulpit-legacy",
+ "pulpit-obs",
  "pulpit-proto",
  "pulpit-spotify",
  "pulpit-sysinfo",
