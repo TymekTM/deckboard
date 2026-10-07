@@ -9,6 +9,17 @@ import EditTileModal from "./components/EditTileModal.vue";
 import BoardModal from "./components/BoardModal.vue";
 import SettingsOverlay from "./components/SettingsOverlay.vue";
 import OperatorAskModal from "./components/OperatorAskModal.vue";
+import {
+  createEditorHistory,
+  tileCreateCommand,
+  tileEditCommand,
+  tileDeleteCommand,
+  tileMoveCommand,
+  boardCreateCommand,
+  boardEditCommand,
+  boardDeleteCommand,
+  boardClearCommand,
+} from "./editorHistory";
 
 const boards = ref([]);
 const currentId = ref(null);
@@ -17,6 +28,37 @@ const touchMode = ref(false);
 const touchBoardId = ref(null);
 const knownInputs = ref([]);
 const audioDevices = ref([]);
+const history = createEditorHistory(100);
+const canUndo = ref(false);
+const canRedo = ref(false);
+
+function updateHistoryFlags() {
+  canUndo.value = history.canUndo();
+  canRedo.value = history.canRedo();
+}
+
+async function doUndo() {
+  if (!history.canUndo()) return;
+  try {
+    await history.undo(api);
+    await loadBoards();
+    updateHistoryFlags();
+  } catch (e) {
+    flashError("Cofanie operacji nie powiodło się", e);
+  }
+}
+
+async function doRedo() {
+  if (!history.canRedo()) return;
+  try {
+    await history.redo(api);
+    await loadBoards();
+    updateHistoryFlags();
+  } catch (e) {
+    flashError("Ponawianie operacji nie powiodło się", e);
+  }
+}
+
 
 // Live state mirror of the original client: customValues holds pushed
 // values. Every producer (extensions, sysinfo, aidev, the audio watcher,
@@ -192,7 +234,7 @@ async function pasteTile(snapshot, pos) {
       x,
       y
     );
-    await api.updateButton({
+    const newSnapshot = {
       ...snapshot,
       id,
       board_id: board.id,
@@ -200,7 +242,10 @@ async function pasteTile(snapshot, pos) {
       y,
       w,
       h,
-    });
+    };
+    await api.updateButton(newSnapshot);
+    history.push(tileCreateCommand({ tileSnapshot: newSnapshot, boardId: board.id }));
+    updateHistoryFlags();
     await loadBoards();
   } catch (e) {
     flashError("Pasting the tile failed", e);
@@ -261,10 +306,13 @@ function boardContextMenu(board, event) {
           kind: "warning",
         });
         if (ok) {
+          const tilesSnapshot = (board.buttons || []).map((b) => ({ ...b }));
           try {
             await api.clearBoard(board.id);
+            history.push(boardClearCommand({ boardId: board.id, tilesSnapshot }));
+            updateHistoryFlags();
           } catch (e) {
-            flashError("Clearing the board failed", e);
+            flashError("Czyszczenie tablicy nie powiodło się", e);
             return;
           }
           await loadBoards();
@@ -281,10 +329,16 @@ function boardContextMenu(board, event) {
           kind: "warning",
         });
         if (ok) {
+          const boardSnapshot = {
+            ...board,
+            buttons: (board.buttons || []).map((b) => ({ ...b })),
+          };
           try {
             await api.deleteBoard(board.id);
+            history.push(boardDeleteCommand({ boardSnapshot }));
+            updateHistoryFlags();
           } catch (e) {
-            flashError("Deleting the board failed", e);
+            flashError("Usuwanie tablicy nie powiodło się", e);
             return;
           }
           await loadBoards();
@@ -388,13 +442,16 @@ async function tileCreated(form) {
       form.x,
       form.y
     );
-    await api.updateButton({
+    const fullTile = {
       ...form,
       id,
       board_id: board.id,
       w: form.w || 1,
       h: form.h || 1,
-    });
+    };
+    await api.updateButton(fullTile);
+    history.push(tileCreateCommand({ tileSnapshot: fullTile, boardId: board.id }));
+    updateHistoryFlags();
     createFlow.value = null;
     await loadBoards();
     const tile = boards.value
@@ -420,10 +477,13 @@ function runTileNow(id) {
 }
 
 async function tileMoved(tile, x, y, w, h) {
+  const prevGeom = { x: tile.x, y: tile.y, w: tile.w, h: tile.h };
   try {
     await api.moveButton(tile.id, tile.board_id, x, y, w, h);
+    history.push(tileMoveCommand({ id: tile.id, boardId: tile.board_id, prevGeom, nextGeom: { x, y, w, h } }));
+    updateHistoryFlags();
   } catch (e) {
-    flashError("Moving the tile failed", e);
+    flashError("Przesuwanie kafla nie powiodło się", e);
     await loadBoards();
     return;
   }
@@ -434,12 +494,20 @@ async function tileMoved(tile, x, y, w, h) {
 }
 
 async function tileEdited(button) {
+  const prevTile = boards.value
+    .flatMap((b) => b.buttons)
+    .find((b) => b.id === button.id);
+  const prevSnapshot = prevTile ? { ...prevTile } : null;
   try {
     await api.updateButton(button);
   } catch (e) {
     // keep the dialog open so the edits are not lost
-    flashError("Saving the tile failed", e);
+    flashError("Zapisywanie kafla nie powiodło się", e);
     return;
+  }
+  if (prevSnapshot) {
+    history.push(tileEditCommand({ prevSnapshot, nextSnapshot: { ...button } }));
+    updateHistoryFlags();
   }
   editingTile.value = null;
   await loadBoards();
@@ -455,8 +523,10 @@ async function tileDeleted(tile) {
   if (!ok) return;
   try {
     await api.deleteButton(tile.id, tile.board_id);
+    history.push(tileDeleteCommand({ tileSnapshot: { ...tile } }));
+    updateHistoryFlags();
   } catch (e) {
-    flashError("Deleting the tile failed", e);
+    flashError("Usuwanie kafla nie powiodło się", e);
     return;
   }
   editingTile.value = null;
@@ -487,9 +557,11 @@ async function doImport() {
   if (!path) return;
   try {
     await api.importBoards(path);
+    history.clear();
+    updateHistoryFlags();
     await loadBoards();
   } catch (e) {
-    flashError("Importing boards failed", e);
+    flashError("Import tablic nie powiódł się", e);
   }
 }
 
@@ -501,10 +573,13 @@ async function clearCurrentBoard() {
     kind: "warning",
   });
   if (!ok) return;
+  const tilesSnapshot = (currentBoard.value.buttons || []).map((b) => ({ ...b }));
   try {
     await api.clearBoard(currentBoard.value.id);
+    history.push(boardClearCommand({ boardId: currentBoard.value.id, tilesSnapshot }));
+    updateHistoryFlags();
   } catch (e) {
-    flashError("Clearing the board failed", e);
+    flashError("Czyszczenie tablicy nie powiodło się", e);
     return;
   }
   await loadBoards();
@@ -518,10 +593,16 @@ async function deleteCurrentBoard() {
     kind: "warning",
   });
   if (!ok) return;
+  const boardSnapshot = {
+    ...currentBoard.value,
+    buttons: (currentBoard.value.buttons || []).map((b) => ({ ...b })),
+  };
   try {
     await api.deleteBoard(currentBoard.value.id);
+    history.push(boardDeleteCommand({ boardSnapshot }));
+    updateHistoryFlags();
   } catch (e) {
-    flashError("Deleting the board failed", e);
+    flashError("Usuwanie tablicy nie powiodło się", e);
     return;
   }
   await loadBoards();
@@ -576,13 +657,85 @@ onUnmounted(() => {
   unlisteners.forEach((f) => f());
 });
 
+
+function onBoardModalSaved(info) {
+  boardModal.value = null;
+  if (info) {
+    if (info.mode === "create") {
+      history.push(
+        boardCreateCommand({
+          boardId: info.id,
+          name: info.name,
+          background: info.background,
+          width: info.width,
+          height: info.height,
+        })
+      );
+    } else if (info.mode === "edit") {
+      history.push(
+        boardEditCommand({
+          prevSnapshot: info.prev,
+          nextSnapshot: info.next,
+        })
+      );
+    } else if (info.mode === "clear") {
+      history.push(
+        boardClearCommand({
+          boardId: info.boardId,
+          tilesSnapshot: info.buttons,
+        })
+      );
+    } else if (info.mode === "delete") {
+      history.push(boardDeleteCommand({ boardSnapshot: info.board }));
+    }
+    updateHistoryFlags();
+  }
+  load();
+}
+
 function onGlobalMousedown(event) {
   if (event.target.closest?.(".ctx-menu")) return;
   closeContextMenu();
 }
 
+function isInputTarget(target) {
+  if (!target) return false;
+  const tag = target.tagName;
+  return (
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT" ||
+    target.isContentEditable
+  );
+}
+
+function isModalActive() {
+  return Boolean(
+    editingTile.value ||
+    createFlow.value ||
+    boardModal.value ||
+    settingsOpen.value
+  );
+}
+
 function onKeydown(event) {
   if (event.key === "Escape") closeContextMenu();
+
+  if (isInputTarget(event.target) || isModalActive()) return;
+
+  if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+    if (event.key === "z" || event.key === "Z") {
+      event.preventDefault();
+      if (event.shiftKey) {
+        doRedo();
+      } else {
+        doUndo();
+      }
+    } else if (event.key === "y" || event.key === "Y") {
+      event.preventDefault();
+      doRedo();
+    }
+  }
 }
 </script>
 
@@ -693,6 +846,26 @@ function onKeydown(event) {
       <template v-if="status.dbOk">
         <header v-if="!touchMode" class="board-head" @contextmenu.prevent="currentBoard && boardContextMenu(currentBoard, $event)">
           <span class="board-title">{{ currentBoard?.name || "" }}</span>
+          <div class="head-controls">
+            <button
+              class="tool-btn"
+              :class="{ disabled: !canUndo }"
+              :disabled="!canUndo"
+              title="Cofnij (Ctrl+Z)"
+              @click="doUndo"
+            >
+              <i class="fas fa-undo"></i>
+            </button>
+            <button
+              class="tool-btn"
+              :class="{ disabled: !canRedo }"
+              :disabled="!canRedo"
+              title="Ponów (Ctrl+Y / Ctrl+Shift+Z)"
+              @click="doRedo"
+            >
+              <i class="fas fa-redo"></i>
+            </button>
+          </div>
           <div class="kebab-anchor">
             <button class="kebab" title="Board menu" @click="kebabOpen = !kebabOpen">
               <i class="fas fa-ellipsis-v"></i>
@@ -821,10 +994,7 @@ function onKeydown(event) {
         :mode="boardModal.mode"
         :board="boardModal.board"
         @close="boardModal = null"
-        @saved="
-          boardModal = null;
-          load();
-        "
+        @saved="onBoardModalSaved"
       />
     </Transition>
 
@@ -1076,6 +1246,33 @@ function onKeydown(event) {
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
+}
+.head-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.tool-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out, opacity 120ms ease-out;
+}
+.tool-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.08);
+  color: rgba(0, 0, 0, 0.9);
+}
+.tool-btn:disabled,
+.tool-btn.disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 .kebab-anchor { position: relative; }
 .kebab {
