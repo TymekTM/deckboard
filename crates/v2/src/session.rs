@@ -526,7 +526,28 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
         | Interaction::SwipeLeft
         | Interaction::SwipeRight => {
             ack_ok();
-            exec_once(state, button, false);
+            let mut target_button = button;
+            // an editor-configured `gesture_actions` override replaces the
+            // kind/command per field; without one the tile's own action fires
+            let gesture = match payload.interaction {
+                Interaction::LongPress => "long-press",
+                Interaction::DoubleTap => "double-tap",
+                Interaction::SwipeLeft => "swipe-left",
+                _ => "swipe-right",
+            };
+            let params: Value = serde_json::from_str(
+                target_button.options.as_deref().unwrap_or(""),
+            )
+            .unwrap_or(Value::Null);
+            if let Some((kind, command)) =
+                crate::boards::gesture_action_override(&params, gesture)
+            {
+                target_button.kind = kind;
+                if let Some(command) = command {
+                    target_button.command = Some(command);
+                }
+            }
+            exec_once(state, target_button, false);
         }
         // Unreachable while the allowed-interactions check stands (no tile
         // declares wheel/drag); kept as a defensive typed error.

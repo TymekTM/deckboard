@@ -232,6 +232,7 @@ pub fn run() {
             vm_reconnect,
             vm_run,
             vm_devices,
+            exec_button_gesture,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -2227,10 +2228,35 @@ async fn move_button(
     h: i64,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    tauri::async_runtime::spawn_blocking(move || backend.move_button(id, x, y, w, h))
+    let prev_board_id = {
+        let backend = backend.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            backend.get_button(id).map(|b| b.board_id)
+        })
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    };
+
+    let moved_backend = backend.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        moved_backend.move_button_to_board(id, board_id, x, y, w, h)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    if let Some(prev) = prev_board_id {
+        if prev != board_id {
+            if let Ok(broadcaster) = state.broadcaster() {
+                broadcaster.refresh_board(prev).await;
+            }
+            state.publish_v2(vec![pulpit_proto::BoardOp::TileRemove {
+                board: prev,
+                tile: id,
+            }]);
+        }
+    }
+
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_tile_set(board_id, id);
     Ok(())
@@ -2793,6 +2819,90 @@ async fn spotify_devices(state: State<'_, DesktopState>) -> Result<Vec<pulpit_sp
     tauri::async_runtime::spawn_blocking(move || spotify.devices().map_err(|e| e.to_string()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Touch mode gesture execution: run a tile's action for a detected
+/// gesture ("long-press" / "double-tap" / "swipe-left" / "swipe-right").
+/// An editor-configured `gesture_actions` override in the options JSON
+/// replaces the tile's kind/command for that gesture; without one the
+/// gesture fires the tile's own action, like the v2 interaction path.
+#[tauri::command]
+async fn exec_button_gesture(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    id: i64,
+    gesture: String,
+) -> Result<(), String> {
+    use pulpit_actions::EventSink;
+
+    let backend = state.backend()?;
+    let backend_for_error = backend.clone();
+    let feed = DesktopFeed {
+        app: app.clone(),
+        engine: state.v2.as_ref().map(|v2| v2.engine.clone()),
+        hub: state
+            .hub
+            .clone()
+            .ok_or_else(|| "database unavailable".to_string())?,
+    };
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<(pulpit_host::StatusApp, String, String)>();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        struct UiSink(
+            AppHandle,
+            tokio::sync::mpsc::UnboundedSender<(pulpit_host::StatusApp, String, String)>,
+        );
+        impl EventSink for UiSink {
+            fn change_board(&mut self, board_id: i64) {
+                let _ = self.0.emit("change-board", board_id);
+            }
+            fn app_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::CustomValue,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+            fn third_party_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::ThirdParty,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+        }
+        // per-tap lookup, inside the blocking closure and image-less
+        // (CORE-02), like exec_button: a gesture exec never reads img/img2
+        let Some(mut button) = backend.get_button_meta(id) else {
+            return;
+        };
+        // an editor-configured `gesture_actions` override replaces the
+        // kind/command per field (same helper the v2 interaction handler
+        // uses, so a gesture cannot diverge between tablet and desktop
+        // touch mode); without one the tile's own action fires
+        let params: serde_json::Value = serde_json::from_str(
+            button.options.as_deref().unwrap_or(""),
+        )
+        .unwrap_or(serde_json::Value::Null);
+        if let Some((kind, command)) =
+            pulpit_v2::boards::gesture_action_override(&params, &gesture)
+        {
+            button.kind = kind;
+            if let Some(command) = command {
+                button.command = Some(command);
+            }
+        }
+        let mut sink = UiSink(app, tx);
+        backend.exec_tap(button, &mut sink);
+    })
+    .await;
+    while let Ok((app_kind, key, value)) = rx.try_recv() {
+        pulpit_host::push_values(&feed, app_kind, &serde_json::json!({ key: value })).await;
+    }
+    if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
+    Ok(())
 }
 
 /// One stored asset as a data URL for the WebView (the desktop TileCell

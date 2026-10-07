@@ -39,21 +39,29 @@ async function save() {
   error.value = "";
   try {
     if (props.mode === "create") {
-      await api.createBoard(form.name || "New board", form.background, width, height);
+      const id = await api.createBoard(form.name || "New board", form.background, width, height);
+      emit("saved", {
+        mode: "create",
+        id,
+        name: form.name || "New board",
+        background: form.background,
+        width,
+        height,
+      });
     } else {
-      await api.updateBoard({
+      const next = {
         ...props.board,
         name: form.name,
         width,
         height,
         background: form.background,
-      });
+      };
+      await api.updateBoard(next);
+      emit("saved", { mode: "edit", prev: { ...props.board }, next });
     }
   } catch (e) {
     error.value = e ? String(e) : "Saving the board failed.";
-    return;
   }
-  emit("saved");
 }
 
 async function clearBoard() {
@@ -63,13 +71,14 @@ async function clearBoard() {
   });
   if (!ok) return;
   error.value = "";
+  const buttonsSnapshot = (props.board.buttons || []).map((b) => ({ ...b }));
   try {
     await api.clearBoard(props.board.id);
   } catch (e) {
     error.value = e ? String(e) : "Clearing the board failed.";
     return;
   }
-  emit("saved");
+  emit("saved", { mode: "clear", boardId: props.board.id, buttons: buttonsSnapshot });
 }
 
 async function deleteBoard() {
@@ -79,13 +88,17 @@ async function deleteBoard() {
   });
   if (!ok) return;
   error.value = "";
+  const boardSnapshot = {
+    ...props.board,
+    buttons: (props.board.buttons || []).map((b) => ({ ...b })),
+  };
   try {
     await api.deleteBoard(props.board.id);
   } catch (e) {
     error.value = e ? String(e) : "Deleting the board failed.";
     return;
   }
-  emit("saved");
+  emit("saved", { mode: "delete", board: boardSnapshot });
 }
 </script>
 

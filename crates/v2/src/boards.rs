@@ -324,6 +324,28 @@ pub fn declared_gestures(params: &Value) -> Vec<Interaction> {
         .collect()
 }
 
+/// The action a declared gesture runs: `gesture_actions` in the options
+/// JSON (`{"gesture_actions": {"long-press": {"type": "media",
+/// "command": "play"}}}`) overrides the tile's own action per gesture.
+/// Returns the `(kind, command)` pair to execute - `None` for the command
+/// half keeps the tile's own command, matching the per-field override the
+/// editor writes. `None` overall when the gesture has no override and the
+/// tile's own action applies (the M5 default). Shared by the v2
+/// interaction handler and the desktop touch-mode command so a gesture
+/// cannot diverge between the tablet and the editor's own screen.
+pub fn gesture_action_override(params: &Value, gesture: &str) -> Option<(String, Option<String>)> {
+    let action = params
+        .get("gesture_actions")
+        .and_then(|actions| actions.get(gesture))?;
+    let kind = action.get("type").and_then(Value::as_str)?;
+    let command = match action.get("command") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) if !other.is_null() => Some(other.to_string()),
+        _ => None,
+    };
+    Some((kind.to_string(), command))
+}
+
 /// State channel + shape, registered with the engine as a side effect so
 /// the channel shows up in `welcome` even before the first push. The
 /// legacy `extra` listener returns an empty key for display-mode tiles
@@ -516,6 +538,53 @@ mod tests {
         let mut r = row("volume", "slider", None);
         r.options = Some(r#"{"gestures": ["long-press"]}"#.into());
         assert_eq!(allowed_interactions(&r), vec![Interaction::Slide]);
+    }
+
+    #[test]
+    fn gesture_action_override_reads_the_editor_shape() {
+        let params: Value = serde_json::from_str(
+            r#"{"gesture_actions": {
+                "long-press": {"type": "media", "command": "play"},
+                "double-tap": {"type": "key", "command": ""},
+                "swipe-left": {"type": "vol"}
+            }}"#,
+        )
+        .unwrap();
+        let (kind, command) = gesture_action_override(&params, "long-press").unwrap();
+        assert_eq!(kind, "media");
+        assert_eq!(command.as_deref(), Some("play"));
+        // an explicit empty command replaces the tile's own (a key
+        // override with no combo must not leak the tile's key)
+        let (kind, command) = gesture_action_override(&params, "double-tap").unwrap();
+        assert_eq!(kind, "key");
+        assert_eq!(command.as_deref(), Some(""));
+        // no command key: the tile's own command applies
+        let (kind, command) = gesture_action_override(&params, "swipe-left").unwrap();
+        assert_eq!(kind, "vol");
+        assert_eq!(command, None);
+        // a gesture without an override falls back to the tile's action
+        assert_eq!(gesture_action_override(&params, "swipe-right"), None);
+    }
+
+    #[test]
+    fn gesture_action_override_ignores_broken_options() {
+        // plain-string program arguments and empty JSON are not an
+        // override source: everything falls back to the tile's action
+        for params in [
+            Value::Null,
+            Value::String("--flag".into()),
+            serde_json::json!({ "windows": "5h" }),
+            serde_json::json!({ "gesture_actions": {} }),
+            serde_json::json!({ "gesture_actions": { "long-press": {"command": "x"} } }),
+        ] {
+            assert_eq!(gesture_action_override(&params, "long-press"), None);
+        }
+        // a non-string command keeps its JSON serialization, the way
+        // numbers land in stored commands
+        let params = serde_json::json!({ "gesture_actions": { "double-tap": {"type": "vol", "command": 5} } });
+        let (kind, command) = gesture_action_override(&params, "double-tap").unwrap();
+        assert_eq!(kind, "vol");
+        assert_eq!(command.as_deref(), Some("5"));
     }
 
     #[test]
