@@ -616,6 +616,27 @@ mod tests {
     }
 
     #[test]
+    fn http_request_tile_is_a_plain_button_on_the_v2_wire() {
+        // the config lives in the command column (server-side execution);
+        // the client needs no kind-specific treatment, just the tap
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let tile = build_tile(
+            &row(
+                "http-request",
+                "button",
+                Some(r#"{"method":"POST","url":"http://ha.local/api"}"#),
+            ),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::Button);
+        assert_eq!(tile.manifest.interactions, vec![Interaction::Tap]);
+        assert!(tile.manifest.state.is_none());
+    }
+
+    #[test]
     fn graph_mode_becomes_series_channel() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
