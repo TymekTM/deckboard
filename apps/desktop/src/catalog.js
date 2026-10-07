@@ -471,6 +471,38 @@ export const CATALOG = [
     color: "#1DB954",
   },
   { divider: true },
+  { header: "Multimedia (system)" },
+  // natywna integracja SMTC (Windows global media transport): działa dla
+  // dowolnego odtwarzacza widocznego w systemie (przeglądarka, Tidal,
+  // VLC...), nie tylko przez Web API Spotify. Opcjonalny cel "Aplikacja"
+  // edytuje EditTileModal (options column), nie pola command.
+  {
+    value: "media-now-playing",
+    label: "Teraz odtwarzane (wyświetlanie)",
+    mode: "status",
+    icon: "music",
+    color: "#8E44AD",
+  },
+  {
+    value: "media-control",
+    label: "Sterowanie multimediami",
+    icon: "play",
+    color: "#8E44AD",
+    select: [
+      { value: "play-pause", label: "Play / Pause" },
+      { value: "next", label: "Next" },
+      { value: "previous", label: "Previous" },
+      { value: "stop", label: "Stop" },
+    ],
+  },
+  {
+    value: "media-seek",
+    label: "Przewijanie utworu",
+    mode: "slider",
+    icon: "clock",
+    color: "#8E44AD",
+  },
+  { divider: true },
   { header: "Variables & Logic" },
   {
     value: "custom-value",

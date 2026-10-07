@@ -45,5 +45,6 @@ export const api = {
   spotifyLogout: () => invoke("spotify_logout"),
   spotifyPlaylists: () => invoke("spotify_playlists"),
   spotifyDevices: () => invoke("spotify_devices"),
+  mediaSessions: () => invoke("media_sessions"),
   assetDataUrl: (hash) => invoke("asset_data_url", { hash }),
 };
