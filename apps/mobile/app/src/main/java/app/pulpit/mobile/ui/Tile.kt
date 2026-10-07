@@ -85,6 +85,10 @@ fun templateFor(tile: Tile): String = when {
     // a clock can arrive as a toggle (the clock extension pushes the time
     // onto a channel); the widget hint outranks the wire kind
     tile.widgetHint() == "clock" -> "clock"
+    tile.widgetHint() == "tool-clock" -> "tool-clock"
+    tile.widgetHint() == "tool-timer" -> "tool-timer"
+    tile.widgetHint() == "tool-stopwatch" -> "tool-stopwatch"
+    tile.widgetHint() == "tool-counter" -> "tool-counter"
     tile.kind == V2.KIND_SLIDER -> "slider"
     tile.kind == V2.KIND_KNOB -> "knob"
     tile.kind == V2.KIND_GRAPH -> "graph"
@@ -114,6 +118,10 @@ fun Tile(
     /** Local receive time of the status payload, for its playback
      *  progress extrapolation. */
     statusReceivedAtMs: Long = 0L,
+    /** The raw live value on the tile's state channel, when it carries
+     *  one: tool tiles (timer/stopwatch/counter) read their compact
+     *  server state object out of it. */
+    liveElement: JsonElement? = null,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
     onSlider: (Float) -> Unit,
@@ -240,6 +248,10 @@ fun Tile(
                 Box(Modifier.matchParentSize().background(Color.White.copy(alpha = scrim)))
             }
             when (template) {
+                "tool-clock" -> ToolClockTile(tile, titleColor)
+                "tool-timer" -> ToolTimerTile(tile, liveElement, titleColor, onPress = onPressEnd, onGesture = onGesture)
+                "tool-stopwatch" -> ToolStopwatchTile(tile, liveElement, titleColor, onPress = onPressEnd, onGesture = onGesture)
+                "tool-counter" -> ToolCounterTile(tile, liveElement, titleColor, onPress = onPressEnd, onGesture = onGesture)
                 "slider" -> SliderTile(tile, color, icon, iconFamily, iconColor, liveValue, onSlider)
                 "knob" -> KnobTile(tile, iconColor, titleColor, liveValue, onSlider)
                 "graph" -> GraphTile(tile, series, liveText, channel, titleColor)
@@ -540,4 +552,3 @@ private fun SliderTile(
         }
     }
 }
-

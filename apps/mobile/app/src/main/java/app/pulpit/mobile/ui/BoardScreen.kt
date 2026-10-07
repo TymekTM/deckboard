@@ -390,6 +390,7 @@ private fun TileCell(
         image2 = image2,
         statusImage = statusImage,
         statusReceivedAtMs = statusReceivedAtMs,
+        liveElement = live,
         onPressStart = { vm.pressStart(boardId, t) },
         onPressEnd = { vm.pressEnd(boardId, t) },
         onSlider = { v -> vm.slider(boardId, t, v) },
