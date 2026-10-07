@@ -47,6 +47,9 @@ extensions load in a native runtime.
   volume and seek sliders, and a now-playing tile with cover art and a
   live progress bar. Talks to the Web API directly; setup and login live
   in the desktop app (see [Spotify](#spotify)).
+- **OBS Studio**: scenes, source/filter toggles, input mute, audio slider,
+  studio mode, record/stream toggles and replay-buffer save over
+  obs-websocket v5, with live tile states (see [OBS Studio](#obs-studio)).
 
 **Pairing and clients**
 
@@ -123,7 +126,7 @@ cd apps/mobile && gradle :app:testDebugUnitTest
 
 Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
 `settings.json`, `editor.json`, `aidev.json`, `devices.json`, `spotify.json`,
-`extensions/`, `assets/`, `logs/`. Environment overrides:
+`obs.json`, `extensions/`, `assets/`, `logs/`. Environment overrides:
 
 | Variable              | Default                   | Purpose                                     |
 | --------------------- | ------------------------- | ------------------------------------------- |
@@ -134,6 +137,7 @@ Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
 | `PULPIT_NO_SINGLE_INSTANCE` | unset               | Any value: allow side-by-side instances     |
 | `PULPIT_NO_DISCOVERY` | unset                     | Set to `1` to skip the mDNS announcement    |
 | `PULPIT_SPOTIFY_CONFIG` | `~/pulpitApp/spotify.json` | Spotify client id and tokens            |
+| `PULPIT_OBS_CONFIG`   | `~/pulpitApp/obs.json`    | OBS connection settings (host, port, password) |
 
 ## Spotify
 
@@ -179,6 +183,41 @@ about every 3 s while playing and every 20 s while paused. Pulpit sends no
 requests at all while no tablet is connected and the editor window is
 hidden. Tiles extrapolate track progress between polls.
 
+## OBS Studio
+
+Pulpit talks to OBS Studio directly over obs-websocket v5 (native
+`crates/obs`, no extension; OBS 28+ ships the plugin built in, default
+`ws://127.0.0.1:4455`). Setup: enable it in Ustawienia → OBS Studio, fill
+in the host, port and the password from OBS's Tools → obs-websocket
+settings, and press "Testuj połączenie". The config lives in
+`~/pulpitApp/obs.json` (override the path with `PULPIT_OBS_CONFIG`),
+written atomically; the password is never logged. Applying settings
+reconnects without an app restart, and a disabled config opens no
+connection at all. The headless server reads the same file.
+
+**Tiles** (catalog group "OBS Studio")
+
+| Kind | Does |
+| --- | --- |
+| `obs-scene` | switch program scene (lit while it is the live scene) |
+| `obs-source` | toggle a scene item in the current program scene (lit while visible) |
+| `obs-device-audio` | toggle input mute (lit while muted) |
+| `obs-filter` | toggle a source filter (lit while enabled; the source is guessed from the filter when omitted) |
+| `obs-studio-mode` | toggle studio mode (lit while on) |
+| `obs-record` | toggle recording (lit while recording) |
+| `obs-stream` | toggle streaming (lit while live) |
+| `obs-replay-save` | save the replay buffer |
+| `obs-audio-slider` | input volume fader, follows the live volume |
+
+Dual tiles light up from the real OBS state on every surface (events are
+pushed through the same live-state lane as Spotify and system info), and
+the tile dialog offers scene/source/input/filter pickers fed from the
+connection while it is up. The Streamlabs (SLOBS), XSplit and Twitch kinds
+from the original app are not implemented: they stay listed greyed-out in
+the picker, load from stock boards, and a press warns once per kind
+instead of once per press — an installed extension that provides one of
+those kinds still wins.
+
 ## Architecture
 
 One Cargo workspace, thin crates with a single job each:
@@ -197,6 +236,7 @@ One Cargo workspace, thin crates with a single job each:
 | `crates/ext`     | Extension host: original Deckboard extensions on an embedded JS engine |
 | `crates/vm`      | Native Voicemeeter integration                                         |
 | `crates/discord` | Native Discord local-RPC integration                                   |
+| `crates/obs`     | Native OBS Studio integration (obs-websocket v5)                       |
 | `apps/desktop`   | Tauri 2 + Vue 3 editor and touch surface                               |
 | `apps/server`    | Headless server binary (legacy + v2)                                   |
 | `apps/mobile`    | Kotlin/Compose Android client                                          |

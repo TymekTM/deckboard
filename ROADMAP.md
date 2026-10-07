@@ -109,8 +109,12 @@ as a Rust rewrite of Deckboard 3.x; owns its identity and data directory
       tiles, live edit + hot reload. ffmpeg used when present in PATH, never
       required. Event routing rule: the web layer receives touches only over
       its own regions (z-order resolved before gestures).
-- [ ] **M7 - Integrations**: OBS (obws), Streamlabs, Twitch (IRC + Helix),
-      Spotify (rspotify), VoiceMod. Twitter is dropped (dead in the original,
+- [ ] **M7 - Integrations**: OBS (done natively, round 5: obs-websocket v5
+      in `crates/obs` — scenes, sources, filters, audio, studio mode,
+      record/stream/replay, live tile states, settings UI), Streamlabs,
+      Twitch (IRC + Helix), VoiceMod (these stay extension territory; their
+      kinds are greyed out in the picker and warn once per kind). Spotify
+      (done natively, round 4). Twitter is dropped (dead in the original,
       not carried over).
 - [x] **M8 - Extras**: plugin API (closed by ADR-014: .asar extensions are
       the plugin mechanism), mDNS discovery, APK sideload from desktop,
