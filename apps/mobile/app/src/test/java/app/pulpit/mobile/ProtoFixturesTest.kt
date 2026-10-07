@@ -1,5 +1,8 @@
 package app.pulpit.mobile.proto
 
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.long
+
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonPrimitive
@@ -101,7 +104,7 @@ class ProtoFixturesTest {
         val board = sync.boards[0]
         assertEquals(3L, board.id)
         assertEquals(Background.color("#2c3e50"), board.background)
-        assertEquals(2, board.tiles.size)
+        assertEquals(3, board.tiles.size)
 
         val button = board.tiles[0]
         assertEquals(17L, button.id)
@@ -153,6 +156,19 @@ class ProtoFixturesTest {
         assertEquals(V2.KIND_SLIDER, slider.kind)
         assertEquals(2, slider.h)
         assertEquals(listOf(V2.INT_SLIDE), slider.interactions)
+
+        // utility tools (round 5): the widget hint picks the tool
+        // template, config rides params, state channel is per-id
+        val tool = board.tiles[2]
+        assertEquals(30L, tool.id)
+        assertEquals("tool-timer", tool.widgetHint())
+        assertEquals("05:00", tool.param("duration"))
+        assertEquals("play", tool.param("finish_action"))
+        assertEquals("ext.tool-30", tool.state!!.channel)
+        assertEquals(
+            listOf(V2.INT_TAP, V2.INT_LONG_PRESS, V2.INT_DOUBLE_TAP),
+            tool.interactions,
+        )
     }
 
     @Test
@@ -178,6 +194,9 @@ class ProtoFixturesTest {
         val sync = typed<StateSync>(frame, V2.TYPE_STATE_SYNC)
         assertEquals("OFF", sync.values["ext.speaker-muted"]!!.jsonPrimitive.content)
         assertEquals(true, sync.values["discord.microphone-muted"]!!.jsonPrimitive.boolean)
+        val timer = sync.values["ext.tool-timer"]!!.jsonObject
+        assertEquals(false, timer["running"]!!.jsonPrimitive.boolean)
+        assertEquals(300000L, timer["durationMs"]!!.jsonPrimitive.long)
         assertEquals(listOf(0.1, 0.42, 0.44), sync.series["ext.si-cpu-usage"])
     }
 
