@@ -19,6 +19,10 @@ pulpit-sysinfo = { path = "../sysinfo" }
 pulpit-vm = { path = "../vm" }
 pulpit-discord = { path = "../discord" }
 pulpit-spotify = { path = "../spotify" }
+pulpit-os = { path = "../os" }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 ureq = "3"
 
 [dev-dependencies]

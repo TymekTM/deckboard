@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+pub mod media;
 pub mod spotify;
 
 /// The client lanes a live-value producer fans out to. Implemented once
@@ -382,6 +383,11 @@ pub fn register_inputs(ext: &pulpit_ext::ExtManager) {
     // native Spotify (control buttons + the custom-value toggles and
     // slider/status shapes the pushed state keys drive)
     for (value, icon, color, mode) in pulpit_spotify::input_declarations() {
+        register_input(value, Some(icon), Some(color), "fas", mode, None);
+    }
+    // native system media (SMTC): the now-playing display tile, transport
+    // buttons and the seek slider, for any player the system reports
+    for (value, icon, color, mode) in pulpit_os::media::input_declarations() {
         register_input(value, Some(icon), Some(color), "fas", mode, None);
     }
 }
