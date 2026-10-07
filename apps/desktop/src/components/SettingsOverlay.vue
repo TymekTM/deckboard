@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import ObsSettings from "./settings/ObsSettings.vue";
 
 const props = defineProps({
   status: { type: Object, required: true },
@@ -965,6 +966,13 @@ onUnmounted(() => {
               <p v-else-if="aidevNote" class="note pending">{{ aidevNote }}</p>
             </div>
           </article>
+        </div>
+      </section>
+
+      <section class="row" aria-labelledby="sec-obs">
+        <h2 id="sec-obs">OBS Studio</h2>
+        <div class="tiles">
+          <ObsSettings :expanded="focused === 'obs'" @focus="focused = 'obs'" />
         </div>
       </section>
 

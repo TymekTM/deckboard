@@ -78,7 +78,14 @@ watch(hlIdx, scrollHl);
 function moveHl(delta) {
   const n = flat.value.length;
   if (!n) return;
-  hlIdx.value = (hlIdx.value + delta + n) % n;
+  // unavailable entries are skipped: highlight lands on a pickable one
+  for (let i = 0; i < n; i += 1) {
+    const next = (hlIdx.value + delta * i + delta + n * 2) % n;
+    if (!flat.value[next].unavailable) {
+      hlIdx.value = next;
+      return;
+    }
+  }
 }
 function idxOfItem(it) {
   return flat.value.indexOf(it);
@@ -102,6 +109,7 @@ function closePop(refocus = true) {
   if (refocus) trigger.value?.focus();
 }
 function pick(it) {
+  if (it.unavailable) return;
   emit("update:modelValue", it.value);
   closePop();
 }
@@ -143,7 +151,7 @@ function onSearchKeydown(e) {
   } else if (e.key === "Enter") {
     e.preventDefault();
     const it = flat.value[hlIdx.value];
-    if (it) pick(it);
+    if (it && !it.unavailable) pick(it);
   } else if (e.key === "Escape") {
     e.preventDefault();
     e.stopPropagation();
@@ -201,7 +209,13 @@ function onSearchKeydown(e) {
               class="item"
               role="option"
               :aria-selected="it.value === modelValue"
-              :class="{ sel: it.value === modelValue, hl: flat[hlIdx] === it }"
+              :aria-disabled="it.unavailable || undefined"
+              :title="it.unavailable || undefined"
+              :class="{
+                sel: it.value === modelValue,
+                hl: flat[hlIdx] === it,
+                dead: it.unavailable,
+              }"
               @click="pick(it)"
               @mouseenter="hlIdx = idxOfItem(it)"
             >
@@ -209,7 +223,8 @@ function onSearchKeydown(e) {
                 <i class="fas" :class="'fa-' + (it.icon || 'puzzle-piece')"></i>
               </span>
               <span class="ilabel">{{ it.label }}</span>
-              <i v-if="it.value === modelValue" class="fas fa-check selcheck"></i>
+              <span v-if="it.unavailable" class="deadhint">{{ it.unavailable }}</span>
+              <i v-else-if="it.value === modelValue" class="fas fa-check selcheck"></i>
             </div>
           </template>
           <div v-if="!flat.length" class="empty">
@@ -331,6 +346,15 @@ function onSearchKeydown(e) {
 .item.hl.sel { background: #dcf3ec; }
 .ilabel { flex: 1; min-width: 0; }
 .selcheck { flex: none; font-size: 12px; color: #0f7e69; }
+/* unavailable integrations: listed for honesty, not pickable */
+.item.dead { cursor: default; opacity: 0.45; }
+.item.dead .chip { filter: grayscale(0.7); }
+.deadhint {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--modal-muted);
+  text-align: right;
+}
 .empty {
   padding: 16px 10px;
   font-size: 13px;
