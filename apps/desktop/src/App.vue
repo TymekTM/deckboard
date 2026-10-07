@@ -355,6 +355,13 @@ async function duplicateTiles(tiles) {
 }
 
 
+async function duplicateSelectedTiles() {
+  const board = currentBoard.value;
+  if (!board) return;
+  const tiles = board.buttons.filter((b) => selectedTileIds.value.has(b.id));
+  if (tiles.length) await duplicateTiles(tiles);
+}
+
 async function pasteClipboardTiles() {
   if (!tileClipboard.value) return;
   const board = currentBoard.value;
@@ -1348,7 +1355,7 @@ function onKeydown(event) {
           {{ b.name || "Untitled" }}
         </button>
         <div v-if="!boards.length && status.dbOk" class="side-empty">
-          No boards yet. Use <i class="fas fa-plus"></i> to create one.
+          Brak tablic. Użyj <i class="fas fa-plus"></i>, aby utworzyć pierwszą.
         </div>
       </div>
     </aside>
@@ -1457,7 +1464,11 @@ function onKeydown(event) {
             v-if="currentBoard && !touchMode && !currentBoard.buttons.length"
             class="canvas-hint"
           >
-            Click an empty cell to add your first tile
+            <div class="hint-title">Pusta tablica</div>
+            <div class="hint-line">Kliknij pustą komórkę, aby dodać pierwszy kafel</div>
+            <div class="hint-sub">
+              dwuklik — edycja kafla · przeciągnij — przesunięcie · Ctrl+Z — cofnij
+            </div>
           </div>
 
           <template v-if="!touchMode">
@@ -1925,11 +1936,22 @@ function onKeydown(event) {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
+  text-align: center;
   color: rgba(255, 255, 255, 0.92);
-  font-size: 15px;
   text-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   pointer-events: none;
   white-space: nowrap;
+}
+.hint-title {
+  font-size: 22px;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+.hint-line { font-size: 15px; }
+.hint-sub {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.72);
 }
 .canvas-overlay {
   position: absolute;
