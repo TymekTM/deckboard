@@ -2323,9 +2323,13 @@ async fn exec_button(
         pulpit_host::push_values(&feed, app_kind, &serde_json::json!({ key: value })).await;
     }
     // Spotify failures (design §3: Premium required / no active device /
-    // needs login) ride the command's own error -> the editor's existing
-    // flash path shows them; other kinds never record anything.
+    // needs login) and http-request failures ride the command's own
+    // error -> the editor's existing flash path shows them; other kinds
+    // never record anything.
     if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
+    if let Some(message) = backend_for_error.take_last_http_error() {
         return Err(message);
     }
     Ok(())
@@ -2345,8 +2349,12 @@ async fn exec_slider(state: State<'_, DesktopState>, id: i64, value: f64) -> Res
         backend.slider(button, value);
     })
     .await;
-    // same failure surface as exec_button (spotify slider kinds)
+    // same failure surface as exec_button (spotify slider kinds and the
+    // http-request tile)
     if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
+    if let Some(message) = backend_for_error.take_last_http_error() {
         return Err(message);
     }
     Ok(())

@@ -144,6 +144,57 @@ export const CATALOG = [
     ],
   },
   {
+    // full request action (Home Assistant, webhooks, n8n, REST): the
+    // backend executes it on press and can store the status or an
+    // extracted JSON value into a variable a custom-value tile displays.
+    // Placeholder {{var:klucz}} substitutes a current variable value
+    // (URL-encoded in the URL, raw in headers and the body).
+    value: "http-request",
+    label: "HTTP Request",
+    icon: "paper-plane",
+    color: "#009688",
+    fields: [
+      {
+        key: "method",
+        kind: "select",
+        label: "Metoda",
+        options: [
+          { value: "GET", label: "GET" },
+          { value: "POST", label: "POST" },
+          { value: "PUT", label: "PUT" },
+          { value: "PATCH", label: "PATCH" },
+          { value: "DELETE", label: "DELETE" },
+        ],
+      },
+      { key: "url", label: "URL", placeholder: "https://... ({{var:klucz}} podstawia zmienną)" },
+      { key: "headers", kind: "textarea", label: "Nagłówki", placeholder: "po jednym na linię:\nAuthorization: Bearer ..." },
+      {
+        key: "bodyType",
+        kind: "select",
+        label: "Typ treści",
+        options: [
+          { value: "none", label: "Brak" },
+          { value: "json", label: "JSON" },
+          { value: "form", label: "Formularz" },
+          { value: "text", label: "Tekst" },
+        ],
+      },
+      { key: "body", kind: "textarea", label: "Treść", placeholder: '{"on": true}' },
+      { key: "timeout", kind: "number", label: "Limit czasu (s)", placeholder: "10" },
+      {
+        key: "ignoreCertErrors",
+        kind: "select",
+        label: "Ignoruj błędy certyfikatu",
+        options: [
+          { value: "nie", label: "Nie" },
+          { value: "tak", label: "Tak" },
+        ],
+      },
+      { key: "responseVar", label: "Zapisz odpowiedź do zmiennej", placeholder: "np. lampState" },
+      { key: "jsonPath", label: "Ścieżka JSON", placeholder: "np. /state lub data.temp (bez ścieżki: kod odpowiedzi)" },
+    ],
+  },
+  {
     value: "dir",
     label: "Open Folder",
     icon: "folder",
