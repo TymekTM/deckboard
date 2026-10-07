@@ -2811,11 +2811,6 @@ async fn spotify_devices(state: State<'_, DesktopState>) -> Result<Vec<pulpit_sp
         .map_err(|e| e.to_string())?
 }
 
-/// One stored asset as a data URL for the WebView (the desktop TileCell
-/// resolves `spotify-now-playing` art this way; the spotify-art lane
-/// memoizes the result per hash). Reads like [`read_image_data`]: file
-/// IO + base64 on the blocking pool.
-
 /// Touch mode gesture execution: run a tile's action for a detected
 /// gesture ("long-press" / "double-tap" / "swipe-left" / "swipe-right").
 /// An editor-configured `gesture_actions` override in the options JSON
@@ -2900,6 +2895,10 @@ async fn exec_button_gesture(
     Ok(())
 }
 
+/// One stored asset as a data URL for the WebView (the desktop TileCell
+/// resolves `spotify-now-playing` art this way; the spotify-art lane
+/// memoizes the result per hash). Reads like [`read_image_data`]: file
+/// IO + base64 on the blocking pool.
 #[tauri::command]
 async fn asset_data_url(state: State<'_, DesktopState>, hash: String) -> Result<String, String> {
     if !pulpit_v2::is_valid_hash(&hash) {
