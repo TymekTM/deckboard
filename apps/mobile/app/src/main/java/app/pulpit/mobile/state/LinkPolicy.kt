@@ -28,9 +28,16 @@ object LinkBus {
 /** Whether the board (not the connect or goodbye screen) is on screen. A
  *  snapshot keeps the board up through a transient drop; a refusal
  *  (revoked token, bad code) needs the connect screen and its "Forget
- *  pairing". */
-fun showsBoard(conn: ConnState, hasBoards: Boolean, serverDown: Boolean): Boolean {
-    if (serverDown) return false
+ *  pairing". [menuOpen] is the user's own back-button exit to the connect
+ *  screen: it wins over any snapshot, so a deck that cannot reconnect can
+ *  still reach the address fields. */
+fun showsBoard(
+    conn: ConnState,
+    hasBoards: Boolean,
+    serverDown: Boolean,
+    menuOpen: Boolean = false,
+): Boolean {
+    if (serverDown || menuOpen) return false
     if (conn is ConnState.Failed && !conn.retryable) return false
     return conn is ConnState.Connected || hasBoards
 }

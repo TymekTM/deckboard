@@ -50,4 +50,13 @@ class LinkPolicyTest {
         assertFalse(keepsScreenOn(showsBoard = true, linkStandby = true))
         assertTrue(keepsScreenOn(showsBoard = true, linkStandby = false))
     }
+
+    @Test
+    fun menuOpenWinsOverSnapshotAndLiveLink() {
+        // Back -> "yes" must reach the connect screen even with boards on
+        // hand or a live link
+        assertFalse(showsBoard(ConnState.Connected("h", 8500), hasBoards = true, serverDown = false, menuOpen = true))
+        assertFalse(showsBoard(ConnState.Disconnected, hasBoards = true, serverDown = false, menuOpen = true))
+        assertTrue(showsBoard(ConnState.Disconnected, hasBoards = true, serverDown = false, menuOpen = false))
+    }
 }
