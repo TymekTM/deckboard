@@ -101,7 +101,7 @@ class ProtoFixturesTest {
         val board = sync.boards[0]
         assertEquals(3L, board.id)
         assertEquals(Background.color("#2c3e50"), board.background)
-        assertEquals(2, board.tiles.size)
+        assertEquals(4, board.tiles.size)
 
         val button = board.tiles[0]
         assertEquals(17L, button.id)
@@ -153,6 +153,20 @@ class ProtoFixturesTest {
         assertEquals(V2.KIND_SLIDER, slider.kind)
         assertEquals(2, slider.h)
         assertEquals(listOf(V2.INT_SLIDE), slider.interactions)
+
+        // system media tiles (SMTC): the now-playing display tile is a
+        // List over the pushed payload with the tap toggle, the seek
+        // slider reads the pushed progress fraction
+        val media = board.tiles[2]
+        assertEquals(22L, media.id)
+        assertEquals(V2.KIND_LIST, media.kind)
+        assertEquals(listOf(V2.INT_TAP), media.interactions)
+        assertEquals("ext.media-now-playing", media.state!!.channel)
+        assertEquals(V2.SHAPE_SCALAR, media.state!!.shape)
+        val seek = board.tiles[3]
+        assertEquals(23L, seek.id)
+        assertEquals(V2.KIND_SLIDER, seek.kind)
+        assertEquals("ext.media-progress", seek.state!!.channel)
     }
 
     @Test
