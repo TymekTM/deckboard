@@ -83,6 +83,11 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     private var standbyJob: Job? = null
 
+    /** True after the user confirmed leaving the board with Back: the
+     *  connect screen is up and the link stays closed until Connect. */
+    private val _menuOpen = MutableStateFlow(false)
+    val menuOpen: StateFlow<Boolean> = _menuOpen
+
     /** Tracks the Activity's STARTED/STOPPED: the socket lives only while
      *  the app is in front (see onAppBackground), and retries, the probe,
      *  and the standby countdown run only then. */
@@ -464,8 +469,19 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         _config.value = cfg
     }
 
+    /** Back from the board, confirmed: drop the link and show the connect
+     *  screen instead of closing the app. The snapshot stays in memory
+     *  (and in the cache) for the next connect. */
+    fun openMenu() {
+        _menuOpen.value = true
+        _serverDown.value = false
+        disarmStandby()
+        disconnect()
+    }
+
     /** Connect with the stored token. */
     fun connect() {
+        _menuOpen.value = false
         val token = _config.value.token
         if (token.isNullOrBlank()) {
             _connState.value = ConnState.Failed("device not paired - enter a pairing code")
@@ -504,6 +520,7 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun forgetPairing() {
+        _menuOpen.value = false
         cancelPairRequest()
         saveConfig(_config.value.copy(token = null))
         stopKeepAlive()
@@ -533,7 +550,8 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
         // The user just woke the deck: hold the screen again and look for
         // the PC right away instead of waiting out a backoff.
         _linkStandby.value = false
-        if (!_config.value.token.isNullOrBlank() && reconnectJob?.isActive != true) {
+        // in the menu the user decides when to connect
+        if (!_config.value.token.isNullOrBlank() && !_menuOpen.value && reconnectJob?.isActive != true) {
             val st = _connState.value
             val idle = client == null || st is ConnState.Disconnected ||
                 (st is ConnState.Failed && st.retryable)

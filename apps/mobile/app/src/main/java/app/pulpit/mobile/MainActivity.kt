@@ -3,10 +3,17 @@ package app.pulpit.mobile
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -45,7 +52,8 @@ class MainActivity : ComponentActivity() {
                 // awake. The connect and goodbye screens, and a link dead
                 // for LINK_STANDBY_MS, let the system timeout apply - the
                 // flag comes back with the next healthy board.
-                val board = showsBoard(conn, boards.isNotEmpty(), serverDown)
+                val menuOpen by vm.menuOpen.collectAsState()
+                val board = showsBoard(conn, boards.isNotEmpty(), serverDown, menuOpen)
                 val keepOn = keepsScreenOn(board, linkStandby)
                 DisposableEffect(keepOn) {
                     if (keepOn) {
@@ -54,6 +62,28 @@ class MainActivity : ComponentActivity() {
                         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     }
                     onDispose {}
+                }
+                // Back on the deck must not close the app: a tablet that
+                // cannot reconnect would be left without a way to the
+                // address fields. Ask, then fall back to the connect
+                // screen; Back there still leaves the app.
+                var confirmExit by remember { mutableStateOf(false) }
+                BackHandler(enabled = board || serverDown) { confirmExit = true }
+                if (confirmExit && (board || serverDown)) {
+                    AlertDialog(
+                        onDismissRequest = { confirmExit = false },
+                        title = { Text("Wyjść do menu głównego?") },
+                        text = { Text("Połączenie z komputerem zostanie zamknięte.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                confirmExit = false
+                                vm.openMenu()
+                            }) { Text("Tak") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { confirmExit = false }) { Text("Nie") }
+                        },
+                    )
                 }
                 when {
                     serverDown -> ShutdownScreen(onTap = vm::reconnectFromShutdown)
