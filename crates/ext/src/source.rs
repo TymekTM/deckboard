@@ -89,8 +89,7 @@ impl PackageSource {
             });
         }
         let signature = extraction_signature(path);
-        if let Some(root) = cache_root.and_then(|root| signature.map(|sig| (root, sig))) {
-            let (root, sig) = root;
+        if let Some((root, sig)) = cache_root.zip(signature) {
             if let Some(dir) = cached_extraction(root, &package, sig) {
                 tracing::debug!(package = %package, dir = %dir.display(), "asar extraction reused from cache");
                 return Ok(PackageSource {
