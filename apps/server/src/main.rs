@@ -105,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
                 pulpit_discord::DiscordConfig::from_settings(&settings),
                 data_dir.join("settings.json"),
             )
+            .with_voicemeeter_override(pulpit_vm::load_dll_override(&settings))
             .with_spotify(spotify.clone()),
     );
 

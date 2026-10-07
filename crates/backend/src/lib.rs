@@ -31,6 +31,7 @@ pub struct SqlBackend {
     /// plus the settings path, so fresh tokens can be persisted.
     discord: Mutex<Option<DiscordConfig>>,
     discord_settings_path: Option<std::path::PathBuf>,
+    discord_settings_mtime: Mutex<Option<std::time::SystemTime>>,
     /// Keep-alive Discord connection actor, built on first use: one
     /// authenticated pipe for the process lifetime instead of a fresh
     /// ~450 ms session per click.
@@ -61,6 +62,7 @@ impl SqlBackend {
             voicemeeter: Mutex::new(VoicemeeterState::new()),
             discord: Mutex::new(None),
             discord_settings_path: None,
+            discord_settings_mtime: Mutex::new(None),
             discord_client: Mutex::new(None),
             spotify: None,
             spotify_last_error: std::sync::Mutex::new(None),
@@ -74,9 +76,56 @@ impl SqlBackend {
         config: Option<DiscordConfig>,
         settings_path: std::path::PathBuf,
     ) -> Self {
+        let mtime = settings_path.metadata().ok().and_then(|m| m.modified().ok());
         self.discord = Mutex::new(config);
         self.discord_settings_path = Some(settings_path);
+        self.discord_settings_mtime = Mutex::new(mtime);
         self
+    }
+
+    pub fn with_voicemeeter_override(self, override_path: Option<std::path::PathBuf>) -> Self {
+        self.voicemeeter.lock().unwrap().set_override_path(override_path);
+        self
+    }
+
+    pub fn swap_discord_config(&self, config: Option<DiscordConfig>) {
+        *self.discord.lock().unwrap() = config;
+        *self.discord_client.lock().unwrap() = None;
+        if let Some(path) = &self.discord_settings_path {
+            if let Ok(meta) = path.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    *self.discord_settings_mtime.lock().unwrap() = Some(mtime);
+                }
+            }
+        }
+    }
+
+    pub fn get_discord_config(&self) -> Option<DiscordConfig> {
+        self.discord.lock().unwrap().clone()
+    }
+
+    pub fn discord_settings_path(&self) -> Option<&std::path::Path> {
+        self.discord_settings_path.as_deref()
+    }
+
+    pub fn vm_status(&self) -> pulpit_vm::VoicemeeterStatus {
+        self.voicemeeter.lock().unwrap().status()
+    }
+
+    pub fn vm_devices(&self) -> (Vec<pulpit_vm::DeviceItem>, Vec<pulpit_vm::DeviceItem>) {
+        self.voicemeeter.lock().unwrap().devices()
+    }
+
+    pub fn vm_reconnect(&self) -> pulpit_vm::Result<()> {
+        self.voicemeeter.lock().unwrap().reconnect()
+    }
+
+    pub fn vm_run(&self, vm_type: Option<i32>) -> pulpit_vm::Result<()> {
+        self.voicemeeter.lock().unwrap().run_voicemeeter(vm_type)
+    }
+
+    pub fn vm_set_override(&self, path: Option<std::path::PathBuf>) {
+        self.voicemeeter.lock().unwrap().set_override_path(path);
     }
 
     /// Attach the native Spotify integration (None = no `spotify.json`
@@ -689,6 +738,7 @@ impl SqlBackend {
         if !pulpit_vm::is_vm_action(&cmd.kind) {
             return false;
         }
+        self.maybe_reload_hot_settings();
         let mut args = Self::command_args(cmd);
         if let Some(v) = slider_value {
             if !args.is_object() {
@@ -708,10 +758,41 @@ impl SqlBackend {
     /// refresh token Discord's consent popup shows on the desktop and the
     /// new tokens are saved to settings.json. Returns true when the action
     /// kind belongs to Discord.
+    /// Hot reload for settings.json edits that land behind the process's
+    /// back (a hand edit, or the desktop settings panel writing the file
+    /// the headless server also reads). The mtime is checked on the next
+    /// voicemeeter/discord action - a cheap stat, no file watcher - and a
+    /// change re-reads the Discord config and the Voicemeeter DLL override
+    /// from the file. Simplest correct option over file-watch: config only
+    /// matters when an action runs anyway.
+    fn maybe_reload_hot_settings(&self) {
+        let Some(path) = &self.discord_settings_path else { return };
+        let Ok(meta) = path.metadata() else { return };
+        let Ok(mtime) = meta.modified() else { return };
+        let mut cached = self.discord_settings_mtime.lock().unwrap();
+        if *cached != Some(mtime) {
+            *cached = Some(mtime);
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let cfg = pulpit_discord::DiscordConfig::from_settings(&val);
+                    *self.discord.lock().unwrap() = cfg;
+                    *self.discord_client.lock().unwrap() = None;
+                    // set_override_path only drops the live VM session
+                    // when the override actually changed
+                    self.voicemeeter
+                        .lock()
+                        .unwrap()
+                        .set_override_path(pulpit_vm::load_dll_override(&val));
+                }
+            }
+        }
+    }
+
     fn exec_discord(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
         if !pulpit_discord::is_discord_action(&cmd.kind) {
             return false;
         }
+        self.maybe_reload_hot_settings();
         let Some(config) = self.discord.lock().unwrap().clone() else {
             tracing::warn!(kind = %cmd.kind, "discord not configured (no client id in settings)");
             return true;

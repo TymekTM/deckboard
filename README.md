@@ -179,6 +179,42 @@ about every 3 s while playing and every 20 s while paused. Pulpit sends no
 requests at all while no tablet is connected and the editor window is
 hidden. Tiles extrapolate track progress between polls.
 
+## Discord
+
+Pulpit talks to the local Discord client over its RPC named pipe (native
+`crates/discord`, replacing the `discord-deckboard` extension, which needs
+node sockets). Voice actions work on the desktop and on tablets alike.
+
+**Setup (once)** — Ustawienia → Integracje → Discord:
+
+1. Create an app at <https://discord.com/developers/applications>.
+2. In OAuth2 add the redirect `https://discord.com` exactly as written
+   (never actually opened — the authorization runs over the local pipe).
+3. Paste the client id and client secret into the Discord tile and save,
+   then press *Połącz z Discordem* and approve inside the Discord client.
+
+Credentials live in `~/pulpitApp/settings.json` under the contractual
+`discord-deckboard` package (same field names the original extension used),
+tokens alongside them; *Rozłącz* clears the tokens and keeps id + secret.
+Saving hot-reloads the running app — no restart. The headless server re-reads
+the file (mtime check) before its next Discord action, so edits made in the
+desktop reach it without a restart too. Secrets and tokens are never logged.
+
+## Voicemeeter
+
+Voicemeeter tiles drive the `VoicemeeterRemote64.dll` remote API directly
+(native `crates/vm`). The DLL is auto-detected in the standard install
+locations; a nonstandard install can point at the file explicitly in
+Ustawienia → Integracje → Voicemeeter (stored in `settings.json` under
+`voicemeeter.dllPath`, consulted first). The tile shows what was detected:
+DLL path, Voicemeeter type (Basic/Banana/Potato), version, strip/bus counts,
+and can reconnect or launch Voicemeeter.
+
+Strip/bus pickers in the tile editor show live labels (`0 (Mic)`,
+`0 (A1)`) read from the running Voicemeeter; without a connection they fall
+back to the static indices. Stored values stay the numeric index, so boards
+keep working when Voicemeeter is absent.
+
 ## Architecture
 
 One Cargo workspace, thin crates with a single job each:

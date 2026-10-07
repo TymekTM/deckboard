@@ -3722,6 +3722,7 @@ name = "pulpit-discord"
 version = "1.4.0"
 dependencies = [
  "pulpit-db",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -3884,7 +3885,10 @@ dependencies = [
 name = "pulpit-vm"
 version = "1.4.0"
 dependencies = [
+ "pulpit-db",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
