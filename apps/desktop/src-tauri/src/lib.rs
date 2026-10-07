@@ -436,6 +436,26 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     );
     let broadcaster = EditorBroadcaster::new(hub.clone(), backend.clone());
 
+    // Lazy GC: drop tools.json entries whose tile no longer exists
+    // (AUTOINCREMENT ids are never reused, so a kept entry is dead
+    // weight only - the sweep just keeps the file small).
+    {
+        let tools = tools.clone();
+        let backend = backend.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                interval.tick().await;
+                let tools = tools.clone();
+                let backend = backend.clone();
+                let ids = tauri::async_runtime::spawn_blocking(move || backend.all_button_ids())
+                    .await
+                    .unwrap_or_default();
+                tools.clean_deleted(&ids);
+            }
+        });
+    }
+
     // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
     // /v2/pair. Shares the backend with the legacy layer; a broken devices
     // list or asset store only disables v2, never the whole editor.

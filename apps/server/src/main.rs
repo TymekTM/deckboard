@@ -115,13 +115,35 @@ async fn main() -> anyhow::Result<()> {
                 data_dir.join("settings.json"),
             )
             .with_spotify(spotify.clone())
-            .with_tools(Some(tools)),
+            .with_tools(Some(tools.clone())),
     );
 
+    let concrete_backend = backend.clone();
     let state = Arc::new(AppState {
         hub,
         backend: backend as Arc<dyn pulpit_legacy::Backend>,
     });
+
+    // Lazy GC: drop tools.json entries whose tile no longer exists
+    // (AUTOINCREMENT ids are never reused, so a kept entry is dead
+    // weight only - the sweep just keeps the file small). The concrete
+    // backend read runs off the async workers like every DB touch.
+    {
+        let tools = tools.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                interval.tick().await;
+                let ids = tokio::task::spawn_blocking({
+                    let concrete = concrete_backend.clone();
+                    move || concrete.all_button_ids()
+                })
+                .await
+                .unwrap_or_default();
+                tools.clean_deleted(&ids);
+            }
+        });
+    }
 
     // Port 8500 is what the stock Android client hardcodes (and the original
     // app's default); `PULPIT_PORT` overrides it for side-by-side runs.

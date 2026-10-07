@@ -126,6 +126,18 @@ impl SqlBackend {
     }
 
     /// New 1x1 button placed at (x, y) in `button` mode.
+    /// Ids of every button, for the tools store's lazy GC of entries
+    /// whose tile was deleted. Best effort: a failed read keeps everything.
+    pub fn all_button_ids(&self) -> Vec<i64> {
+        match self.db.lock().unwrap().all_button_ids() {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::error!("all_button_ids failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     pub fn create_button(
         &self,
         board_id: i64,
@@ -1431,6 +1443,23 @@ mod tests {
         backend.delete_board(board).unwrap();
         assert_eq!(backend.get_boards().len(), 1);
     }
+
+    #[test]
+    fn all_button_ids_spans_boards_and_tracks_deletes() {
+        let backend = test_backend();
+        let a = backend.create_board("A", "#2c3e50", 4, 3).unwrap();
+        let b = backend.create_board("B", "#2c3e50", 4, 3).unwrap();
+        let first = backend.create_button(a, "tool-timer", "button", 0, 0).unwrap();
+        let second = backend.create_button(b, "url", "button", 0, 0).unwrap();
+
+        let mut ids = backend.all_button_ids();
+        ids.sort();
+        assert_eq!(ids, vec![first.min(second), first.max(second)]);
+
+        backend.delete_button(second).unwrap();
+        assert_eq!(backend.all_button_ids(), vec![first]);
+    }
+
 
     #[test]
     fn boardjson_import_export_roundtrip() {

@@ -254,6 +254,19 @@ impl Db {
         }
     }
 
+    /// Ids of every shortcut across all boards, for lazy GCs of
+    /// per-button side state (the tools store drops entries for deleted
+    /// buttons; AUTOINCREMENT ids never get reused).
+    pub fn all_button_ids(&self) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id FROM Shortcuts ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Same row as [`Db::get_button`] with the `img`/`img2` columns left
     /// empty. Taps and slider slides read a button per event and must not
     /// materialize multi-MB base64 image strings; every consumer treats an
