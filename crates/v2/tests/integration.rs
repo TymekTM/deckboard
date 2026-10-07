@@ -1710,6 +1710,97 @@ async fn exec_side_values_land_on_ext_channels() {
     assert_eq!(patch.changes[0].value, "42");
 }
 
+/// OBS tiles over the v2 wire (round 5): each tile's state channel is
+/// the exact legacy `extra` watch string the native integration pushes
+/// under (`crates/obs/src/state.rs`), and a boolean push lights the
+/// channel the way the Android client's isActiveValue reads it - so the
+/// dual tiles and the volume slider work with zero client-side changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn obs_tiles_watch_the_channels_the_native_integration_pushes() {
+    let mut backend = sample_backend();
+    backend.buttons = vec![
+        button_row(30, "obs-scene", "button", Some(r#"{"scene":"Game"}"#), None),
+        button_row(
+            31,
+            "obs-audio-slider",
+            "slider",
+            Some(r#"{"device":"Mic"}"#),
+            None,
+        ),
+        button_row(32, "obs-studio-mode", "button", None, None),
+    ];
+    let (state, _dir) = test_state(backend, |_| {});
+    let (_device, token) = state.devices.create("Tablet");
+    let addr = spawn_server(state.clone()).await;
+    let mut ws = ws_open(&format!("ws://{addr}/v2/ws?token={}", token)).await;
+    let (_welcome, sync, _state_sync) = handshake(&mut ws, "pulpit-mobile", "0.2.0").await;
+
+    let channel_of = |tile_id: i64| -> String {
+        sync.boards[0]
+            .tiles
+            .iter()
+            .find(|t| t.id == tile_id)
+            .and_then(|t| t.manifest.state.as_ref())
+            .map(|s| s.channel.clone())
+            .unwrap_or_else(|| panic!("tile {tile_id} has no state channel"))
+    };
+    // obs-scene watches its raw command JSON, the slider keeps the
+    // "<kind>_<raw command>" spelling, the argument-less toggle watches
+    // its kind - exactly the keys crates/obs pushes
+    assert_eq!(channel_of(30), format!("ext.{}", r#"{"scene":"Game"}"#));
+    assert_eq!(
+        channel_of(31),
+        format!("ext.{}", r#"obs-audio-slider_{"device":"Mic"}"#)
+    );
+    assert_eq!(channel_of(32), "ext.obs-studio-mode");
+
+    // the producer snapshot (booleans + the slider's number) lands on
+    // the tiles' channels as plain state patches
+    state.engine.set(
+        &pulpit_v2::ext_channel(&serde_json::json!({ "scene": "Game" }).to_string()),
+        serde_json::json!(true),
+    );
+    state.engine.set("ext.obs-studio-mode", serde_json::json!(true));
+    state.engine.set(
+        &pulpit_v2::ext_channel(&format!("obs-audio-slider_{}", r#"{"device":"Mic"}"#)),
+        serde_json::json!(0.4),
+    );
+
+    let mut lit_scene = false;
+    let mut lit_studio = false;
+    let mut slider_value = None;
+    let frames = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let f = next_frame(&mut ws).await;
+            if f.kind == TYPE_STATE_PATCH {
+                break f;
+            }
+        }
+    })
+    .await
+    .expect("state patches for the obs pushes");
+    let patch: StatePatch = serde_json::from_value(frames.payload.unwrap()).unwrap();
+    for change in &patch.changes {
+        if change.channel == format!("ext.{}", r#"{"scene":"Game"}"#) {
+            assert_eq!(change.value, serde_json::json!(true));
+            lit_scene = true;
+        }
+        if change.channel == "ext.obs-studio-mode" {
+            assert_eq!(change.value, serde_json::json!(true));
+            lit_studio = true;
+        }
+        if change
+            .channel
+            == format!("ext.{}", r#"obs-audio-slider_{"device":"Mic"}"#)
+        {
+            slider_value = change.value.as_f64();
+        }
+    }
+    assert!(lit_scene, "the scene watch channel carried the boolean");
+    assert!(lit_studio, "the studio-mode channel carried the boolean");
+    assert_eq!(slider_value, Some(0.4), "the slider channel carried the fader value");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_goodbye_reaches_clients_then_closes() {
     let (state, _dir) = test_state(sample_backend(), |_| {});

@@ -300,12 +300,46 @@ fn spotify_listener(kind: &str, command: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// The obs kinds the native integration (round 5) pushes live state
+/// for: the watch strings follow the stored command JSON shapes the
+/// original wrote (`scene` / `source` / `device` / `filter` fields).
+/// `obs-scene` keeps the raw command text the original mapped; the
+/// others compose `<scene>::<source>[::[<filter>]]` from the parsed
+/// fields - the empty segments stay in, so the keys are stable.
+/// obs-device-audio falls back from `source` to the catalog's `device`
+/// field (it used to resolve to "" and never light anything), and the
+/// argument-less obs toggles watch their kind name so the native
+/// pushes (`obs-studio-mode`, `obs-record`, `obs-stream`) reach the
+/// v2 state channels too.
+fn obs_listener(kind: &str, raw: &str) -> Option<String> {
+    match kind {
+        "obs-scene" => Some(raw.to_string()),
+        "obs-source" => Some(parsed(raw, "scene") + "::" + &parsed(raw, "source")),
+        "obs-filter" => Some(
+            parsed(raw, "scene") + "::" + &parsed(raw, "source") + "::" + &parsed(raw, "filter"),
+        ),
+        "obs-device-audio" => {
+            let source = parsed(raw, "source");
+            if source.is_empty() {
+                Some(parsed(raw, "device"))
+            } else {
+                Some(source)
+            }
+        }
+        "obs-studio-mode" | "obs-record" | "obs-stream" => Some(kind.to_string()),
+        _ => None,
+    }
+}
+
 /// The `extra` field: which state key the client watches for toggles/graphs.
 fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props) -> String {
     if let Some(key) = spotify_listener(kind, command) {
         return key.to_string();
     }
     let raw = command.unwrap_or_default();
+    if let Some(key) = obs_listener(kind, raw) {
+        return key;
+    }
     if props.json_key.is_some() {
         // jsonKey types use the type as the listener key
         return kind.to_string();
@@ -318,12 +352,8 @@ fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props) 
         };
     }
     match kind {
-        "obs-scene" | "slobs-scene" => raw.to_string(),
-        "obs-source" => parsed(raw, "scene") + "::" + &parsed(raw, "source"),
-        "obs-filter" => {
-            parsed(raw, "scene") + "::" + &parsed(raw, "source") + "::" + &parsed(raw, "filter")
-        }
-        "slobs-source" | "obs-device-audio" | "slobs-device-audio" => parsed(raw, "source"),
+        "slobs-scene" => raw.to_string(),
+        "slobs-source" | "slobs-device-audio" => parsed(raw, "source"),
         "twitch-chat-box" => raw.to_string(),
         _ => {
             if mode == "slider" {
@@ -562,6 +592,86 @@ mod tests {
         let basic = m.board_payload(&b, &[], false);
         assert_eq!(basic["width"], 32);
         assert_eq!(basic["shortcuts"].as_array().unwrap().len(), 4 * 3);
+    }
+
+    #[test]
+    fn obs_tiles_watch_the_pushed_keys() {
+        let m = Mapper::new();
+        // scene tiles keep the original's raw-command watch string, and
+        // the new toggles watch their kind name (the keys the native
+        // integration pushes - see crates/obs/src/state.rs to_snapshot)
+        let s = m.shortcut_payload(&button(
+            "obs-scene",
+            Some(r#"{"scene":"Game"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], r#"{"scene":"Game"}"#);
+        for (kind, key) in [
+            ("obs-studio-mode", "obs-studio-mode"),
+            ("obs-record", "obs-record"),
+            ("obs-stream", "obs-stream"),
+        ] {
+            let s = m.shortcut_payload(&button(kind, None, 0, 0, 1, 1));
+            assert_eq!(s["extra"], key, "{kind}");
+        }
+        // source tiles compose scene::source (empty scene stays empty)
+        let s = m.shortcut_payload(&button(
+            "obs-source",
+            Some(r#"{"source":"Webcam"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], "::Webcam");
+        // filters compose scene::source::filter with the optional source
+        let s = m.shortcut_payload(&button(
+            "obs-filter",
+            Some(r#"{"filter":"Blur"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], "::::Blur");
+        let s = m.shortcut_payload(&button(
+            "obs-filter",
+            Some(r#"{"source":"Webcam","filter":"Blur"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], "::Webcam::Blur");
+        // device audio falls back from the empty `source` to the
+        // catalog's `device` field (used to watch "" and never light)
+        let s = m.shortcut_payload(&button(
+            "obs-device-audio",
+            Some(r#"{"device":"Mic"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], "Mic");
+        // the audio slider keeps the slider spelling: kind + raw command
+        let mut slider = button(
+            "obs-audio-slider",
+            Some(r#"{"device":"Mic"}"#),
+            0,
+            0,
+            1,
+            1,
+        );
+        slider.mode = "slider".into();
+        let s = m.shortcut_payload(&slider);
+        assert_eq!(s["extra"], format!("obs-audio-slider_{}", r#"{"device":"Mic"}"#));
+        // unimplemented obs kinds stay without a watch key
+        let s = m.shortcut_payload(&button("obs-transition", None, 0, 0, 1, 1));
+        assert_eq!(s["extra"], "");
     }
 
     #[test]
