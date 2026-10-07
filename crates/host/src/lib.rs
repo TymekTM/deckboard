@@ -384,6 +384,10 @@ pub fn register_inputs(ext: &pulpit_ext::ExtManager) {
     for (value, icon, color, mode) in pulpit_spotify::input_declarations() {
         register_input(value, Some(icon), Some(color), "fas", mode, None);
     }
+    // native utility tools (clock, timer, stopwatch, counter)
+    for (value, icon, color, mode) in pulpit_tools::input_declarations() {
+        register_input(value, Some(icon), Some(color), "fas", mode, None);
+    }
 }
 
 /// The AI dev-work producer's source locations: `config` (the

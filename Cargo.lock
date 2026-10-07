@@ -3656,6 +3656,7 @@ dependencies = [
  "pulpit-os",
  "pulpit-spotify",
  "pulpit-sysinfo",
+ "pulpit-tools",
  "pulpit-vm",
  "serde_json",
  "tempfile",
@@ -3698,6 +3699,7 @@ dependencies = [
  "pulpit-proto",
  "pulpit-spotify",
  "pulpit-sysinfo",
+ "pulpit-tools",
  "pulpit-v2",
  "pulpit-vm",
  "qrcode",
@@ -3759,6 +3761,7 @@ dependencies = [
  "pulpit-legacy",
  "pulpit-spotify",
  "pulpit-sysinfo",
+ "pulpit-tools",
  "pulpit-v2",
  "pulpit-vm",
  "serde_json",
@@ -3821,6 +3824,7 @@ dependencies = [
  "pulpit-proto",
  "pulpit-spotify",
  "pulpit-sysinfo",
+ "pulpit-tools",
  "pulpit-v2",
  "pulpit-vm",
  "serde_json",
@@ -3856,6 +3860,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulpit-tools"
+version = "1.4.0"
+dependencies = [
+ "pulpit-actions",
+ "pulpit-db",
+ "pulpit-legacy",
+ "pulpit-os",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pulpit-v2"
 version = "1.4.0"
 dependencies = [
@@ -3869,6 +3888,7 @@ dependencies = [
  "pulpit-db",
  "pulpit-legacy",
  "pulpit-proto",
+ "pulpit-tools",
  "rand 0.8.8",
  "serde",
  "serde_json",

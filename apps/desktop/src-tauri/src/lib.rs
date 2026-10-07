@@ -46,6 +46,8 @@ struct DesktopState {
     /// hammer the API).
     spotify_playlists:
         std::sync::Mutex<Option<(std::time::Instant, Vec<pulpit_spotify::Playlist>)>>,
+    #[allow(dead_code)]
+    tools: Option<Arc<pulpit_tools::ToolManager>>,
 }
 
 impl DesktopState {
@@ -223,6 +225,7 @@ pub fn run() {
             spotify_playlists,
             spotify_devices,
             asset_data_url,
+            exec_button_gesture,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -365,6 +368,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             spotify: None,
             spotify_path: None,
             spotify_playlists: std::sync::Mutex::new(None),
+            tools: None,
         };
     }
     let db = db.unwrap();
@@ -406,6 +410,20 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     }
     pulpit_host::register_inputs(&ext_manager);
 
+    let hub = Arc::new(Hub::new());
+    let tools_path = data_dir.join("tools.json");
+    let (tools, tools_rx) = pulpit_tools::spawn_tools(tools_path, hub.clone());
+    // A timer's on-finish "switch board" acts on this host's own touch
+    // mode: the same DOM event a board-switch tile's exec emits.
+    let (tools_board_tx, mut tools_board_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+    tools.set_board_sink(tools_board_tx);
+    let app_for_tools = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(board) = tools_board_rx.recv().await {
+            let _ = app_for_tools.emit("change-board", board);
+        }
+    });
+
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -413,10 +431,9 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 pulpit_discord::DiscordConfig::from_settings(&settings),
                 data_dir.join("settings.json"),
             )
-            .with_spotify(spotify.clone()),
+            .with_spotify(spotify.clone())
+            .with_tools(Some(tools.clone())),
     );
-
-    let hub = Arc::new(Hub::new());
     let broadcaster = EditorBroadcaster::new(hub.clone(), backend.clone());
 
     // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
@@ -520,6 +537,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     tauri::async_runtime::spawn(pulpit_host::speaker_watch(
         feed.clone(),
         backend.clone() as Arc<dyn Backend>,
+    ));
+    tauri::async_runtime::spawn(pulpit_host::forward_producer(
+        feed.clone(),
+        tools_rx,
     ));
 
     // Spotify (when its config is readable): the poller's consumers
@@ -642,6 +663,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         spotify,
         spotify_path: Some(spotify_path),
         spotify_playlists: std::sync::Mutex::new(None),
+        tools: Some(tools),
     }
 }
 
@@ -2813,3 +2835,70 @@ async fn asset_data_url(state: State<'_, DesktopState>, hash: String) -> Result<
     .await
     .map_err(|e| e.to_string())?
 }
+
+
+// ---- utility tools commands ---------------------------------------------
+
+/// Touch mode / tool gesture: execute a named gesture on a tool tile
+/// (tap, double-tap, long-press, reset).
+#[tauri::command]
+async fn exec_button_gesture(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    id: i64,
+    gesture: String,
+) -> Result<(), String> {
+    use pulpit_actions::EventSink;
+
+    let backend = state.backend()?;
+    let backend_for_error = backend.clone();
+    let feed = DesktopFeed {
+        app: app.clone(),
+        engine: state.v2.as_ref().map(|v2| v2.engine.clone()),
+        hub: state
+            .hub
+            .clone()
+            .ok_or_else(|| "database unavailable".to_string())?,
+    };
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<(pulpit_host::StatusApp, String, String)>();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        struct UiSink(
+            AppHandle,
+            tokio::sync::mpsc::UnboundedSender<(pulpit_host::StatusApp, String, String)>,
+        );
+        impl EventSink for UiSink {
+            fn change_board(&mut self, board_id: i64) {
+                let _ = self.0.emit("change-board", board_id);
+            }
+            fn app_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::CustomValue,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+            fn third_party_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::ThirdParty,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+        }
+        let Some(button) = backend.get_button_meta(id) else {
+            return;
+        };
+        let mut sink = UiSink(app, tx);
+        backend.exec_gesture(button, &gesture, &mut sink);
+    })
+    .await;
+    while let Ok((app_kind, key, value)) = rx.try_recv() {
+        pulpit_host::push_values(&feed, app_kind, &serde_json::json!({ key: value })).await;
+    }
+    if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
+    Ok(())
+}
+

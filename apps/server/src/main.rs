@@ -98,6 +98,15 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+    let hub = Arc::new(Hub::new());
+    let tools_path = data_dir.join("tools.json");
+    let (tools, tools_rx) = pulpit_tools::spawn_tools(tools_path, hub.clone());
+    // A timer's on-finish "switch board" acts on the connected tablets
+    // (there is no local UI here); the sinks are wired once the v2 state
+    // exists below.
+    let (tools_board_tx, mut tools_board_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+    tools.set_board_sink(tools_board_tx);
+
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -105,11 +114,12 @@ async fn main() -> anyhow::Result<()> {
                 pulpit_discord::DiscordConfig::from_settings(&settings),
                 data_dir.join("settings.json"),
             )
-            .with_spotify(spotify.clone()),
+            .with_spotify(spotify.clone())
+            .with_tools(Some(tools)),
     );
 
     let state = Arc::new(AppState {
-        hub: Arc::new(Hub::new()),
+        hub,
         backend: backend as Arc<dyn pulpit_legacy::Backend>,
     });
 
@@ -179,6 +189,29 @@ async fn main() -> anyhow::Result<()> {
         pulpit_aidev::spawn_push(pulpit_host::aidev_paths(aidev_config)),
     ));
     tokio::spawn(pulpit_host::speaker_watch(feed.clone(), state.backend.clone()));
+    tokio::spawn(pulpit_host::forward_producer(feed.clone(), tools_rx));
+    // Timer finish -> switch board: legacy tablets listen on their own
+    // `change_board` event (the same one a board-switch tile's exec
+    // emits), v2 tablets on the typed `board.open` frame.
+    {
+        let legacy_hub = state.hub.clone();
+        let v2_hub = v2.hub.clone();
+        tokio::spawn(async move {
+            use pulpit_proto::{BoardOpen, Frame, TYPE_BOARD_OPEN};
+            while let Some(board) = tools_board_rx.recv().await {
+                legacy_hub
+                    .broadcast(
+                        "change_board",
+                        Some(&format!(r#"{{"boardId":{board}}}"#)),
+                    )
+                    .await;
+                v2_hub.broadcast_frame(&Frame::push_typed(
+                    TYPE_BOARD_OPEN,
+                    &BoardOpen { board },
+                ));
+            }
+        });
+    }
     // Spotify poller: consumers = connected legacy + v2 clients (no
     // host-local UI on the headless server). Snapshots ride the shared
     // spotify pump (internal art key stripped, album art imported).

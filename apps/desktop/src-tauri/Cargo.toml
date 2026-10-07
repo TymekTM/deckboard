@@ -39,6 +39,7 @@ pulpit-sysinfo = { path = "../../../crates/sysinfo" }
 pulpit-proto = { path = "../../../crates/proto" }
 pulpit-v2 = { path = "../../../crates/v2" }
 pulpit-aidev = { path = "../../../crates/aidev" }
+pulpit-tools = { path = "../../../crates/tools" }
 if-addrs = "0.15.0"
 qrcode = "0.14.1"
 ureq = "3"

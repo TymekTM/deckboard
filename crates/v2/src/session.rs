@@ -518,15 +518,21 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
             let backend = state.backend.clone();
             tokio::task::spawn_blocking(move || backend.slider(button, value));
         }
-        // M5 custom gestures: alternative triggers of the tile's action
-        // with release semantics - one execution each, no key-hold, no
-        // server-side repeat (that stays with press-start).
-        Interaction::LongPress
-        | Interaction::DoubleTap
-        | Interaction::SwipeLeft
-        | Interaction::SwipeRight => {
+        Interaction::LongPress => {
             ack_ok();
-            exec_once(state, button, false);
+            exec_gesture(state, button, "long-press");
+        }
+        Interaction::DoubleTap => {
+            ack_ok();
+            exec_gesture(state, button, "double-tap");
+        }
+        Interaction::SwipeLeft => {
+            ack_ok();
+            exec_gesture(state, button, "swipe-left");
+        }
+        Interaction::SwipeRight => {
+            ack_ok();
+            exec_gesture(state, button, "swipe-right");
         }
         // Unreachable while the allowed-interactions check stands (no tile
         // declares wheel/drag); kept as a defensive typed error.
@@ -579,6 +585,50 @@ fn start_hold(
         tracing::debug!(tile, "hold repeat ended");
     });
     session.insert_hold(tile, handle);
+}
+
+fn exec_gesture(state: &Arc<V2State>, button: ButtonRow, gesture: &'static str) {
+    let backend = state.backend.clone();
+    let engine = state.engine.clone();
+    let hub = state.hub.clone();
+    tokio::task::spawn_blocking(move || {
+        exec_gesture_blocking(&backend, &engine, &hub, button, gesture)
+    });
+}
+
+fn exec_gesture_blocking(
+    backend: &Arc<dyn pulpit_legacy::Backend>,
+    engine: &Arc<StateEngine>,
+    hub: &Arc<crate::hub::V2Hub>,
+    button: ButtonRow,
+    gesture: &str,
+) {
+    let (board_tx, mut board_rx) = mpsc::unbounded_channel::<i64>();
+    let (value_tx, mut value_rx) = mpsc::unbounded_channel::<(String, String)>();
+    struct Sink(
+        tokio::sync::mpsc::UnboundedSender<i64>,
+        tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    );
+    impl EventSink for Sink {
+        fn change_board(&mut self, board_id: i64) {
+            let _ = self.0.send(board_id);
+        }
+        fn app_value(&mut self, key: &str, value: &str) {
+            let _ = self.1.send((key.to_string(), value.to_string()));
+        }
+    }
+    let mut sink = Sink(board_tx, value_tx);
+    backend.exec_gesture(button, gesture, &mut sink);
+    while let Ok(board) = board_rx.try_recv() {
+        hub.broadcast_frame(&Frame::push_typed(TYPE_BOARD_OPEN, &BoardOpen { board }));
+    }
+    while let Ok((key, value)) = value_rx.try_recv() {
+        let channel = ext_channel(&key);
+        engine.set(
+            &channel,
+            serde_json::from_str(&value).unwrap_or(Value::String(value)),
+        );
+    }
 }
 
 /// Executes a tile command off the async workers; its effects (board

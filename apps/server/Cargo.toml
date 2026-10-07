@@ -28,3 +28,4 @@ pulpit-discord = { path = "../../crates/discord" }
 pulpit-spotify = { path = "../../crates/spotify" }
 pulpit-sysinfo = { path = "../../crates/sysinfo" }
 pulpit-aidev = { path = "../../crates/aidev" }
+pulpit-tools = { path = "../../crates/tools" }

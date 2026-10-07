@@ -206,6 +206,20 @@ pub fn hold_repeat_config(params: &Value) -> Option<(u64, u64)> {
 /// and the plan tile's `windows:` option token is normalized into a
 /// params array.
 fn apply_implicit_params(row: &ButtonRow, params: &mut Value) {
+    if pulpit_tools::is_tool_action(&row.kind) {
+        if !params.is_object() {
+            *params = Value::Object(serde_json::Map::new());
+        }
+        let obj = params.as_object_mut().expect("just made an object");
+        obj.insert("widget".into(), Value::String(row.kind.clone()));
+        if let Some(cmd_val) = row.command.as_deref().and_then(|c| serde_json::from_str::<Value>(c).ok()) {
+            if let Some(cmd_obj) = cmd_val.as_object() {
+                for (k, v) in cmd_obj {
+                    obj.entry(k.clone()).or_insert(v.clone());
+                }
+            }
+        }
+    }
     if row.kind == "clock-display-time" {
         if !params.is_object() {
             *params = Value::Object(serde_json::Map::new());
@@ -265,6 +279,15 @@ fn widget_kind_for(
         "list" => (WidgetKind::List, vec![]),
         // ai dev-work display tiles: a read-only row list, no gestures
         "status" => (WidgetKind::List, vec![]),
+        _ if row.kind == "tool-clock" => (WidgetKind::Button, vec![]),
+        _ if matches!(row.kind.as_str(), "tool-timer" | "tool-stopwatch") => (
+            WidgetKind::Button,
+            vec![Interaction::Tap, Interaction::LongPress, Interaction::DoubleTap],
+        ),
+        _ if row.kind == "tool-counter" => (
+            WidgetKind::Button,
+            vec![Interaction::Tap, Interaction::DoubleTap, Interaction::LongPress],
+        ),
         _ if app == Some("custom-value") => (WidgetKind::Toggle, vec![Interaction::Tap]),
         _ => {
             // Press semantics are declared, not implied: key-style
@@ -337,6 +360,9 @@ fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<St
         .to_string();
     if key.is_empty() && row.mode == "status" {
         key = row.kind.clone();
+    }
+    if key.is_empty() && matches!(row.kind.as_str(), "tool-timer" | "tool-stopwatch" | "tool-counter") {
+        key = format!("tool-{}", row.id);
     }
     if key.is_empty() {
         return None;
@@ -517,6 +543,56 @@ mod tests {
         r.options = Some(r#"{"gestures": ["long-press"]}"#.into());
         assert_eq!(allowed_interactions(&r), vec![Interaction::Slide]);
     }
+
+    #[test]
+    fn tool_tiles_carry_widget_hint_config_and_state_channel() {
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let tile = build_tile(
+            &row(
+                "tool-timer",
+                "button",
+                Some(r#"{"duration":"05:00","finish_action":"play","sound_path":"alert.mp3"}"#),
+            ),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::Button);
+        // the config travels as params so clients never parse legacy
+        // command JSON, and the widget hint names the tool kind
+        assert_eq!(tile.manifest.params["widget"], "tool-timer");
+        assert_eq!(tile.manifest.params["duration"], "05:00");
+        assert_eq!(tile.manifest.params["finish_action"], "play");
+        // state channel: the per-id key the manager pushes compact state
+        // under (the row helper's button id is 10)
+        assert_eq!(
+            tile.manifest.state.as_ref().unwrap().channel,
+            "ext.tool-10"
+        );
+        // gestures: tap starts/pauses, long-press/double-tap reset
+        assert_eq!(
+            tile.manifest.interactions,
+            vec![Interaction::Tap, Interaction::LongPress, Interaction::DoubleTap]
+        );
+
+        // the counter swaps the gesture order (+1 tap, -1 double-tap,
+        // reset long-press); the clock renders client-side and takes no
+        // interactions at all
+        assert_eq!(
+            allowed_interactions(&row("tool-counter", "button", None)),
+            vec![Interaction::Tap, Interaction::DoubleTap, Interaction::LongPress]
+        );
+        let clock = build_tile(
+            &row("tool-clock", "button", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(clock.manifest.params["widget"], "tool-clock");
+        assert!(clock.manifest.interactions.is_empty());
+    }
+
 
     #[test]
     fn vol_mute_maps_to_toggle_with_channel() {
