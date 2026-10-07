@@ -222,6 +222,7 @@ pub fn run() {
             spotify_logout,
             spotify_playlists,
             spotify_devices,
+            media_sessions,
             asset_data_url,
         ])
         .build(tauri::generate_context!())
@@ -556,6 +557,30 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 ));
             }
         }
+    }
+
+    // System media (SMTC): always on where the OS supports it - no config
+    // file gates it. The same consumers signal as Spotify (a tray-hidden
+    // window renders nothing, so the poller idles); thumbnails ride the
+    // shared media pump into the v2 asset store.
+    {
+        let app_for_consumers = app.clone();
+        let extra: Arc<dyn Fn() -> usize + Send + Sync> = Arc::new(move || {
+            app_for_consumers
+                .get_webview_window("main")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false) as usize
+        });
+        let consumers = pulpit_host::consumer_reader(
+            hub.clone(),
+            v2.as_ref().map(|v2| v2.hub.clone()),
+            Some(extra),
+        );
+        tauri::async_runtime::spawn(pulpit_host::media::forward_media(
+            feed.clone(),
+            pulpit_os::media::spawn_push(consumers),
+            v2.as_ref().map(|v2| v2.assets.clone()),
+        ));
     }
 
     let state = Arc::new(AppState {
@@ -1010,6 +1035,16 @@ fn list_known_inputs(state: State<'_, DesktopState>) -> Vec<serde_json::Value> {
         }));
     }
     for (value, icon, color, mode) in pulpit_spotify::input_declarations() {
+        out.push(serde_json::json!({
+            "value": value,
+            "icon": icon,
+            "color": color,
+            "mode": mode,
+            "command": serde_json::Value::Null,
+            "source": "device",
+        }));
+    }
+    for (value, icon, color, mode) in pulpit_os::media::input_declarations() {
         out.push(serde_json::json!({
             "value": value,
             "icon": icon,
@@ -2783,6 +2818,18 @@ async fn spotify_devices(state: State<'_, DesktopState>) -> Result<Vec<pulpit_sp
     tauri::async_runtime::spawn_blocking(move || spotify.devices().map_err(|e| e.to_string()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Friendly names of the live system-media (SMTC) sessions for the
+/// editor's "Aplikacja" picker on the media tiles. WinRT calls block:
+/// like the Spotify pickers, this runs on the blocking pool.
+#[tauri::command]
+async fn media_sessions() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pulpit_os::media::list_sessions().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// One stored asset as a data URL for the WebView (the desktop TileCell
