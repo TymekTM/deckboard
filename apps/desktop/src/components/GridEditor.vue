@@ -4,9 +4,8 @@ import { CELL_W, ROW_H, MAX_BOARD_DIM, clamp } from "../catalog";
 import TileCell from "./TileCell.vue";
 
 // Edit-mode grid: drag to move, corner handle to resize, double-click to
-// edit, empty-cell click to add. Touch mode: tap runs the tile. Tiles
-// themselves render in TileCell so live state pushes re-render only the
-// affected tiles, not the whole board.
+// edit, empty-cell click to add. Multi-select: Ctrl/Shift click and rubber-band.
+// Touch mode: tap runs the tile.
 const props = defineProps({
   board: { type: Object, required: true },
   touch: { type: Boolean, default: false },
@@ -17,15 +16,50 @@ const props = defineProps({
   customValues: { type: Object, default: () => ({}) },
   // board id -> name, for board-switch tiles without a title
   boardNames: { type: Object, default: () => ({}) },
+  selectedIds: { type: Object, default: () => new Set() },
 });
-const emit = defineEmits(["tile-open", "tile-moved", "tile-add", "tile-exec", "tile-slider", "ctx-tile", "ctx-empty"]);
+const emit = defineEmits([
+  "tile-open",
+  "tile-moved",
+  "tile-add",
+  "tile-exec",
+  "tile-slider",
+  "ctx-tile",
+  "ctx-empty",
+  "select-tile",
+  "select-tiles",
+  "clear-selection",
+  "tiles-bulk-moved",
+  "move-refused",
+]);
 
 // tiles whose stored mode is "toggle" flip to their second state when
 // tapped, exactly like the tablet client; the flip lives for the editor
 // session only (live state pushes win once they arrive)
 const activeTiles = reactive(new Set());
 
-const drag = ref(null); // {tile, mode:'move'|'resize', dx, dy, pointerId}
+const drag = ref(null); // {tile, mode:'move'|'resize', isGroupDrag, startX, startY, cellW, cellH, cx, cy, cw, ch}
+
+const rubberBand = reactive({
+  active: false,
+  startX: 0,
+  startY: 0,
+  curX: 0,
+  curY: 0,
+});
+
+const rubberBandStyle = computed(() => {
+  const minX = Math.min(rubberBand.startX, rubberBand.curX);
+  const maxX = Math.max(rubberBand.startX, rubberBand.curX);
+  const minY = Math.min(rubberBand.startY, rubberBand.curY);
+  const maxY = Math.max(rubberBand.startY, rubberBand.curY);
+  return {
+    left: `${minX}px`,
+    top: `${minY}px`,
+    width: `${maxX - minX}px`,
+    height: `${maxY - minY}px`,
+  };
+});
 
 // zoomed cell size keeps the grid proportional at 50-150%
 const cell = computed(() => CELL_W * props.zoom);
@@ -40,17 +74,10 @@ const gridStyle = computed(() => ({
   backgroundSize: "cover",
 }));
 
-// Base geometry per tile, memoized in one computed: the returned objects
-// keep their identity across pointer events, so a drag re-renders only
-// the dragged tile instead of handing every TileCell a fresh style object
-// per pointermove (DESK-12) - Vue's child update check then hits the
-// `a === b` fast path instead of deep-comparing styles for ~1000 tiles
-// at 60-125 Hz.
 const baseStyles = computed(() => {
   const map = new Map();
   for (const t of props.board.buttons) {
     map.set(t, {
-      // clamp to W-w / H-h so a multi-cell tile never hangs over the edge
       left: `${clamp(t.x, 0, Math.max(0, props.board.width - t.w)) * cell.value}px`,
       top: `${clamp(t.y, 0, Math.max(0, props.board.height - t.h)) * row.value}px`,
       width: `${clamp(t.w, 1, props.board.width) * cell.value}px`,
@@ -61,42 +88,47 @@ const baseStyles = computed(() => {
   return map;
 });
 
-// The dragged (or resized) tile alone gets a fresh style per pointer
-// event with the live offset applied; every other tile keeps its
-// memoized object and skips the child update entirely.
 function tileStyle(tile) {
-  const d = drag.value && drag.value.tile.id === tile.id ? drag.value : null;
+  const d = drag.value;
   const base = baseStyles.value.get(tile);
   if (!d) return base;
-  const x = d.mode === "move" ? tile.x + d.cx : tile.x;
-  const y = d.mode === "move" ? tile.y + d.cy : tile.y;
-  const w = d.mode === "resize" ? Math.max(1, tile.w + d.cw) : tile.w;
-  const h = d.mode === "resize" ? Math.max(1, tile.h + d.ch) : tile.h;
+
+  const isSelected = props.selectedIds.has(tile.id);
+  const isTarget = d.tile.id === tile.id;
+  const inGroup = d.isGroupDrag && isSelected;
+
+  if (!isTarget && !inGroup) return base;
+
+  let x = tile.x;
+  let y = tile.y;
+  let w = tile.w;
+  let h = tile.h;
+
+  if (d.mode === "move") {
+    x += d.cx;
+    y += d.cy;
+  } else if (isTarget) {
+    w = Math.max(1, tile.w + d.cw);
+    h = Math.max(1, tile.h + d.ch);
+  }
+
   return {
     ...base,
-    left: `${clamp(x, 0, Math.max(0, props.board.width - w)) * cell.value}px`,
-    top: `${clamp(y, 0, Math.max(0, props.board.height - h)) * row.value}px`,
+    left: `${(d.isGroupDrag ? x : clamp(x, 0, Math.max(0, props.board.width - w))) * cell.value}px`,
+    top: `${(d.isGroupDrag ? y : clamp(y, 0, Math.max(0, props.board.height - h))) * row.value}px`,
     width: `${clamp(w, 1, props.board.width) * cell.value}px`,
     height: `${clamp(h, 1, props.board.height) * row.value}px`,
     zIndex: 10,
   };
 }
 
-// every unoccupied grid position renders as a visible empty slot, like the
-// original editor; touch mode skips them entirely - they are edit
-// affordances, and the CSS used to merely hide them
 const emptyCells = computed(() => {
   const w = Number(props.board.width);
   const h = Number(props.board.height);
-  // allocation guard (012 C4): a junk board (import/hand-edit) with huge
-  // or fractional dimensions must not allocate W*H cells; bounds match
-  // the backend's MAX_BOARD_DIM
   if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1) return [];
   if (w > MAX_BOARD_DIM || h > MAX_BOARD_DIM) return [];
   const occupied = new Set();
   for (const t of props.board.buttons) {
-    // per-tile loops are bounded to the grid as well - junk tile w/h
-    // must not blow the set up either
     const tw = Math.max(1, Math.min(Number(t.w) || 1, w));
     const th = Math.max(1, Math.min(Number(t.h) || 1, h));
     for (let dy = 0; dy < th && t.y + dy < h; dy++) {
@@ -116,13 +148,26 @@ const emptyCells = computed(() => {
 
 function startDrag(tile, mode, event) {
   if (props.touch) return;
-  if (event.button !== 0) return; // right/middle click must not drag
+  if (event.button !== 0) return;
   event.preventDefault();
+
+  if (mode === "move") {
+    if (event.ctrlKey || event.shiftKey) {
+      emit("select-tile", { tile, additive: true });
+    } else if (!props.selectedIds.has(tile.id)) {
+      emit("select-tile", { tile, additive: false });
+    }
+  }
+
+  const isGroupDrag =
+    mode === "move" && props.selectedIds.has(tile.id) && props.selectedIds.size > 1;
+
   const startX = event.clientX;
   const startY = event.clientY;
   drag.value = {
     tile,
     mode,
+    isGroupDrag,
     startX,
     startY,
     cellW: cell.value,
@@ -147,16 +192,54 @@ function startDrag(tile, mode, event) {
     const d = drag.value;
     drag.value = null;
     if (!d) return;
+
     if (d.mode === "move") {
-      // clamp to W-w / H-h (012 C4): the top-left cell alone must stay in
-      // bounds even for multi-cell tiles
-      const x = clamp(tile.x + d.cx, 0, Math.max(0, props.board.width - tile.w));
-      const y = clamp(tile.y + d.cy, 0, Math.max(0, props.board.height - tile.h));
-      if (x !== tile.x || y !== tile.y) emit("tile-moved", tile, x, y, tile.w, tile.h);
+      if (d.isGroupDrag) {
+        if (d.cx === 0 && d.cy === 0) {
+          if (!event.ctrlKey && !event.shiftKey) {
+            emit("select-tile", { tile, additive: false });
+          }
+          return;
+        }
+
+        const selectedTiles = props.board.buttons.filter((b) => props.selectedIds.has(b.id));
+        const unselectedTiles = props.board.buttons.filter((b) => !props.selectedIds.has(b.id));
+
+        let invalidReason = "";
+        for (const t of selectedTiles) {
+          const nx = t.x + d.cx;
+          const ny = t.y + d.cy;
+          if (nx < 0 || ny < 0 || nx + t.w > props.board.width || ny + t.h > props.board.height) {
+            invalidReason = "Nie można przesunąć: kafelki wychodziłyby poza siatkę";
+            break;
+          }
+          for (const u of unselectedTiles) {
+            const overlap = !(nx + t.w <= u.x || nx >= u.x + u.w || ny + t.h <= u.y || ny >= u.y + u.h);
+            if (overlap) {
+              invalidReason = "Nie można przesunąć: kafelki nakładałyby się na inne kafelki";
+              break;
+            }
+          }
+          if (invalidReason) break;
+        }
+
+        if (invalidReason) {
+          emit("move-refused", invalidReason);
+          return;
+        }
+
+        const moves = selectedTiles.map((t) => ({
+          tile: t,
+          prevGeom: { x: t.x, y: t.y, w: t.w, h: t.h },
+          nextGeom: { x: t.x + d.cx, y: t.y + d.cy, w: t.w, h: t.h },
+        }));
+        emit("tiles-bulk-moved", moves);
+      } else {
+        const x = clamp(tile.x + d.cx, 0, Math.max(0, props.board.width - tile.w));
+        const y = clamp(tile.y + d.cy, 0, Math.max(0, props.board.height - tile.h));
+        if (x !== tile.x || y !== tile.y) emit("tile-moved", tile, x, y, tile.w, tile.h);
+      }
     } else {
-      // max(1, ...) keeps the floor >= the clamp's min: on a tile dragged
-      // out of a shrunken grid, width - x can go <= 0 and the old clamp
-      // happily persisted w = -1 (DESK-03)
       const w = clamp(tile.w + d.cw, 1, Math.max(1, props.board.width - tile.x));
       const h = clamp(tile.h + d.ch, 1, Math.max(1, props.board.height - tile.y));
       if (w !== tile.w || h !== tile.h) emit("tile-moved", tile, tile.x, tile.y, w, h);
@@ -171,18 +254,12 @@ function onTileTap(tile) {
   if (!props.touch) return;
   if (tile.mode === "slider") return;
   if (tile.mode === "toggle") {
-    // flip to the second state like the tablet client does
     if (activeTiles.has(tile.id)) activeTiles.delete(tile.id);
     else activeTiles.add(tile.id);
   }
   emit("tile-exec", tile);
 }
 
-// Arrow keys move focus to the nearest tile in the pressed direction
-// (keyboard operability, 012 lower-priority); Enter/Space activation lives
-// in TileCell. Candidates are compared by cell-center distance so
-// multi-cell tiles navigate sensibly, and tiles straight ahead win over
-// diagonal ones.
 const ARROW_DIRS = {
   ArrowUp: [0, -1],
   ArrowDown: [0, 1],
@@ -210,7 +287,7 @@ function onGridKeydown(event) {
     if (t.id === null || t.id === current.id) continue;
     const tx = t.x + t.w / 2 - cx;
     const ty = t.y + t.h / 2 - cy;
-    if (dx && tx * dx <= 0) continue; // not in the pressed direction
+    if (dx && tx * dx <= 0) continue;
     if (dy && ty * dy <= 0) continue;
     const along = dx ? Math.abs(tx) : Math.abs(ty);
     const across = dx ? Math.abs(ty) : Math.abs(tx);
@@ -221,29 +298,26 @@ function onGridKeydown(event) {
     }
   }
   if (!best) return;
-  // keep the scroll container still; focus() scrolls the target into view
   event.preventDefault();
   gridEl.value?.querySelector(`[data-tile-id="${best.id}"] .tile`)?.focus();
 }
 
-// right-click (long-press on touch devices) over a tile: touch mode keeps
-// the old "open settings" behavior, edit mode opens the custom menu
 function onTileContext(tile, event) {
   if (props.touch) {
     emit("tile-open", tile);
     return;
   }
+  if (!props.selectedIds.has(tile.id)) {
+    emit("select-tile", { tile, additive: false });
+  }
   emit("ctx-tile", tile, event);
 }
 
-// right-click on an empty cell (edit mode): context menu with "add here"
 function onEmptyContext(pos, event) {
   if (props.touch) return;
   emit("ctx-empty", pos, event);
 }
 
-// right-click on the grid padding / background resolves the cell under
-// the pointer, like onGridClick
 function onGridContext(event) {
   if (props.touch) return;
   if (event.target !== event.currentTarget) return;
@@ -256,16 +330,77 @@ function onGridContext(event) {
   if (!occupied) emit("ctx-empty", { x, y }, event);
 }
 
+function onGridPointerDown(event) {
+  if (props.touch || event.button !== 0) return;
+  if (event.target.closest(".tile")) return;
+
+  const rect = gridEl.value?.getBoundingClientRect();
+  if (!rect) return;
+  const startX = event.clientX - rect.left;
+  const startY = event.clientY - rect.top;
+
+  rubberBand.startX = startX;
+  rubberBand.startY = startY;
+  rubberBand.curX = startX;
+  rubberBand.curY = startY;
+  rubberBand.active = false;
+
+  const onMove = (e) => {
+    const curX = e.clientX - rect.left;
+    const curY = e.clientY - rect.top;
+    rubberBand.curX = curX;
+    rubberBand.curY = curY;
+    if (Math.hypot(curX - rubberBand.startX, curY - rubberBand.startY) > 6) {
+      rubberBand.active = true;
+    }
+  };
+
+  const onUp = (e) => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+
+    if (rubberBand.active) {
+      const minX = Math.min(rubberBand.startX, rubberBand.curX);
+      const maxX = Math.max(rubberBand.startX, rubberBand.curX);
+      const minY = Math.min(rubberBand.startY, rubberBand.curY);
+      const maxY = Math.max(rubberBand.startY, rubberBand.curY);
+
+      const intersecting = [];
+      for (const t of props.board.buttons) {
+        if (t.id === null) continue;
+        const tLeft = t.x * cell.value;
+        const tRight = (t.x + t.w) * cell.value;
+        const tTop = t.y * row.value;
+        const tBottom = (t.y + t.h) * row.value;
+        const hit = !(tRight < minX || tLeft > maxX || tBottom < minY || tTop > maxY);
+        if (hit) intersecting.push(t.id);
+      }
+      emit("select-tiles", {
+        ids: intersecting,
+        additive: e.ctrlKey || e.shiftKey,
+      });
+      rubberBand.active = false;
+    } else {
+      if (!e.ctrlKey && !e.shiftKey) {
+        emit("clear-selection");
+      }
+    }
+  };
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+}
+
 function onGridClick(event) {
   if (props.touch) return;
   if (event.target !== event.currentTarget) return;
-  // empty-cell click opens the add-tile flow at that cell
   const rect = event.currentTarget.getBoundingClientRect();
   const x = clamp(Math.floor((event.clientX - rect.left) / cell.value), 0, props.board.width - 1);
   const y = clamp(Math.floor((event.clientY - rect.top) / row.value), 0, props.board.height - 1);
   const occupied = props.board.buttons.some(
-    (t) =>
-      x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h
+    (t) => x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h
   );
   if (!occupied) emit("tile-add", { x, y });
 }
@@ -278,10 +413,16 @@ function onGridClick(event) {
       class="board-grid"
       :class="{ touch }"
       :style="gridStyle"
+      @pointerdown="onGridPointerDown"
       @click="onGridClick"
       @contextmenu.prevent="onGridContext"
       @keydown="onGridKeydown"
     >
+      <div
+        v-if="rubberBand.active"
+        class="rubber-band"
+        :style="rubberBandStyle"
+      ></div>
       <template v-if="!touch">
         <div
           v-for="c in emptyCells"
@@ -310,8 +451,9 @@ function onGridClick(event) {
         :type-meta="typeMeta"
         :custom-values="customValues"
         :board-names="boardNames"
+        :selected="selectedIds.has(tile.id)"
         :active="activeTiles.has(tile.id)"
-        :dragging="Boolean(drag && drag.tile.id === tile.id)"
+        :dragging="Boolean(drag && (drag.tile.id === tile.id || (drag.isGroupDrag && selectedIds.has(tile.id))))"
         @open="$emit('tile-open', tile)"
         @ctx="onTileContext(tile, $event)"
         @down="startDrag(tile, 'move', $event)"
@@ -336,6 +478,14 @@ function onGridClick(event) {
   display: block;
   margin: auto;
   background-size: cover;
+}
+.rubber-band {
+  position: absolute;
+  border: 1.5px solid var(--accent, #1abc9c);
+  background: rgba(26, 188, 156, 0.16);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 40;
 }
 /* lands on each TileCell root via attr fallthrough */
 .tile-slot { position: absolute; padding: 5px; }

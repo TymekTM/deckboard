@@ -453,3 +453,77 @@ export function boardClearCommand({ boardId, tilesSnapshot }) {
     },
   };
 }
+export function tileBulkEditCommand({ edits }) {
+  // edits: [{ id, prevSnapshot, nextSnapshot }]
+  let currentEdits = edits.map((e) => ({ ...e }));
+
+  return {
+    description: `Edytuj ${edits.length} kafli`,
+    remapTileId(oldId, newId) {
+      for (const e of currentEdits) {
+        if (e.id === oldId) {
+          e.id = newId;
+          e.prevSnapshot.id = newId;
+          e.nextSnapshot.id = newId;
+        }
+      }
+    },
+    async undo(api) {
+      for (const e of currentEdits) {
+        await api.updateButton({ ...e.prevSnapshot, id: e.id });
+      }
+    },
+    async redo(api) {
+      for (const e of currentEdits) {
+        await api.updateButton({ ...e.nextSnapshot, id: e.id });
+      }
+    },
+  };
+}
+
+export function tileBulkCreateCommand({ createdTiles, boardId }) {
+  // createdTiles: [{ id, snapshot }]
+  let currentTiles = createdTiles.map((t) => ({ id: t.id, snapshot: { ...t.snapshot } }));
+  let currentBoardId = boardId;
+
+  return {
+    description: `Utwórz ${createdTiles.length} kafli`,
+    remapTileId(oldId, newId) {
+      for (const t of currentTiles) {
+        if (t.id === oldId) {
+          t.id = newId;
+          t.snapshot.id = newId;
+        }
+      }
+    },
+    remapBoardId(oldId, newId) {
+      if (currentBoardId === oldId) currentBoardId = newId;
+    },
+    async undo(api) {
+      for (const t of currentTiles) {
+        await api.deleteButton(t.id, currentBoardId);
+      }
+    },
+    async redo(api, { remapTileId }) {
+      for (const t of currentTiles) {
+        const newId = await api.createButton(
+          currentBoardId,
+          t.snapshot.type || "key",
+          t.snapshot.mode || "button",
+          t.snapshot.x || 0,
+          t.snapshot.y || 0
+        );
+        if (newId !== t.id) {
+          remapTileId(t.id, newId);
+          t.id = newId;
+          t.snapshot.id = newId;
+        }
+        await api.updateButton({
+          ...t.snapshot,
+          id: t.id,
+          board_id: currentBoardId,
+        });
+      }
+    },
+  };
+}

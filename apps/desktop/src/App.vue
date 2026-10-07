@@ -19,6 +19,10 @@ import {
   boardEditCommand,
   boardDeleteCommand,
   boardClearCommand,
+  tileBulkMoveCommand,
+  tileBulkDeleteCommand,
+  tileBulkCreateCommand,
+  tileBulkEditCommand,
 } from "./editorHistory";
 
 const boards = ref([]);
@@ -45,6 +49,222 @@ async function doUndo() {
     updateHistoryFlags();
   } catch (e) {
     flashError("Cofanie operacji nie powiodło się", e);
+  }
+}
+
+
+const selectedTileIds = ref(new Set());
+const bulkColorModal = ref(null);
+
+watch(currentId, () => {
+  selectedTileIds.value = new Set();
+});
+
+function onSelectTile({ tile, additive }) {
+  const next = new Set(selectedTileIds.value);
+  if (additive) {
+    if (next.has(tile.id)) next.delete(tile.id);
+    else next.add(tile.id);
+  } else {
+    next.clear();
+    next.add(tile.id);
+  }
+  selectedTileIds.value = next;
+}
+
+function onSelectTiles({ ids, additive }) {
+  const next = additive ? new Set(selectedTileIds.value) : new Set();
+  for (const id of ids) next.add(id);
+  selectedTileIds.value = next;
+}
+
+function onClearSelection() {
+  selectedTileIds.value = new Set();
+}
+
+function onMoveRefused(reason) {
+  flashError(reason);
+}
+
+async function onTilesBulkMoved(moves) {
+  try {
+    for (const m of moves) {
+      await api.moveButton(m.tile.id, m.tile.board_id, m.nextGeom.x, m.nextGeom.y, m.nextGeom.w, m.nextGeom.h);
+    }
+    history.push(
+      tileBulkMoveCommand({
+        moves: moves.map((m) => ({
+          id: m.tile.id,
+          boardId: m.tile.board_id,
+          prevGeom: m.prevGeom,
+          nextGeom: m.nextGeom,
+        })),
+      })
+    );
+    updateHistoryFlags();
+    await loadBoards();
+  } catch (e) {
+    flashError("Przesuwanie grupy kafli nie powiodło się", e);
+    await loadBoards();
+  }
+}
+
+async function deleteSelectedTiles() {
+  const ids = Array.from(selectedTileIds.value);
+  if (!ids.length) return;
+  const board = currentBoard.value;
+  if (!board) return;
+  const tilesToDelete = board.buttons.filter((b) => ids.includes(b.id));
+  if (!tilesToDelete.length) return;
+
+  const count = tilesToDelete.length;
+  const ok = await ask(
+    count === 1
+      ? `Usunąć kafel "${tilesToDelete[0].title || tilesToDelete[0].type}"?`
+      : `Usunąć ${count} zaznaczonych kafli?`,
+    {
+      title: "Usuń kafle",
+      kind: "warning",
+    }
+  );
+  if (!ok) return;
+
+  try {
+    for (const t of tilesToDelete) {
+      await api.deleteButton(t.id, t.board_id);
+    }
+    history.push(tileBulkDeleteCommand({ tiles: tilesToDelete }));
+    updateHistoryFlags();
+    selectedTileIds.value = new Set();
+    await loadBoards();
+  } catch (e) {
+    flashError("Usuwanie kafli nie powiodło się", e);
+    await loadBoards();
+  }
+}
+
+function copySelectedTiles() {
+  const board = currentBoard.value;
+  if (!board) return;
+  const ids = Array.from(selectedTileIds.value);
+  const tilesToCopy = board.buttons.filter((b) => ids.includes(b.id));
+  if (!tilesToCopy.length) return;
+  tileClipboard.value = tilesToCopy.map((t) => ({ ...t }));
+}
+
+async function duplicateTiles(tiles) {
+  const board = currentBoard.value;
+  if (!board || !tiles.length) return;
+  const minX = Math.min(...tiles.map((t) => t.x));
+  const minY = Math.min(...tiles.map((t) => t.y));
+  const maxX = Math.max(...tiles.map((t) => t.x + t.w));
+  const maxY = Math.max(...tiles.map((t) => t.y + t.h));
+  const groupW = maxX - minX;
+  const groupH = maxY - minY;
+
+  let offsetX = 1;
+  let offsetY = 1;
+  let canOffset = true;
+  for (const t of tiles) {
+    const tx = t.x + offsetX;
+    const ty = t.y + offsetY;
+    if (tx + t.w > board.width || ty + t.h > board.height) {
+      canOffset = false;
+      break;
+    }
+    for (const other of board.buttons) {
+      const overlap = !(tx + t.w <= other.x || tx >= other.x + other.w || ty + t.h <= other.y || ty >= other.y + other.h);
+      if (overlap) {
+        canOffset = false;
+        break;
+      }
+    }
+    if (!canOffset) break;
+  }
+
+  if (!canOffset) {
+    let found = false;
+    for (let y = 0; y <= board.height - groupH; y++) {
+      for (let x = 0; x <= board.width - groupW; x++) {
+        let collides = false;
+        for (const t of tiles) {
+          const targetX = x + (t.x - minX);
+          const targetY = y + (t.y - minY);
+          for (const other of board.buttons) {
+            const overlap = !(targetX + t.w <= other.x || targetX >= other.x + other.w || targetY + t.h <= other.y || targetY >= other.y + other.h);
+            if (overlap) {
+              collides = true;
+              break;
+            }
+          }
+          if (collides) break;
+        }
+        if (!collides) {
+          offsetX = x - minX;
+          offsetY = y - minY;
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+    }
+  }
+
+  const createdTiles = [];
+  const newSelection = new Set();
+  try {
+    for (const t of tiles) {
+      const tx = clamp(t.x + offsetX, 0, Math.max(0, board.width - t.w));
+      const ty = clamp(t.y + offsetY, 0, Math.max(0, board.height - t.h));
+      const newId = await api.createButton(
+        board.id,
+        t.type || "key",
+        t.mode || "button",
+        tx,
+        ty
+      );
+      const snapshot = {
+        ...t,
+        id: newId,
+        board_id: board.id,
+        x: tx,
+        y: ty,
+      };
+      await api.updateButton(snapshot);
+      createdTiles.push({ id: newId, snapshot });
+      newSelection.add(newId);
+    }
+    history.push(tileBulkCreateCommand({ createdTiles, boardId: board.id }));
+    updateHistoryFlags();
+    selectedTileIds.value = newSelection;
+    await loadBoards();
+  } catch (e) {
+    flashError("Duplikowanie kafli nie powiodło się", e);
+    await loadBoards();
+  }
+}
+
+async function applyBulkColor(color) {
+  const ids = Array.from(selectedTileIds.value);
+  if (!ids.length) return;
+  const board = currentBoard.value;
+  if (!board) return;
+  const tilesToUpdate = board.buttons.filter((b) => ids.includes(b.id));
+  const edits = [];
+  try {
+    for (const t of tilesToUpdate) {
+      const prevSnapshot = { ...t };
+      const nextSnapshot = { ...t, color };
+      await api.updateButton(nextSnapshot);
+      edits.push({ id: t.id, prevSnapshot, nextSnapshot });
+    }
+    history.push(tileBulkEditCommand({ edits }));
+    updateHistoryFlags();
+    bulkColorModal.value = null;
+    await loadBoards();
+  } catch (e) {
+    flashError("Zmiana koloru kafli nie powiodła się", e);
+    await loadBoards();
   }
 }
 
@@ -253,10 +473,26 @@ async function pasteTile(snapshot, pos) {
 }
 
 function tileContextMenu(tile, event) {
+  if (selectedTileIds.value.size > 1 && selectedTileIds.value.has(tile.id)) {
+    const count = selectedTileIds.value.size;
+    openContextMenu(event, [
+      { label: `Kopiuj (${count} kafli)`, icon: "copy", run: copySelectedTiles },
+      { label: `Duplikuj (${count} kafli)`, icon: "clone", run: () => duplicateTiles(currentBoard.value?.buttons.filter(b => selectedTileIds.value.has(b.id)) || []) },
+      { label: "Zmień kolor...", icon: "palette", run: () => (bulkColorModal.value = { color: tile.color || "#ef4836" }) },
+      {
+        label: `Usuń (${count} kafli)`,
+        icon: "trash",
+        danger: true,
+        run: deleteSelectedTiles,
+      },
+    ]);
+    return;
+  }
   openContextMenu(event, [
     { label: "Edit tile", icon: "pen", run: () => (editingTile.value = tile) },
     { label: "Run now", icon: "play", run: () => runTileNow(tile.id) },
     { label: "Copy", icon: "copy", run: () => copyTile(tile) },
+    { label: "Duplikuj", icon: "clone", run: () => duplicateTiles([tile]) },
     {
       label: "Delete",
       icon: "trash",
@@ -904,11 +1140,17 @@ function onKeydown(event) {
             :type-meta="typeMeta"
             :custom-values="customValues"
             :board-names="boardNames"
+            :selected-ids="selectedTileIds"
             @tile-open="editingTile = $event"
             @tile-moved="tileMoved"
             @tile-add="createFlow = { ...$event, boardId: currentId }"
             @ctx-tile="tileContextMenu"
             @ctx-empty="emptyContextMenu"
+            @select-tile="onSelectTile"
+            @select-tiles="onSelectTiles"
+            @clear-selection="onClearSelection"
+            @tiles-bulk-moved="onTilesBulkMoved"
+            @move-refused="onMoveRefused"
           />
           <GridEditor
             v-if="touchBoardId && touchMode"
@@ -1029,6 +1271,29 @@ function onKeydown(event) {
         >
           <i v-if="item.icon" class="fas" :class="'fa-' + item.icon"></i>{{ item.label }}
         </button>
+      </div>
+    </Transition>
+
+    
+    <!-- bulk color modal -->
+    <Transition name="modal">
+      <div v-if="bulkColorModal" class="overlay" @click.self="bulkColorModal = null">
+        <div class="modal mini-modal">
+          <div class="modal-head">Zmień kolor zaznaczonych kafli</div>
+          <div class="modal-body">
+            <label class="field">
+              Wybierz kolor
+              <div class="color-picker-row">
+                <input v-model="bulkColorModal.color" type="color" class="color-picker-input" />
+                <input v-model="bulkColorModal.color" class="hex" placeholder="#rrggbb" />
+              </div>
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button class="btn-text" @click="bulkColorModal = null">Anuluj</button>
+            <button class="btn-text accent" @click="applyBulkColor(bulkColorModal.color)">Zastosuj</button>
+          </div>
+        </div>
       </div>
     </Transition>
 
@@ -1274,6 +1539,9 @@ function onKeydown(event) {
   opacity: 0.3;
   cursor: not-allowed;
 }
+.mini-modal { width: min(340px, 90vw); }
+.color-picker-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.color-picker-input { width: 44px; height: 38px; padding: 2px; border-radius: 4px; border: 1px solid var(--modal-line); cursor: pointer; }
 .kebab-anchor { position: relative; }
 .kebab {
   width: 44px;

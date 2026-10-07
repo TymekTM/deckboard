@@ -25,6 +25,7 @@ const props = defineProps({
   // editor-preview dual-state flip from the parent's session Set
   active: { type: Boolean, default: false },
   dragging: { type: Boolean, default: false },
+  selected: { type: Boolean, default: false },
 });
 const emit = defineEmits(["open", "ctx", "down", "resize", "tap", "slider"]);
 
@@ -502,7 +503,7 @@ function onTileKeydown(event) {
     <div
       v-if="tile.id !== null"
       class="tile"
-      :class="{ dragging }"
+      :class="{ dragging, selected }"
       :style="{
         background: tileBg(tile),
         borderColor: tileBorder(),
@@ -733,7 +734,12 @@ function onTileKeydown(event) {
 </template>
 
 <style scoped>
-.touch .tile { cursor: pointer; }
+.touch .tile.selected {
+  outline: 2px solid var(--accent, #1abc9c);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px rgba(26, 188, 156, 0.35);
+}
+.tile { cursor: pointer; }
 .touch .tile:active { transform: scale(0.96); }
 .tile {
   position: relative;
