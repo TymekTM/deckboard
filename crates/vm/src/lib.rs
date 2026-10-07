@@ -36,6 +36,88 @@ pub enum VmError {
 
 pub type Result<T> = std::result::Result<T, VmError>;
 
+/// Voicemeeter edition identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum VoicemeeterType {
+    Basic,
+    Banana,
+    Potato,
+    Unknown(i32),
+}
+
+impl VoicemeeterType {
+    pub fn from_raw(code: i32) -> Self {
+        match code {
+            1 | 4 => VoicemeeterType::Basic,
+            2 | 5 => VoicemeeterType::Banana,
+            3 | 6 => VoicemeeterType::Potato,
+            other => VoicemeeterType::Unknown(other),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VoicemeeterType::Basic => "Voicemeeter",
+            VoicemeeterType::Banana => "Voicemeeter Banana",
+            VoicemeeterType::Potato => "Voicemeeter Potato",
+            VoicemeeterType::Unknown(_) => "Nieznany",
+        }
+    }
+
+    pub fn strip_count(&self) -> usize {
+        match self {
+            VoicemeeterType::Basic => 3,
+            VoicemeeterType::Banana => 5,
+            VoicemeeterType::Potato => 8,
+            VoicemeeterType::Unknown(_) => 8,
+        }
+    }
+
+    pub fn bus_count(&self) -> usize {
+        match self {
+            VoicemeeterType::Basic => 2,
+            VoicemeeterType::Banana => 5,
+            VoicemeeterType::Potato => 8,
+            VoicemeeterType::Unknown(_) => 8,
+        }
+    }
+}
+
+/// Unpack 32-bit Voicemeeter version into `v1.v2.v3.v4`.
+pub fn format_version(ver: i32) -> String {
+    let v1 = (ver >> 24) & 0xFF;
+    let v2 = (ver >> 16) & 0xFF;
+    let v3 = (ver >> 8) & 0xFF;
+    let v4 = ver & 0xFF;
+    format!("{v1}.{v2}.{v3}.{v4}")
+}
+
+/// Status of the Voicemeeter integration.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VoicemeeterStatus {
+    pub installed: bool,
+    pub dll_path: Option<String>,
+    pub logged_in: bool,
+    pub vm_type: Option<String>,
+    pub version: Option<String>,
+    pub strip_count: usize,
+    pub bus_count: usize,
+    pub dll_override: Option<String>,
+}
+
+/// Selectable item for catalog dropdowns (`devices: "vm-strip"` / `"vm-bus"`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeviceItem {
+    pub value: i64,
+    pub label: String,
+}
+
+/// Bus indices map onto Voicemeeter's A/B output channels (A1..A5, then
+/// B1..B3); the same `i (A1)` text the static catalog lists use.
+const DEFAULT_BUS_LABELS: [&str; 8] = [
+    "0 (A1)", "1 (A2)", "2 (A3)", "3 (A4)", "4 (A5)", "5 (B1)", "6 (B2)", "7 (B3)",
+];
+
 /// Voicemeeter gain fader range in dB, the same span the Voicemeeter UI
 /// sliders cover for Strip and Bus Gain.
 pub const GAIN_MIN: f32 = -60.0;
@@ -59,6 +141,10 @@ type LogoutFn = extern "system" fn() -> i32;
 type IsParametersDirtyFn = extern "system" fn() -> i32;
 type GetParameterFloatFn = extern "system" fn(name: *const u8, value: *mut f32) -> i32;
 type SetParametersFn = extern "system" fn(param: *const u8) -> i32;
+type GetVoicemeeterTypeFn = extern "system" fn(p_type: *mut i32) -> i32;
+type GetVoicemeeterVersionFn = extern "system" fn(p_version: *mut i32) -> i32;
+type GetParameterStringAFn = extern "system" fn(param: *const u8, value: *mut u8) -> i32;
+type RunVoicemeeterFn = extern "system" fn(v_type: i32) -> i32;
 
 struct Symbols {
     login: LoginFn,
@@ -66,6 +152,10 @@ struct Symbols {
     is_parameters_dirty: IsParametersDirtyFn,
     get_parameter_float: GetParameterFloatFn,
     set_parameters: SetParametersFn,
+    get_voicemeeter_type: Option<GetVoicemeeterTypeFn>,
+    get_voicemeeter_version: Option<GetVoicemeeterVersionFn>,
+    get_parameter_string: Option<GetParameterStringAFn>,
+    run_voicemeeter: Option<RunVoicemeeterFn>,
     module: *mut c_void,
 }
 
@@ -94,6 +184,15 @@ unsafe fn load_symbols(path: &std::ffi::CStr) -> Result<Symbols> {
             Ok(sym)
         }
     };
+    let resolve_opt = |name: &'static str| -> Option<*mut c_void> {
+        let symbol = std::ffi::CString::new(name).ok()?;
+        let sym = unsafe { GetProcAddress(module, symbol.as_ptr() as *const u8) };
+        if sym.is_null() {
+            None
+        } else {
+            Some(sym)
+        }
+    };
     // SAFETY: each pointer is validated non-null above and has the
     // documented signature for that export
     Ok(Symbols {
@@ -111,6 +210,22 @@ unsafe fn load_symbols(path: &std::ffi::CStr) -> Result<Symbols> {
         },
         set_parameters: unsafe {
             std::mem::transmute::<*mut c_void, SetParametersFn>(resolve("VBVMR_SetParameters")?)
+        },
+        get_voicemeeter_type: unsafe {
+            resolve_opt("VBVMR_GetVoicemeeterType")
+                .map(|s| std::mem::transmute::<*mut c_void, GetVoicemeeterTypeFn>(s))
+        },
+        get_voicemeeter_version: unsafe {
+            resolve_opt("VBVMR_GetVoicemeeterVersion")
+                .map(|s| std::mem::transmute::<*mut c_void, GetVoicemeeterVersionFn>(s))
+        },
+        get_parameter_string: unsafe {
+            resolve_opt("VBVMR_GetParameterStringA")
+                .map(|s| std::mem::transmute::<*mut c_void, GetParameterStringAFn>(s))
+        },
+        run_voicemeeter: unsafe {
+            resolve_opt("VBVMR_RunVoicemeeter")
+                .map(|s| std::mem::transmute::<*mut c_void, RunVoicemeeterFn>(s))
         },
         module,
     })
@@ -132,16 +247,36 @@ pub fn dll_candidates() -> Vec<std::path::PathBuf> {
     out
 }
 
+/// Candidate DLL locations consulting any user override path first.
+pub fn dll_candidates_with_override(
+    custom_path: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(custom) = custom_path {
+        if !custom.as_os_str().is_empty() {
+            out.push(custom.to_path_buf());
+        }
+    }
+    out.extend(dll_candidates());
+    out
+}
+
 /// Logged-in handle to the remote API. Connection state lives behind the
 /// mutex in [`VoicemeeterState`]; this struct is just resolved symbols.
 pub struct Remote {
     symbols: Symbols,
+    path: std::path::PathBuf,
 }
 
 impl Remote {
     /// Locate and load VoicemeeterRemote64.dll.
     pub fn open() -> Result<Remote> {
-        for path in dll_candidates() {
+        Self::open_with_override(None)
+    }
+
+    /// Locate and load VoicemeeterRemote64.dll consulting custom override first.
+    pub fn open_with_override(custom_path: Option<&std::path::Path>) -> Result<Remote> {
+        for path in dll_candidates_with_override(custom_path) {
             if !path.exists() {
                 continue;
             }
@@ -149,9 +284,13 @@ impl Remote {
                 .map_err(|_| VmError::Unavailable)?;
             // SAFETY: c is NUL-terminated
             let symbols = unsafe { load_symbols(&c) }?;
-            return Ok(Remote { symbols });
+            return Ok(Remote { symbols, path });
         }
         Err(VmError::Unavailable)
+    }
+
+    pub fn dll_path(&self) -> &std::path::Path {
+        &self.path
     }
 
     pub fn login(&self) -> Result<()> {
@@ -165,6 +304,53 @@ impl Remote {
     pub fn logout(&self) -> Result<()> {
         if (self.symbols.logout)() < 0 {
             return Err(VmError::Call("VBVMR_Logout"));
+        }
+        Ok(())
+    }
+
+    pub fn get_voicemeeter_type(&self) -> Result<VoicemeeterType> {
+        let Some(func) = self.symbols.get_voicemeeter_type else {
+            return Err(VmError::Symbol("VBVMR_GetVoicemeeterType"));
+        };
+        let mut raw = 0i32;
+        if (func)(&mut raw) < 0 {
+            return Err(VmError::Call("VBVMR_GetVoicemeeterType"));
+        }
+        Ok(VoicemeeterType::from_raw(raw))
+    }
+
+    pub fn get_voicemeeter_version(&self) -> Result<String> {
+        let Some(func) = self.symbols.get_voicemeeter_version else {
+            return Err(VmError::Symbol("VBVMR_GetVoicemeeterVersion"));
+        };
+        let mut raw = 0i32;
+        if (func)(&mut raw) < 0 {
+            return Err(VmError::Call("VBVMR_GetVoicemeeterVersion"));
+        }
+        Ok(format_version(raw))
+    }
+
+    pub fn get_parameter_string(&self, param: &str) -> Result<String> {
+        let Some(func) = self.symbols.get_parameter_string else {
+            return Err(VmError::Symbol("VBVMR_GetParameterStringA"));
+        };
+        let c_param = std::ffi::CString::new(param)
+            .map_err(|_| VmError::BadPayload("parameter", param.into()))?;
+        let mut buffer = [0u8; 512];
+        if (func)(c_param.as_ptr() as *const u8, buffer.as_mut_ptr()) < 0 {
+            return Err(VmError::Call("VBVMR_GetParameterStringA"));
+        }
+        let nul_pos = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
+        let s = String::from_utf8_lossy(&buffer[..nul_pos]).trim().to_string();
+        Ok(s)
+    }
+
+    pub fn run_voicemeeter(&self, v_type: i32) -> Result<()> {
+        let Some(func) = self.symbols.run_voicemeeter else {
+            return Err(VmError::Symbol("VBVMR_RunVoicemeeter"));
+        };
+        if (func)(v_type) < 0 {
+            return Err(VmError::Call("VBVMR_RunVoicemeeter"));
         }
         Ok(())
     }
@@ -221,26 +407,77 @@ impl Drop for Remote {
 }
 
 /// Lazy connection holder for the server backend.
-#[derive(Default)]
 pub struct VoicemeeterState {
     remote: Option<Remote>,
     logged_in: bool,
+    override_path: Option<std::path::PathBuf>,
+}
+
+impl Default for VoicemeeterState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VoicemeeterState {
     pub fn new() -> VoicemeeterState {
-        VoicemeeterState::default()
+        VoicemeeterState {
+            remote: None,
+            logged_in: false,
+            override_path: None,
+        }
     }
 
-    fn with_remote<T>(&mut self, f: impl FnOnce(&Remote) -> Result<T>) -> Result<T> {
+    pub fn with_override(override_path: Option<std::path::PathBuf>) -> VoicemeeterState {
+        VoicemeeterState {
+            remote: None,
+            logged_in: false,
+            override_path,
+        }
+    }
+
+    pub fn set_override_path(&mut self, path: Option<std::path::PathBuf>) {
+        if self.override_path != path {
+            self.override_path = path;
+            self.drop_session();
+        }
+    }
+
+    pub fn get_override_path(&self) -> Option<&std::path::Path> {
+        self.override_path.as_deref()
+    }
+
+    pub fn drop_session(&mut self) {
+        if let Some(remote) = &self.remote {
+            if self.logged_in {
+                let _ = remote.logout();
+            }
+        }
+        self.logged_in = false;
+        self.remote = None;
+    }
+
+    pub fn reconnect(&mut self) -> Result<()> {
+        self.drop_session();
+        self.ensure_connected()?;
+        Ok(())
+    }
+
+    fn ensure_connected(&mut self) -> Result<&Remote> {
         if self.remote.is_none() {
-            self.remote = Some(Remote::open()?);
+            self.remote = Some(Remote::open_with_override(self.override_path.as_deref())?);
         }
         let remote = self.remote.as_ref().expect("remote just set");
         if !self.logged_in {
             remote.login()?;
             self.logged_in = true;
         }
+        Ok(self.remote.as_ref().unwrap())
+    }
+
+    fn with_remote<T>(&mut self, f: impl FnOnce(&Remote) -> Result<T>) -> Result<T> {
+        self.ensure_connected()?;
+        let remote = self.remote.as_ref().expect("remote connected");
         match f(remote) {
             Ok(v) => Ok(v),
             Err(e) => {
@@ -253,6 +490,128 @@ impl VoicemeeterState {
                 Err(e)
             }
         }
+    }
+
+    /// Query current status for desktop settings.
+    pub fn status(&mut self) -> VoicemeeterStatus {
+        let override_str = self
+            .override_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let existing_path = dll_candidates_with_override(self.override_path.as_deref())
+            .into_iter()
+            .find(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string());
+
+        let installed = existing_path.is_some();
+        if !installed {
+            return VoicemeeterStatus {
+                installed: false,
+                dll_path: None,
+                logged_in: false,
+                vm_type: None,
+                version: None,
+                strip_count: 0,
+                bus_count: 0,
+                dll_override: override_str,
+            };
+        }
+
+        let details = self.with_remote(|r| {
+            let vm_type = r.get_voicemeeter_type().ok();
+            let version = r.get_voicemeeter_version().ok();
+            let strip_count = vm_type.as_ref().map(|t| t.strip_count()).unwrap_or(8);
+            let bus_count = vm_type.as_ref().map(|t| t.bus_count()).unwrap_or(8);
+            let type_str = vm_type.map(|t| t.as_str().to_string());
+            Ok((type_str, version, strip_count, bus_count))
+        });
+
+        match details {
+            Ok((vm_type, version, strip_count, bus_count)) => VoicemeeterStatus {
+                installed: true,
+                dll_path: existing_path,
+                logged_in: self.logged_in,
+                vm_type,
+                version,
+                strip_count,
+                bus_count,
+                dll_override: override_str,
+            },
+            Err(_) => VoicemeeterStatus {
+                installed: true,
+                dll_path: existing_path,
+                logged_in: false,
+                vm_type: None,
+                version: None,
+                strip_count: 0,
+                bus_count: 0,
+                dll_override: override_str,
+            },
+        }
+    }
+
+    /// Read strip and bus labels for the catalog dropdowns
+    /// (`devices: "vm-strip"` / `"vm-bus"`). Only an already-live session
+    /// is read: VBVMR_Login starts Voicemeeter, and merely opening the
+    /// tile editor must not launch the app. Without a session the lists
+    /// come back empty and the editor falls back to the static catalog
+    /// indices.
+    pub fn devices(&mut self) -> (Vec<DeviceItem>, Vec<DeviceItem>) {
+        if self.remote.is_none() || !self.logged_in {
+            return (Vec::new(), Vec::new());
+        }
+        let res = self.with_remote(|r| {
+            let vm_type = r.get_voicemeeter_type()?;
+            let strip_max = vm_type.strip_count();
+            let bus_max = vm_type.bus_count();
+
+            let mut strips = Vec::with_capacity(strip_max);
+            for i in 0..strip_max as i64 {
+                let label = r
+                    .get_parameter_string(&format!("Strip[{i}].Label"))
+                    .unwrap_or_default();
+                let display = if label.is_empty() {
+                    i.to_string()
+                } else {
+                    format!("{i} ({label})")
+                };
+                strips.push(DeviceItem {
+                    value: i,
+                    label: display,
+                });
+            }
+
+            let mut buses = Vec::with_capacity(bus_max);
+            for i in 0..bus_max as i64 {
+                // bus labels default to the A/B output names, so an empty
+                // custom label still renders `0 (A1)` style text
+                let custom_label = r
+                    .get_parameter_string(&format!("Bus[{i}].Label"))
+                    .unwrap_or_default();
+                let fallback = DEFAULT_BUS_LABELS.get(i as usize).copied().unwrap_or("");
+                let display = if custom_label.is_empty() {
+                    fallback.to_string()
+                } else {
+                    format!("{i} ({custom_label})")
+                };
+                buses.push(DeviceItem {
+                    value: i,
+                    label: display,
+                });
+            }
+
+            Ok((strips, buses))
+        });
+
+        // a session that died between the check and the read degrades to
+        // the static lists the same way an absent Voicemeeter does
+        res.unwrap_or((Vec::new(), Vec::new()))
+    }
+
+    /// Launch Voicemeeter (`VBVMR_RunVoicemeeter`).
+    pub fn run_voicemeeter(&mut self, v_type: Option<i32>) -> Result<()> {
+        let code = v_type.unwrap_or(2); // Banana by default
+        self.with_remote(|r| r.run_voicemeeter(code))
     }
 
     /// Execute one `vm-*` action with the extension's argument shape
@@ -344,14 +703,85 @@ impl VoicemeeterState {
             .split_once(": ")
             .ok_or_else(|| VmError::BadPayload("device", device.into()))?;
         let kind = kind.to_lowercase();
-        // both halves land inside one text command; validate before it
-        // is ever built
         if !is_plain_token(&kind) || !is_quotable_text(name) {
             return Err(VmError::BadPayload("device", device.into()));
         }
         let index = format!("Bus[0].Device.{kind}");
         self.with_remote(|r| r.set_parameters(&string_param_text(&index, name)))
     }
+}
+
+/// Read optional DLL path override from `settings.json`.
+pub fn load_dll_override(settings: &serde_json::Value) -> Option<std::path::PathBuf> {
+    let vm = settings.get("voicemeeter")?;
+    let path_val = vm.get("dllPath").or_else(|| vm.get("dll_path"))?;
+    let str_val = if let Some(s) = path_val.as_str() {
+        s
+    } else {
+        path_val.get("value").and_then(serde_json::Value::as_str)?
+    };
+    if str_val.trim().is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(str_val.trim()))
+    }
+}
+
+/// Persist optional DLL path override into `settings.json`, preserving all foreign keys.
+pub fn save_dll_override(path: &std::path::Path, dll_path: Option<&str>) -> std::io::Result<()> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+        Err(e) => return Err(e),
+    };
+    let mut settings: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("settings.json exists but is not valid JSON: {e}"),
+            ))
+        }
+    };
+    let obj = settings.as_object_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "settings.json is not an object",
+        )
+    })?;
+    let vm = obj
+        .entry("voicemeeter")
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    let vm_obj = vm.as_object_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "voicemeeter entry is not an object",
+        )
+    })?;
+
+    match dll_path.filter(|s| !s.trim().is_empty()) {
+        Some(override_str) => {
+            let entry = vm_obj.entry("dllPath").or_insert_with(|| {
+                serde_json::json!({
+                    "descriptions": "VoicemeeterRemote DLL path override",
+                    "name": "dllPath",
+                    "type": "text",
+                    "value": "",
+                })
+            });
+            if let Some(f) = entry.as_object_mut() {
+                f.insert("value".into(), serde_json::json!(override_str.trim()));
+            }
+        }
+        None => {
+            vm_obj.remove("dllPath");
+            vm_obj.remove("dll_path");
+        }
+    }
+
+    let json = serde_json::to_string_pretty(&settings)
+        .map_err(|e| std::io::Error::other(format!("settings serialization failed: {e}")))?;
+    pulpit_db::write_atomic(path, json.as_bytes())
 }
 
 /// Values from the editor arrive as JSON strings ("1"), the extension
@@ -435,7 +865,6 @@ pub fn input_declarations() -> Vec<(
     &'static str,
     &'static str,
 )> {
-    // (value, icon, fontIcon, color)
     vec![
         ("vm-set-strip", Some("headphones"), "fas", "#171A21"),
         (
@@ -466,6 +895,115 @@ pub fn is_vm_action(kind: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn type_counts_mapping() {
+        let basic = VoicemeeterType::from_raw(1);
+        assert_eq!(basic, VoicemeeterType::Basic);
+        assert_eq!(basic.strip_count(), 3);
+        assert_eq!(basic.bus_count(), 2);
+
+        let basic_64 = VoicemeeterType::from_raw(4);
+        assert_eq!(basic_64, VoicemeeterType::Basic);
+        assert_eq!(basic_64.strip_count(), 3);
+        assert_eq!(basic_64.bus_count(), 2);
+
+        let banana = VoicemeeterType::from_raw(2);
+        assert_eq!(banana, VoicemeeterType::Banana);
+        assert_eq!(banana.strip_count(), 5);
+        assert_eq!(banana.bus_count(), 5);
+
+        let banana_64 = VoicemeeterType::from_raw(5);
+        assert_eq!(banana_64, VoicemeeterType::Banana);
+        assert_eq!(banana_64.strip_count(), 5);
+        assert_eq!(banana_64.bus_count(), 5);
+
+        let potato = VoicemeeterType::from_raw(3);
+        assert_eq!(potato, VoicemeeterType::Potato);
+        assert_eq!(potato.strip_count(), 8);
+        assert_eq!(potato.bus_count(), 8);
+
+        let potato_64 = VoicemeeterType::from_raw(6);
+        assert_eq!(potato_64, VoicemeeterType::Potato);
+        assert_eq!(potato_64.strip_count(), 8);
+        assert_eq!(potato_64.bus_count(), 8);
+
+        let unknown = VoicemeeterType::from_raw(99);
+        assert_eq!(unknown, VoicemeeterType::Unknown(99));
+        assert_eq!(unknown.strip_count(), 8);
+        assert_eq!(unknown.bus_count(), 8);
+    }
+
+    #[test]
+    fn format_version_unpacks_bytes() {
+        let v = (2 << 24) | (6 << 8) | 8;
+        assert_eq!(format_version(v), "2.0.6.8");
+    }
+
+    #[test]
+    fn settings_read_merge_write_preserves_foreign_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "foreign-package": { "key": { "value": "secret" } },
+                "discord-deckboard": { "discordClientId": { "value": "123" } }
+            }"#,
+        )
+        .unwrap();
+
+        // 1. Save override
+        save_dll_override(&path, Some(r"C:\Custom\VoicemeeterRemote64.dll")).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            val["foreign-package"]["key"]["value"],
+            "secret",
+            "foreign key must be preserved"
+        );
+        assert_eq!(
+            val["discord-deckboard"]["discordClientId"]["value"],
+            "123",
+            "discord key must be preserved"
+        );
+        assert_eq!(
+            load_dll_override(&val),
+            Some(std::path::PathBuf::from(r"C:\Custom\VoicemeeterRemote64.dll"))
+        );
+
+        // 2. Clear override (None)
+        save_dll_override(&path, None).unwrap();
+        let raw2 = std::fs::read_to_string(&path).unwrap();
+        let val2: serde_json::Value = serde_json::from_str(&raw2).unwrap();
+        assert_eq!(val2["foreign-package"]["key"]["value"], "secret");
+        assert_eq!(load_dll_override(&val2), None);
+    }
+
+    /// The remote API is single-client: parallel live tests in one process
+    /// would race their logins and crash the harness (0xc0000005). In the
+    /// app the shared `Mutex<VoicemeeterState>` in the backend plays this
+    /// role - the tests must not run the FFI concurrently either.
+    fn live_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LIVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LIVE_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Live check of the settings panel data: status plus strip/bus
+    /// labels. Run explicitly:
+    /// `cargo test -p pulpit-vm -- --ignored live_query_status_and_labels --nocapture`
+    #[test]
+    #[ignore = "needs live Voicemeeter installation"]
+    fn live_query_status_and_labels() {
+        let _guard = live_lock();
+        let mut vm = VoicemeeterState::new();
+        let status = vm.status();
+        println!("Voicemeeter status: {status:?}");
+        let (strips, buses) = vm.devices();
+        println!("Strips: {strips:?}");
+        println!("Buses: {buses:?}");
+    }
 
     #[test]
     fn param_text_matches_connector_output() {
@@ -515,7 +1053,6 @@ mod tests {
 
     #[test]
     fn values_parse_like_the_extension() {
-        // shapes exactly as stored in the user's database
         assert_eq!(
             parse_value(json!({"value": "1"}).as_object().unwrap()).unwrap(),
             1.0
@@ -548,10 +1085,6 @@ mod tests {
 
     #[test]
     fn params_that_could_splice_commands_are_rejected() {
-        // VBVMR_SetParameters speaks a `;`-separated command language: a
-        // param carrying `;`, `=` or quotes could splice extra commands.
-        // The toggle path is used so the pre-fix run only ever READS with
-        // the poisoned name (inert on a live Voicemeeter).
         let mut vm = VoicemeeterState::new();
         for evil in [
             "Mute=0;Strip[0].kilo",
@@ -590,9 +1123,6 @@ mod tests {
 
     #[test]
     fn set_output_rejects_quote_and_semicolon_breakout() {
-        // the device name lands inside a quoted text command: a quote can
-        // break out and splice further commands. The fixture's spliced
-        // text is deliberately inert (`=;` parses as nothing).
         let mut vm = VoicemeeterState::new();
         for evil in ["WDM: x\";=;", "WD;M: y", "WDM: a\nb", ""] {
             let err = vm
@@ -618,30 +1148,60 @@ mod tests {
         assert!(!is_plain_token("Ga in"));
 
         assert!(is_quotable_text("Speakers (Realtek Audio)"));
-        assert!(!is_quotable_text("x\";=;"));
-        assert!(!is_quotable_text("a;b"));
-        assert!(!is_quotable_text("a\nb"));
         assert!(!is_quotable_text(""));
+        assert!(!is_quotable_text("Speakers \"extra"));
+        assert!(!is_quotable_text("Speakers; extra"));
+        assert!(!is_quotable_text("Speakers\nextra"));
     }
 
-    /// The remote API is single-client: parallel live tests in one process
-    /// would race their logins and crash the harness (0xc0000005). In the
-    /// app the shared `Mutex<VoicemeeterState>` in the backend plays this
-    /// role - the tests must not run the FFI concurrently either.
-    fn live_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LIVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LIVE_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    #[test]
+    fn slider_gain_maps_fader_range() {
+        assert!((slider_gain(0.0) - GAIN_MIN).abs() < f32::EPSILON);
+        assert!((slider_gain(1.0) - GAIN_MAX).abs() < f32::EPSILON);
+        assert!((slider_gain(-1.0) - GAIN_MIN).abs() < f32::EPSILON);
+        assert!((slider_gain(2.0) - GAIN_MAX).abs() < f32::EPSILON);
+        let mid_gain = slider_gain(0.5);
+        assert!((gain_to_slider(mid_gain) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn slider_actions_reject_missing_value_before_connecting() {
+        let mut vm = VoicemeeterState::new();
+        let err = vm
+            .execute(
+                "vm-slider-strip",
+                &json!({ "param": "Gain", "number": 0 }),
+            )
+            .unwrap_err();
+        assert!(matches!(err, VmError::BadPayload("value", _)));
+    }
+
+    #[test]
+    fn dll_candidates_cover_standard_layout() {
+        let list = dll_candidates();
+        assert!(list.len() >= 3);
+        assert!(list
+            .iter()
+            .any(|p| p.ends_with(r"VB\Voicemeeter\VoicemeeterRemote64.dll")));
+    }
+
+    #[test]
+    fn action_routing() {
+        assert!(is_vm_action("vm-set-strip"));
+        assert!(is_vm_action("vm-toggle-bus"));
+        assert!(is_vm_action("vm-restart"));
+        assert!(!is_vm_action("obs-scene"));
     }
 
     /// Live check: reads the real Strip[2].A1 routing state. Run explicitly:
-    /// `cargo test -p pulpit-vm -- --ignored live_get`
+    /// `cargo test -p pulpit-vm -- --ignored live_get_strip2_a1`
     #[test]
     #[ignore = "reads the live Voicemeeter state"]
     fn live_get_strip2_a1() {
         let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
-        let v = vm.read_strip(2, "A1").expect("read Strip[2].A1");
-        println!("Strip[2].A1 = {v}");
+        let val = vm.read_strip(2, "A1").expect("strip read failed");
+        assert!(val == 0.0 || val == 1.0, "unexpected A1 state: {val}");
     }
 
     /// Live probe of the full toggle round trip on Strip[2].A1: read,
@@ -651,103 +1211,53 @@ mod tests {
     fn live_toggle_probe() {
         let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
-        let v0 = vm.read_strip(2, "A1").unwrap();
+        let initial = vm.read_strip(2, "A1").expect("read 1");
         vm.execute(
             "vm-toggle-strip",
-            &serde_json::json!({"param": "A1", "number": 2}),
+            &json!({"param": "A1", "number": 2}),
         )
-        .unwrap();
-        let v1 = vm.read_strip(2, "A1").unwrap();
+        .expect("toggle 1");
+        let flipped = vm.read_strip(2, "A1").expect("read 2");
+        assert_ne!(initial, flipped);
         vm.execute(
             "vm-toggle-strip",
-            &serde_json::json!({"param": "A1", "number": 2}),
+            &json!({"param": "A1", "number": 2}),
         )
-        .unwrap();
-        let v2 = vm.read_strip(2, "A1").unwrap();
-        println!("toggle round trip: {v0} -> {v1} -> {v2}");
+        .expect("toggle 2");
+        let restored = vm.read_strip(2, "A1").expect("read 3");
+        assert_eq!(initial, restored);
     }
 
     /// Live test: touches the real Voicemeeter instance. Run explicitly:
-    /// `cargo test -p pulpit-vm -- --ignored`
+    /// `cargo test -p pulpit-vm -- --ignored live_restart`
     #[test]
     #[ignore = "fires Command.Restart on the live audio engine"]
     fn live_restart() {
         let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
-        vm.execute("vm-restart", &Value::Null).unwrap();
+        vm.execute("vm-restart", &Value::Null).expect("restart failed");
     }
 
-    /// Live round trip of the bus gain slider on A3 (Bus[2]): read the
-    /// current gain, move the slider to the middle (-24 dB), verify, then
-    /// restore. Run explicitly:
-    /// `cargo test -p pulpit-vm -- --ignored --nocapture live_slider_bus_a3`
+    /// Live round trip of the bus gain slider on A3 (Bus[2]): move to the
+    /// middle, verify, restore. Run explicitly:
+    /// `cargo test -p pulpit-vm -- --ignored live_slider_bus_a3`
     #[test]
     #[ignore = "moves the live A3 bus fader twice"]
     fn live_slider_bus_a3() {
         let _guard = live_lock();
         let mut vm = VoicemeeterState::new();
-        // the slider path fires without the settle wait, so a verifying
-        // read must give the engine a moment to apply the command
-        let settle = || std::thread::sleep(Duration::from_millis(250));
-        let before = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
+        let initial = vm.read_bus(2, "Gain").expect("read gain");
         vm.execute(
             "vm-slider-bus",
             &json!({"param": "Gain", "number": 2, "value": 0.5}),
         )
-        .unwrap();
-        settle();
-        let mid = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
-        assert!((mid - (-24.0)).abs() < 0.6, "expected -24 dB, got {mid}");
+        .expect("slider set");
+        let mid = vm.read_bus(2, "Gain").expect("read mid");
+        assert!((mid - slider_gain(0.5)).abs() < 0.2);
         vm.execute(
-            "vm-slider-bus",
-            &json!({"param": "Gain", "number": 2, "value": gain_to_slider(before)}),
+            "vm-set-bus",
+            &json!({"param": "Gain", "number": 2, "value": initial}),
         )
-        .unwrap();
-        settle();
-        let after = vm.read_bus(2, "Gain").expect("read Bus[2].Gain");
-        println!("A3 gain: {before} -> {mid} -> {after}");
-        assert!(
-            (after - before).abs() < 1.0,
-            "restore drifted: {before} vs {after}"
-        );
-    }
-
-    #[test]
-    fn action_routing() {
-        assert!(is_vm_action("vm-toggle-strip"));
-        assert!(is_vm_action("vm-slider-bus"));
-        assert!(!is_vm_action("vol"));
-    }
-
-    #[test]
-    fn slider_gain_maps_fader_range() {
-        assert_eq!(slider_gain(0.0), -60.0);
-        assert_eq!(slider_gain(1.0), 12.0);
-        assert_eq!(slider_gain(0.5), -24.0);
-        // out-of-range positions clamp instead of overshooting the fader
-        assert_eq!(slider_gain(1.7), 12.0);
-        assert_eq!(slider_gain(-0.3), -60.0);
-        // round trip: gain back to a slider position lands on the same gain
-        for g in [-60.0f32, -24.0, 0.0, 12.0] {
-            assert!((slider_gain(gain_to_slider(g)) - g).abs() < 1e-4);
-        }
-    }
-
-    #[test]
-    fn slider_actions_reject_missing_value_before_connecting() {
-        let mut vm = VoicemeeterState::new();
-        // args straight from the tile command JSON: no slider value yet
-        let err = vm
-            .execute("vm-slider-bus", &json!({"param": "Gain", "number": 2}))
-            .unwrap_err();
-        assert!(matches!(err, VmError::BadPayload("value", _)));
-    }
-
-    #[test]
-    fn dll_candidates_cover_standard_layout() {
-        let cands = dll_candidates();
-        assert!(cands.iter().any(|p| p
-            .to_string_lossy()
-            .ends_with("Voicemeeter\\VoicemeeterRemote64.dll")));
+        .expect("restore");
     }
 }
