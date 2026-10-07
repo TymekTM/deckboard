@@ -47,6 +47,12 @@ extensions load in a native runtime.
   volume and seek sliders, and a now-playing tile with cover art and a
   live progress bar. Talks to the Web API directly; setup and login live
   in the desktop app (see [Spotify](#spotify)).
+- **Multimedia (system)**: a global "now playing" source over Windows
+  Global System Media Transport Controls - cover art, title/artist, a live
+  progress bar and play/pause, next/previous/stop transport tiles for ANY
+  player the system reports (browser YouTube, Tidal, VLC, foobar2000),
+  not only Spotify. Tiles can target a specific app by name; the original
+  virtual-media-key "Multimedia" kind is unchanged.
 
 **Pairing and clients**
 
