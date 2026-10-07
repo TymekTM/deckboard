@@ -2217,10 +2217,35 @@ async fn move_button(
     h: i64,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    tauri::async_runtime::spawn_blocking(move || backend.move_button(id, x, y, w, h))
+    let prev_board_id = {
+        let backend = backend.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            backend.get_button(id).map(|b| b.board_id)
+        })
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    };
+
+    let moved_backend = backend.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        moved_backend.move_button_to_board(id, board_id, x, y, w, h)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    if let Some(prev) = prev_board_id {
+        if prev != board_id {
+            if let Ok(broadcaster) = state.broadcaster() {
+                broadcaster.refresh_board(prev).await;
+            }
+            state.publish_v2(vec![pulpit_proto::BoardOp::TileRemove {
+                board: prev,
+                tile: id,
+            }]);
+        }
+    }
+
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_tile_set(board_id, id);
     Ok(())

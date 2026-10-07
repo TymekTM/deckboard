@@ -199,9 +199,10 @@ export function tileDeleteCommand({ tileSnapshot }) {
   };
 }
 
-export function tileMoveCommand({ id, boardId, prevGeom, nextGeom }) {
+export function tileMoveCommand({ id, boardId, prevBoardId, nextBoardId, prevGeom, nextGeom }) {
   let currentId = id;
-  let currentBoardId = boardId;
+  let fromBoardId = prevBoardId || boardId;
+  let toBoardId = nextBoardId || boardId;
 
   return {
     description: "Przesuń / zmień rozmiar kafla",
@@ -209,12 +210,13 @@ export function tileMoveCommand({ id, boardId, prevGeom, nextGeom }) {
       if (currentId === oldId) currentId = newId;
     },
     remapBoardId(oldId, newId) {
-      if (currentBoardId === oldId) currentBoardId = newId;
+      if (fromBoardId === oldId) fromBoardId = newId;
+      if (toBoardId === oldId) toBoardId = newId;
     },
     async undo(api) {
       await api.moveButton(
         currentId,
-        currentBoardId,
+        fromBoardId,
         prevGeom.x,
         prevGeom.y,
         prevGeom.w,
@@ -224,7 +226,7 @@ export function tileMoveCommand({ id, boardId, prevGeom, nextGeom }) {
     async redo(api) {
       await api.moveButton(
         currentId,
-        currentBoardId,
+        toBoardId,
         nextGeom.x,
         nextGeom.y,
         nextGeom.w,
@@ -235,8 +237,12 @@ export function tileMoveCommand({ id, boardId, prevGeom, nextGeom }) {
 }
 
 export function tileBulkMoveCommand({ moves }) {
-  // moves: [{ id, boardId, prevGeom: {x,y,w,h}, nextGeom: {x,y,w,h} }]
-  let currentMoves = moves.map((m) => ({ ...m }));
+  // moves: [{ id, boardId, prevBoardId, nextBoardId, prevGeom: {x,y,w,h}, nextGeom: {x,y,w,h} }]
+  let currentMoves = moves.map((m) => ({
+    ...m,
+    fromBoardId: m.prevBoardId || m.boardId,
+    toBoardId: m.nextBoardId || m.boardId,
+  }));
 
   return {
     description: "Przesuń wiele kafli",
@@ -247,14 +253,15 @@ export function tileBulkMoveCommand({ moves }) {
     },
     remapBoardId(oldId, newId) {
       for (const m of currentMoves) {
-        if (m.boardId === oldId) m.boardId = newId;
+        if (m.fromBoardId === oldId) m.fromBoardId = newId;
+        if (m.toBoardId === oldId) m.toBoardId = newId;
       }
     },
     async undo(api) {
       for (const m of currentMoves) {
         await api.moveButton(
           m.id,
-          m.boardId,
+          m.fromBoardId,
           m.prevGeom.x,
           m.prevGeom.y,
           m.prevGeom.w,
@@ -266,7 +273,7 @@ export function tileBulkMoveCommand({ moves }) {
       for (const m of currentMoves) {
         await api.moveButton(
           m.id,
-          m.boardId,
+          m.toBoardId,
           m.nextGeom.x,
           m.nextGeom.y,
           m.nextGeom.w,

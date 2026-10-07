@@ -56,6 +56,116 @@ async function doUndo() {
 const selectedTileIds = ref(new Set());
 const bulkColorModal = ref(null);
 
+const targetBoardModal = ref(null); // { mode: 'move'|'copy', tiles: [...], targetBoardId: number }
+
+function openTargetBoardModal(mode, tiles) {
+  const otherBoards = boards.value.filter((b) => b.id !== currentId.value);
+  if (!otherBoards.length) {
+    flashError("Brak innych tablic do wyboru");
+    return;
+  }
+  targetBoardModal.value = {
+    mode,
+    tiles: tiles.map((t) => ({ ...t })),
+    targetBoardId: otherBoards[0].id,
+  };
+}
+
+async function executeTransferToBoard() {
+  if (!targetBoardModal.value) return;
+  const targetBoard = boards.value.find((b) => b.id === targetBoardModal.value.targetBoardId);
+  if (!targetBoard) return;
+  const tiles = targetBoardModal.value.tiles;
+  const mode = targetBoardModal.value.mode;
+
+  const minX = Math.min(...tiles.map((t) => t.x));
+  const minY = Math.min(...tiles.map((t) => t.y));
+  const maxX = Math.max(...tiles.map((t) => t.x + t.w));
+  const maxY = Math.max(...tiles.map((t) => t.y + t.h));
+  const groupW = maxX - minX;
+  const groupH = maxY - minY;
+
+  let offsetX = 0;
+  let offsetY = 0;
+  let found = false;
+  for (let y = 0; y <= Math.max(0, targetBoard.height - groupH); y++) {
+    for (let x = 0; x <= Math.max(0, targetBoard.width - groupW); x++) {
+      let collides = false;
+      for (const t of tiles) {
+        const targetX = x + (t.x - minX);
+        const targetY = y + (t.y - minY);
+        for (const other of targetBoard.buttons) {
+          const overlap = !(targetX + t.w <= other.x || targetX >= other.x + other.w || targetY + t.h <= other.y || targetY >= other.y + other.h);
+          if (overlap) {
+            collides = true;
+            break;
+          }
+        }
+        if (collides) break;
+      }
+      if (!collides) {
+        offsetX = x - minX;
+        offsetY = y - minY;
+        found = true;
+        break;
+      }
+    }
+    if (found) break;
+  }
+
+  try {
+    if (mode === "move") {
+      const moves = [];
+      for (const t of tiles) {
+        const tx = clamp(t.x + offsetX, 0, Math.max(0, targetBoard.width - t.w));
+        const ty = clamp(t.y + offsetY, 0, Math.max(0, targetBoard.height - t.h));
+        await api.moveButton(t.id, targetBoard.id, tx, ty, t.w, t.h);
+        moves.push({
+          id: t.id,
+          boardId: t.board_id,
+          prevBoardId: t.board_id,
+          nextBoardId: targetBoard.id,
+          prevGeom: { x: t.x, y: t.y, w: t.w, h: t.h },
+          nextGeom: { x: tx, y: ty, w: t.w, h: t.h },
+        });
+      }
+      history.push(tileBulkMoveCommand({ moves }));
+      updateHistoryFlags();
+      selectedTileIds.value = new Set();
+    } else {
+      const createdTiles = [];
+      for (const t of tiles) {
+        const tx = clamp(t.x + offsetX, 0, Math.max(0, targetBoard.width - t.w));
+        const ty = clamp(t.y + offsetY, 0, Math.max(0, targetBoard.height - t.h));
+        const newId = await api.createButton(
+          targetBoard.id,
+          t.type || "key",
+          t.mode || "button",
+          tx,
+          ty
+        );
+        const snapshot = {
+          ...t,
+          id: newId,
+          board_id: targetBoard.id,
+          x: tx,
+          y: ty,
+        };
+        await api.updateButton(snapshot);
+        createdTiles.push({ id: newId, snapshot });
+      }
+      history.push(tileBulkCreateCommand({ createdTiles, boardId: targetBoard.id }));
+      updateHistoryFlags();
+    }
+    targetBoardModal.value = null;
+    await loadBoards();
+  } catch (e) {
+    flashError(mode === "move" ? "Przenoszenie kafli nie powiodło się" : "Kopiowanie kafli nie powiodło się", e);
+    await loadBoards();
+  }
+}
+
+
 watch(currentId, () => {
   selectedTileIds.value = new Set();
 });
@@ -592,9 +702,12 @@ async function pasteTile(snapshot, pos) {
 function tileContextMenu(tile, event) {
   if (selectedTileIds.value.size > 1 && selectedTileIds.value.has(tile.id)) {
     const count = selectedTileIds.value.size;
+    const selectedTiles = currentBoard.value?.buttons.filter(b => selectedTileIds.value.has(b.id)) || [];
     openContextMenu(event, [
       { label: `Kopiuj (${count} kafli)`, icon: "copy", run: copySelectedTiles },
-      { label: `Duplikuj (${count} kafli)`, icon: "clone", run: () => duplicateTiles(currentBoard.value?.buttons.filter(b => selectedTileIds.value.has(b.id)) || []) },
+      { label: `Duplikuj (${count} kafli)`, icon: "clone", run: () => duplicateTiles(selectedTiles) },
+      { label: "Przenieś do tablicy...", icon: "arrows-alt", run: () => openTargetBoardModal("move", selectedTiles) },
+      { label: "Kopiuj do tablicy...", icon: "copy", run: () => openTargetBoardModal("copy", selectedTiles) },
       { label: "Zmień kolor...", icon: "palette", run: () => (bulkColorModal.value = { color: tile.color || "#ef4836" }) },
       {
         label: `Usuń (${count} kafli)`,
@@ -610,6 +723,8 @@ function tileContextMenu(tile, event) {
     { label: "Run now", icon: "play", run: () => runTileNow(tile.id) },
     { label: "Copy", icon: "copy", run: () => copyTile(tile) },
     { label: "Duplikuj", icon: "clone", run: () => duplicateTiles([tile]) },
+    { label: "Przenieś do tablicy...", icon: "arrows-alt", run: () => openTargetBoardModal("move", [tile]) },
+    { label: "Kopiuj do tablicy...", icon: "copy", run: () => openTargetBoardModal("copy", [tile]) },
     {
       label: "Delete",
       icon: "trash",
@@ -1074,7 +1189,7 @@ function isModalActive() {
     editingTile.value ||
     createFlow.value ||
     boardModal.value ||
-    settingsOpen.value
+    settingsOpen.value || Boolean(targetBoardModal.value)
   );
 }
 
@@ -1462,6 +1577,38 @@ function onKeydown(event) {
       </div>
     </Transition>
 
+    
+    <!-- target board transfer modal -->
+    <Transition name="modal">
+      <div v-if="targetBoardModal" class="overlay" @click.self="targetBoardModal = null">
+        <div class="modal mini-modal">
+          <div class="modal-head">
+            {{ targetBoardModal.mode === 'move' ? "Przenieś do tablicy" : "Kopiuj do tablicy" }}
+          </div>
+          <div class="modal-body">
+            <label class="field">
+              Wybierz tablicę docelową
+              <select v-model="targetBoardModal.targetBoardId" class="board-target-select">
+                <option
+                  v-for="b in boards.filter((b) => b.id !== currentId)"
+                  :key="b.id"
+                  :value="b.id"
+                >
+                  {{ b.name || "Untitled" }} ({{ b.width }}x{{ b.height }})
+                </option>
+              </select>
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button class="btn-text" @click="targetBoardModal = null">Anuluj</button>
+            <button class="btn-text accent" @click="executeTransferToBoard">
+              {{ targetBoardModal.mode === 'move' ? "Przenieś" : "Kopiuj" }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
     <!-- operator gates (B2 trust / M8 pair-request) as in-app popups -->
     <OperatorAskModal />
   </div>
@@ -1707,6 +1854,7 @@ function onKeydown(event) {
 .mini-modal { width: min(340px, 90vw); }
 .color-picker-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .color-picker-input { width: 44px; height: 38px; padding: 2px; border-radius: 4px; border: 1px solid var(--modal-line); cursor: pointer; }
+.board-target-select { width: 100%; margin-top: 6px; padding: 8px 12px; border-radius: 4px; border: 1px solid var(--modal-line); font-size: 14px; background: #fff; }
 .kebab-anchor { position: relative; }
 .kebab {
   width: 44px;

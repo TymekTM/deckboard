@@ -145,6 +145,21 @@ impl SqlBackend {
     }
 
     /// Drag/resize from the editor grid.
+    pub fn move_button_to_board(
+        &self,
+        id: i64,
+        board_id: i64,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+    ) -> pulpit_db::Result<()> {
+        self.db
+            .lock()
+            .unwrap()
+            .update_button_board_and_geometry(id, board_id, x, y, w, h)
+    }
+
     pub fn move_button(&self, id: i64, x: i64, y: i64, w: i64, h: i64) -> pulpit_db::Result<()> {
         self.db
             .lock()
@@ -1386,6 +1401,12 @@ mod tests {
 
         let other = backend.create_board("Keeper", "#2c3e50", 4, 3).unwrap();
         backend.create_button(other, "key", "button", 0, 0).unwrap();
+
+        let created_button = backend.create_button(board, "key", "button", 0, 0).unwrap();
+        backend.move_button_to_board(created_button, other, 1, 2, 1, 1).unwrap();
+        let moved_across = backend.get_button(created_button).unwrap();
+        assert_eq!(moved_across.board_id, other);
+        assert_eq!((moved_across.x.unwrap(), moved_across.y.unwrap()), (1, 2));
         backend.delete_board(board).unwrap();
         assert_eq!(backend.get_boards().len(), 1);
     }

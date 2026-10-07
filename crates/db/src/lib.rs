@@ -451,6 +451,22 @@ impl Db {
     }
 
     /// Drag/resize on the editor grid only touches placement.
+    pub fn update_button_board_and_geometry(
+        &self,
+        id: i64,
+        board_id: i64,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE Shortcuts SET board_id = ?1, x = ?2, y = ?3, w = ?4, h = ?5 WHERE id = ?6",
+            rusqlite::params![board_id, x, y, w, h, id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_button_geometry(&self, id: i64, x: i64, y: i64, w: i64, h: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE Shortcuts SET x = ?1, y = ?2, w = ?3, h = ?4 WHERE id = ?5",
