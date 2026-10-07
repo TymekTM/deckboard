@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { CATALOG, parsePlanWindows, setPlanWindows } from "../catalog";
-import { api } from "../api";
+import { api, vmDevicesState, refreshVmDevices } from "../api";
 import SelectField from "./SelectField.vue";
 import ActionPicker from "./ActionPicker.vue";
 
@@ -22,6 +22,7 @@ const props = defineProps({
 });
 const emit = defineEmits(["save", "create", "delete", "close"]);
 
+refreshVmDevices();
 const isCreate = computed(() => !props.button);
 
 // editable copy: every column the dialog touches. Shallow spread, not a
@@ -168,6 +169,22 @@ function catalogFieldShape(f) {
       label: f.label,
       kind: "select",
       options: props.spotifyPlaylists.map((p) => ({ value: p.uri, label: p.name })),
+    };
+  }
+  if (f.devices === "vm-strip" && vmDevicesState.value.strips.length) {
+    return {
+      key: f.key,
+      label: f.label,
+      kind: "select",
+      options: vmDevicesState.value.strips,
+    };
+  }
+  if (f.devices === "vm-bus" && vmDevicesState.value.buses.length) {
+    return {
+      key: f.key,
+      label: f.label,
+      kind: "select",
+      options: vmDevicesState.value.buses,
     };
   }
   return f;

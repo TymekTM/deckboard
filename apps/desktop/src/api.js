@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { ref } from "vue";
+
+export const vmDevicesState = ref({ strips: [], buses: [] });
 
 export const api = {
   serverStatus: () => invoke("server_status"),
@@ -46,4 +49,23 @@ export const api = {
   spotifyPlaylists: () => invoke("spotify_playlists"),
   spotifyDevices: () => invoke("spotify_devices"),
   assetDataUrl: (hash) => invoke("asset_data_url", { hash }),
+  discordStatus: () => invoke("discord_status"),
+  discordSaveConfig: (clientId, clientSecret) =>
+    invoke("discord_save_config", { clientId, clientSecret }),
+  discordAuthorize: () => invoke("discord_authorize"),
+  discordDisconnect: () => invoke("discord_disconnect"),
+  vmStatus: () => invoke("vm_status"),
+  vmSetDllOverride: (path) => invoke("vm_set_dll_override", { path }),
+  vmReconnect: () => invoke("vm_reconnect"),
+  vmRun: (vmType) => invoke("vm_run", { vmType }),
+  vmDevices: () => invoke("vm_devices"),
 };
+
+export async function refreshVmDevices() {
+  try {
+    const res = await api.vmDevices();
+    vmDevicesState.value = res || { strips: [], buses: [] };
+  } catch {
+    vmDevicesState.value = { strips: [], buses: [] };
+  }
+}

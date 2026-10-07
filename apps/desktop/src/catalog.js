@@ -216,7 +216,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SET_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
       { key: "value", label: "Value" },
     ],
   },
@@ -228,7 +228,7 @@ export const CATALOG = [
     dual: true,
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
     ],
   },
   {
@@ -238,7 +238,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
       { key: "value", label: "Value" },
     ],
   },
@@ -249,7 +249,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
       { key: "value", label: "Value" },
     ],
   },
@@ -260,7 +260,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SET_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
       { key: "value", label: "Value" },
     ],
   },
@@ -272,7 +272,7 @@ export const CATALOG = [
     dual: true,
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
     ],
   },
   {
@@ -282,7 +282,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
       { key: "value", label: "Value" },
     ],
   },
@@ -293,7 +293,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
       { key: "value", label: "Value" },
     ],
   },
@@ -305,7 +305,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
     ],
   },
   {
@@ -316,7 +316,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
     ],
   },
   {

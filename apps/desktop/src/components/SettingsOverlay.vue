@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import DiscordSettings from "./settings/DiscordSettings.vue";
+import VoicemeeterSettings from "./settings/VoicemeeterSettings.vue";
 
 const props = defineProps({
   status: { type: Object, required: true },
@@ -1057,6 +1059,18 @@ onUnmounted(() => {
               </ol>
             </div>
           </article>
+        </div>
+      </section>
+
+      <!-- integrations: fully self-contained settings tiles (components/settings) -->
+      <section class="row" aria-labelledby="sec-integrations">
+        <h2 id="sec-integrations">Integracje</h2>
+        <div class="tiles">
+          <VoicemeeterSettings
+            :focused="focused === 'voicemeeter'"
+            @expand="focused = 'voicemeeter'"
+          />
+          <DiscordSettings :focused="focused === 'discord'" @expand="focused = 'discord'" />
         </div>
       </section>
     </div>

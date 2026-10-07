@@ -223,6 +223,15 @@ pub fn run() {
             spotify_playlists,
             spotify_devices,
             asset_data_url,
+            discord_status,
+            discord_save_config,
+            discord_authorize,
+            discord_disconnect,
+            vm_status,
+            vm_set_dll_override,
+            vm_reconnect,
+            vm_run,
+            vm_devices,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -413,6 +422,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 pulpit_discord::DiscordConfig::from_settings(&settings),
                 data_dir.join("settings.json"),
             )
+            .with_voicemeeter_override(pulpit_vm::load_dll_override(&settings))
             .with_spotify(spotify.clone()),
     );
 
@@ -2812,4 +2822,264 @@ async fn asset_data_url(state: State<'_, DesktopState>, hash: String) -> Result<
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ---- Discord & Voicemeeter (integ) -----------------------------------------
+//
+// Settings UI for the two native integrations. Saving hot-swaps the
+// backend config in place (SqlBackend::swap_discord_config / vm_set_override)
+// so no app restart is needed; the headless server picks the same file up
+// through the mtime re-read on its next action. Commands return redacted
+// values only - the client secret never travels back to the UI.
+
+/// The shared settings.json path a backend was built with (the UI writes
+/// the same file both surfaces read).
+fn integ_settings_path(backend: &SqlBackend) -> std::path::PathBuf {
+    backend
+        .discord_settings_path()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| pulpit_db::data_dir().join("settings.json"))
+}
+
+/// Redacted Discord status for the settings panel: the secret is reported
+/// as a boolean, never echoed. The probe opens a throwaway RPC connection
+/// (up to ~1.5 s), so it runs on the blocking pool.
+#[tauri::command]
+async fn discord_status(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let backend = state.backend()?;
+    let config = backend.get_discord_config().unwrap_or_default();
+    let has_secret = !config.client_secret.trim().is_empty();
+    let client_id = config.client_id.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        pulpit_discord::probe_status(&config)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let (status_type, status_line, username): (&str, String, Option<String>) = match status {
+        pulpit_discord::DiscordStatus::NotConfigured => {
+            ("not_configured", "nie skonfigurowano".into(), None)
+        }
+        pulpit_discord::DiscordStatus::NotRunning => {
+            ("not_running", "Discord nie działa".into(), None)
+        }
+        pulpit_discord::DiscordStatus::NeedsAuth => (
+            "needs_auth",
+            "nie połączono (wymaga autoryzacji)".into(),
+            None,
+        ),
+        pulpit_discord::DiscordStatus::Connected { username } => (
+            "connected",
+            format!("połączono jako {username}"),
+            Some(username),
+        ),
+        pulpit_discord::DiscordStatus::Error { message } => {
+            ("error", format!("błąd: {message}"), None)
+        }
+    };
+    Ok(serde_json::json!({
+        "configured": !client_id.is_empty(),
+        "clientId": client_id,
+        "hasSecret": has_secret,
+        "statusType": status_type,
+        "statusLine": status_line,
+        "username": username,
+    }))
+}
+
+#[tauri::command]
+async fn discord_save_config(
+    state: State<'_, DesktopState>,
+    client_id: String,
+    client_secret: String,
+) -> Result<(), String> {
+    let backend = state.backend()?;
+    let path = integ_settings_path(&backend);
+
+    let client_id_trimmed = client_id.trim().to_string();
+    let client_secret_trimmed = client_secret.trim().to_string();
+
+    // the UI never echoes the stored secret: an empty input with a secret
+    // already saved means "keep it", not "erase it"
+    let has_secret = backend
+        .get_discord_config()
+        .map(|c| !c.client_secret.trim().is_empty())
+        .unwrap_or(false);
+    let secret_arg = if client_secret_trimmed.is_empty() && has_secret {
+        None
+    } else {
+        Some(client_secret_trimmed)
+    };
+
+    let path_clone = path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        pulpit_discord::save_config(&path_clone, &client_id_trimmed, secret_arg.as_deref())
+            .map_err(|e| format!("Nie udało się zapisać konfiguracji Discorda: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // hot reload: swap the backend's config so the next discord action
+    // (or status probe) uses the fresh credentials without a restart
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(val) = serde_json::from_str(&raw) {
+            let fresh = pulpit_discord::DiscordConfig::from_settings(&val);
+            backend.swap_discord_config(fresh);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn discord_authorize(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let backend = state.backend()?;
+    let config = backend
+        .get_discord_config()
+        .ok_or_else(|| "Najpierw skonfiguruj Client ID i Client Secret.".to_string())?;
+    if config.client_id.trim().is_empty() || config.client_secret.trim().is_empty() {
+        return Err("Wprowadź i zapisz Client ID oraz Client Secret.".into());
+    }
+    let path = integ_settings_path(&backend);
+
+    // the user approves inside the Discord client; the RPC popup gets a
+    // minute before the flow gives up
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let tokens = tauri::async_runtime::spawn_blocking(move || {
+        pulpit_discord::authorize(&config, deadline).map_err(|e| match e {
+            pulpit_discord::DiscordError::NotRunning => "Discord nie działa.".to_string(),
+            pulpit_discord::DiscordError::AuthCancelled => {
+                "Anulowano autoryzację w aplikacji Discord.".to_string()
+            }
+            pulpit_discord::DiscordError::AuthRejected => "Odrzucono autoryzację.".to_string(),
+            other => format!("Błąd autoryzacji: {other}"),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    pulpit_discord::save_tokens(&path, &tokens)
+        .map_err(|e| format!("Nie udało się zapisać tokenów: {e}"))?;
+
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let fresh = pulpit_discord::DiscordConfig::from_settings(&val);
+    backend.swap_discord_config(fresh.clone());
+
+    // confirm the fresh tokens actually connect and grab the display name
+    // (probe opens its own short-lived session; the keep-alive client is
+    // rebuilt lazily on the next action)
+    let username = tauri::async_runtime::spawn_blocking(move || {
+        // from_settings just wrote these fields, so the Option is Some in
+        // practice; a default degrades to username = None, not a panic
+        match pulpit_discord::probe_status(&fresh.unwrap_or_default()) {
+            pulpit_discord::DiscordStatus::Connected { username } => Some(username),
+            _ => None,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "statusType": "connected",
+        "username": username,
+    }))
+}
+
+#[tauri::command]
+async fn discord_disconnect(state: State<'_, DesktopState>) -> Result<(), String> {
+    let backend = state.backend()?;
+    let path = integ_settings_path(&backend);
+
+    let path_clone = path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        pulpit_discord::clear_tokens(&path_clone)
+            .map_err(|e| format!("Nie udało się wyczyścić tokenów: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // keep id + secret, drop only the tokens; swap so the backend stops
+    // using the revoked access token immediately
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(val) = serde_json::from_str(&raw) {
+            let fresh = pulpit_discord::DiscordConfig::from_settings(&val);
+            backend.swap_discord_config(fresh);
+        }
+    }
+    Ok(())
+}
+
+/// Voicemeeter status for the settings panel. The first query opens and
+/// logs into the remote DLL (its login starts Voicemeeter when the app is
+/// closed), so this runs on the blocking pool like every other FFI call.
+#[tauri::command]
+async fn vm_status(state: State<'_, DesktopState>) -> Result<pulpit_vm::VoicemeeterStatus, String> {
+    let backend = state.backend()?;
+    tauri::async_runtime::spawn_blocking(move || backend.vm_status())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vm_set_dll_override(
+    state: State<'_, DesktopState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let backend = state.backend()?;
+    let settings_path = integ_settings_path(&backend);
+
+    // an empty string clears the override again
+    let clean = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let clean_clone = clean.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        pulpit_vm::save_dll_override(&settings_path, clean_clone.as_deref())
+            .map_err(|e| format!("Nie udało się zapisać override Voicemeeter: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // hot reload: swap the DLL the backend will open next; only an actual
+    // change drops the live session (VoicemeeterState::set_override_path)
+    backend.vm_set_override(clean.map(std::path::PathBuf::from));
+    tauri::async_runtime::spawn_blocking(move || backend.vm_reconnect())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vm_reconnect(state: State<'_, DesktopState>) -> Result<(), String> {
+    let backend = state.backend()?;
+    tauri::async_runtime::spawn_blocking(move || backend.vm_reconnect())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vm_run(state: State<'_, DesktopState>, vm_type: Option<i32>) -> Result<(), String> {
+    let backend = state.backend()?;
+    tauri::async_runtime::spawn_blocking(move || backend.vm_run(vm_type))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// Strip/bus labels for the tile-editor dropdowns. Never connects on its
+/// own: without a live session it returns empty lists and the editor falls
+/// back to the static catalog indices.
+#[tauri::command]
+async fn vm_devices(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let backend = state.backend()?;
+    let (strips, buses) = tauri::async_runtime::spawn_blocking(move || backend.vm_devices())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "strips": strips,
+        "buses": buses,
+    }))
 }
