@@ -428,6 +428,27 @@ mod tests {
     }
 
     #[test]
+    fn http_request_kind_passes_through_without_a_mapping_entry() {
+        // the http-request tile carries its config in the command column;
+        // the stock client only renders a pressable button, so the wire
+        // must keep the type and not mangle anything (the command stays
+        // server-side and is intentionally blanked like any unknown kind)
+        let m = Mapper::new();
+        let b = button(
+            "http-request",
+            Some(r#"{"method":"POST","url":"http://ha.local/api"}"#),
+            0,
+            0,
+            1,
+            1,
+        );
+        let s = m.shortcut_payload(&b);
+        assert_eq!(s["type"], "http-request");
+        assert_eq!(s["mode"], "button");
+        assert!(s["extra"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
     fn fillers_cover_every_free_cell() {
         let m = Mapper::new();
         let b = board();

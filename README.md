@@ -43,6 +43,12 @@ extensions load in a native runtime.
   whole thing is edited live from Settings (Ustawienia) → AI usage.
 - Native system-info source (CPU and RAM load) replaces the heaviest JS
   extension.
+- **HTTP request tiles**: full method/URL/headers/body requests against Home
+  Assistant, webhooks, n8n or any REST API, executed server-side on press
+  (configurable timeout, optional certificate-error ignore, `{{var:...}}`
+  placeholders substituting current variable values). The status code - or a
+  value extracted from the JSON response via a pointer/dotted path - is stored
+  into a variable any Variable Value (display) tile shows live.
 - **Spotify**: playback, shuffle/repeat, like, playlists, device switch,
   volume and seek sliders, and a now-playing tile with cover art and a
   live progress bar. Talks to the Web API directly; setup and login live
