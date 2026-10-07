@@ -8,6 +8,7 @@ import {
   mmss,
 } from "../catalog";
 import { resolveStatusArt, payloadReceivedAt, windowVisible } from "../statusMedia";
+import ToolTile from "./tiles/ToolTile.vue";
 
 // One tile. Isolated so a live state push re-renders only the tiles that
 // read the pushed key, not the whole board. Geometry (grid position,
@@ -39,6 +40,25 @@ const cmd = computed(() => {
   } catch {
     return {};
   }
+});
+
+// ---- utility tools (round 5) -----------------------------------------------
+// Compact server state arrives under `tool-<button id>`; time is
+// extrapolated inside ToolTile. While a legacy stock client is
+// connected, the 1 Hz lane pushes a plain formatted label string under
+// the same key - the last object view is kept so the tile does not
+// flicker between the rich and the text-only rendering.
+const isTool = computed(() =>
+  String(props.tile.type || "").startsWith("tool-"),
+);
+const toolState = ref(null);
+watchEffect(() => {
+  if (!isTool.value) {
+    toolState.value = null;
+    return;
+  }
+  const v = props.customValues[`tool-${props.tile.id}`];
+  if (v && typeof v === "object") toolState.value = v;
 });
 
 // Whether the tile renders its second state. A known live state wins
@@ -525,9 +545,21 @@ function onTileKeydown(event) {
         alt=""
       />
       <img v-else-if="tile.img" class="tile-img" :src="tile.img" alt="" />
+      <!-- tool tiles (clock/timer/stopwatch/counter): the whole face is
+           the tool's own renderer; gestures live there in touch mode -->
+      <ToolTile
+        v-if="isTool"
+        :tile="tile"
+        :cmd="cmd"
+        :state="toolState"
+        :touch="touch"
+        :title-color="tileTitleColor() || '#ffffff'"
+        @tap="onTap"
+      />
       <i
         v-if="
           tileIcon(tile) &&
+          !isTool &&
           !graphData &&
           !(tile.mode === 'status' && statusData) &&
           !(tile.mode === 'custom-value' && !tile.title && customValueLabel)
@@ -700,7 +732,7 @@ function onTileKeydown(event) {
         </template>
       </div>
       <span
-        v-if="boardTileTitle"
+        v-if="boardTileTitle && !isTool"
         class="tile-title"
         :class="`pos-${tileTitlePos()}`"
         :style="{

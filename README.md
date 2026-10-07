@@ -47,6 +47,13 @@ extensions load in a native runtime.
   volume and seek sliders, and a now-playing tile with cover art and a
   live progress bar. Talks to the Web API directly; setup and login live
   in the desktop app (see [Spotify](#spotify)).
+- **Utility tools** (catalog group "Tools"): server-authoritative clock,
+  countdown timer, stopwatch and counter tiles. The state lives on the
+  server (`~/pulpitApp/tools.json`), so every tablet and the desktop touch
+  mode show the same value; timers push compact snapshots on change and
+  clients extrapolate the ticking locally (plus a 1 Hz text label for the
+  stock client while something runs). Timer finish can play a sound on the
+  PC or switch the board, and the tile flashes on every surface.
 
 **Pairing and clients**
 

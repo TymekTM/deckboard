@@ -15,6 +15,10 @@ export const api = {
   deleteButton: (id, boardId) => invoke("delete_button", { id, boardId }),
   clearBoard: (boardId) => invoke("clear_board", { boardId }),
   execButton: (id) => invoke("exec_button", { id }),
+  // tool tiles (timer/stopwatch/counter): alternative triggers of the
+  // tile's action - double-tap / long-press / reset gestures
+  execButtonGesture: (id, gesture) =>
+    invoke("exec_button_gesture", { id, gesture }),
   execSlider: (id, value) => invoke("exec_slider", { id, value }),
   getSettings: () => invoke("get_settings"),
   setHotkey: (combo) => invoke("set_touch_mode_hotkey", { combo }),
