@@ -162,10 +162,7 @@ async fn main() -> anyhow::Result<()> {
         engine: v2.engine.clone(),
         hub: state.hub.clone(),
     });
-    tokio::spawn(pulpit_host::forward_ext_events(
-        feed.clone(),
-        ext_events,
-    ));
+    tokio::spawn(pulpit_host::forward_ext_events(feed.clone(), ext_events));
     tokio::spawn(pulpit_host::forward_producer(
         feed.clone(),
         pulpit_sysinfo::spawn_push(),
@@ -178,7 +175,10 @@ async fn main() -> anyhow::Result<()> {
         feed.clone(),
         pulpit_aidev::spawn_push(pulpit_host::aidev_paths(aidev_config)),
     ));
-    tokio::spawn(pulpit_host::speaker_watch(feed.clone(), state.backend.clone()));
+    tokio::spawn(pulpit_host::speaker_watch(
+        feed.clone(),
+        state.backend.clone(),
+    ));
     // Spotify poller: consumers = connected legacy + v2 clients (no
     // host-local UI on the headless server). Snapshots ride the shared
     // spotify pump (internal art key stripped, album art imported).
@@ -195,9 +195,7 @@ async fn main() -> anyhow::Result<()> {
         None => {
             // no poller: one `spotify-auth: "off"` marker so clients see
             // a defined state
-            tokio::spawn(pulpit_host::spotify::forward_spotify_disabled(
-                feed.clone(),
-            ));
+            tokio::spawn(pulpit_host::spotify::forward_spotify_disabled(feed.clone()));
         }
     }
     tokio::spawn(pulpit_host::activity_loop(

@@ -35,7 +35,10 @@ impl std::fmt::Debug for SpotifyConfig {
         f.debug_struct("SpotifyConfig")
             .field("client_id", &self.client_id)
             .field("access_token", &"<redacted>")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("expires_at", &self.expires_at)
             .field("user", &self.user)
             .field("product", &self.product)
@@ -63,7 +66,9 @@ impl SpotifyConfig {
     /// Persist atomically (`<path>.tmp` + rename, never a torn file).
     pub fn save(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_string_pretty(self).map_err(|e| {
-            SpotifyError::Io(std::io::Error::other(format!("spotify.json serialization: {e}")))
+            SpotifyError::Io(std::io::Error::other(format!(
+                "spotify.json serialization: {e}"
+            )))
         })?;
         Ok(pulpit_db::write_atomic(path, json.as_bytes())?)
     }

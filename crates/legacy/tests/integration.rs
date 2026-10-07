@@ -562,11 +562,10 @@ async fn exec_dispatch_rides_the_imageless_meta_row() {
     let (addr, backend) = spawn_server().await;
     let (status, open) = http(addr, "GET", "/socket.io/?EIO=3&transport=polling&t=1", None);
     assert_eq!(status, 200);
-    let sid: String =
-        serde_json::from_str::<serde_json::Value>(&open[1..]).unwrap()["sid"]
-            .as_str()
-            .unwrap()
-            .into();
+    let sid: String = serde_json::from_str::<serde_json::Value>(&open[1..]).unwrap()["sid"]
+        .as_str()
+        .unwrap()
+        .into();
     let _ = http(
         addr,
         "GET",
@@ -587,11 +586,7 @@ async fn exec_dispatch_rides_the_imageless_meta_row() {
     }
     wait_for_execs(&backend, &[(10, false)]);
     assert!(
-        backend
-            .sliders
-            .lock()
-            .unwrap()
-            .contains(&(10, 0.5)),
+        backend.sliders.lock().unwrap().contains(&(10, 0.5)),
         "slider never landed: {:?}",
         backend.sliders.lock().unwrap()
     );

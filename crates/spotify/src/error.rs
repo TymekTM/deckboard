@@ -51,3 +51,59 @@ pub type Result<T> = std::result::Result<T, SpotifyError>;
 pub fn user_message(err: &SpotifyError) -> String {
     err.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn design_messages_are_the_display_strings() {
+        assert_eq!(
+            user_message(&SpotifyError::NeedsLogin),
+            "Log in to Spotify in Pulpit settings"
+        );
+        assert_eq!(
+            user_message(&SpotifyError::PremiumRequired),
+            "Spotify Premium required"
+        );
+        assert_eq!(
+            user_message(&SpotifyError::NoActiveDevice),
+            "Open Spotify on a device first"
+        );
+    }
+
+    #[test]
+    fn technical_variants_keep_their_detail() {
+        assert_eq!(
+            SpotifyError::RateLimited {
+                retry_after_secs: 7
+            }
+            .to_string(),
+            "Spotify rate limit - retry in 7s"
+        );
+        assert_eq!(
+            SpotifyError::Api("Invalid id".into()).to_string(),
+            "Spotify error: Invalid id"
+        );
+        assert_eq!(
+            SpotifyError::Network("dns").to_string(),
+            "network unreachable for Spotify (dns)"
+        );
+        assert_eq!(
+            SpotifyError::BadPayload("spotify-volume", "not json".into()).to_string(),
+            "bad tile payload for spotify-volume: not json"
+        );
+        assert_eq!(
+            SpotifyError::Login("port busy".into()).to_string(),
+            "Spotify login failed: port busy"
+        );
+    }
+
+    #[test]
+    fn io_errors_convert_transparently() {
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "locked");
+        let err: SpotifyError = io.into();
+        assert!(matches!(err, SpotifyError::Io(_)));
+        assert_eq!(err.to_string(), "locked");
+    }
+}

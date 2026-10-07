@@ -578,7 +578,10 @@ mod tests {
         assert!(s.get("app").is_none());
         assert_eq!(s["extra"], "");
         // repeat/like remap onto their pushed keys, not the kind
-        for (kind, key) in [("spotify-repeat", "spotify-repeat-on"), ("spotify-like", "spotify-liked")] {
+        for (kind, key) in [
+            ("spotify-repeat", "spotify-repeat-on"),
+            ("spotify-like", "spotify-liked"),
+        ] {
             let s = m.shortcut_payload(&button(kind, None, 0, 0, 1, 1));
             assert_eq!(s["app"], "custom-value", "{kind}");
             assert_eq!(s["extra"], key, "{kind}");

@@ -559,4 +559,421 @@ mod tests {
         );
         assert_eq!(decode_post_body("42123%+5"), "42123%+5");
     }
+
+    #[test]
+    fn urldecode_handles_escapes_and_malformed_percent() {
+        assert_eq!(urldecode("%41%42c"), "ABc");
+        assert_eq!(urldecode("%7B%22a%22%3A1%7D"), r#"{"a":1}"#);
+        // invalid hex keeps the percent literally
+        assert_eq!(urldecode("%zz1"), "%zz1");
+        // a truncated escape at the end stays as-is
+        assert_eq!(urldecode("ab%4"), "ab%4");
+        assert_eq!(urldecode("ab%"), "ab%");
+        // multi-byte UTF-8 split over escapes is reassembled
+        assert_eq!(urldecode("%C5%BC"), "\u{17c}");
+        // invalid UTF-8 degrades lossily instead of panicking
+        assert_eq!(urldecode("%FF"), "\u{fffd}");
+        assert_eq!(urldecode(""), "");
+    }
+
+    #[test]
+    fn arg_id_accepts_numbers_and_numeric_strings() {
+        assert_eq!(arg_id(&json!({"id": 7})), Some(7));
+        assert_eq!(arg_id(&json!({"id": "42"})), Some(42));
+        assert_eq!(arg_id(&json!({"id": "x"})), None);
+        assert_eq!(arg_id(&json!({"id": 1.5})), None);
+        assert_eq!(arg_id(&json!({"id": null})), None);
+        assert_eq!(arg_id(&json!({})), None);
+        assert_eq!(arg_id(&json!(7)), None);
+    }
+
+    #[test]
+    fn sio_query_picks_the_known_keys() {
+        let q = SioQuery::from(HashMap::from([
+            ("sid".to_string(), "abc".to_string()),
+            ("access_key".to_string(), ACCESS_KEY_PRO.to_string()),
+            ("transport".to_string(), "websocket".to_string()),
+            ("EIO".to_string(), "3".to_string()),
+        ]));
+        assert_eq!(q.sid.as_deref(), Some("abc"));
+        assert_eq!(q.access_key.as_deref(), Some(ACCESS_KEY_PRO));
+        assert_eq!(q.transport.as_deref(), Some("websocket"));
+        let empty = SioQuery::from(HashMap::new());
+        assert!(empty.sid.is_none() && empty.access_key.is_none() && empty.transport.is_none());
+    }
+
+    #[test]
+    fn host_is_direct_accepts_ip_literals_and_localhost_only() {
+        for host in [
+            "192.168.1.5",
+            "192.168.1.5:8611",
+            "127.0.0.1:1",
+            "localhost",
+            "LOCALHOST:8611",
+            "[::1]:8611",
+            "[fe80::1]",
+        ] {
+            assert!(host_is_direct(host), "{host} should be direct");
+        }
+        for host in [
+            "evil.example",
+            "evil.example:8611",
+            "localhost.evil.example",
+            "192.168.1.5.nip.io",
+            "",
+            "[evil]:80",
+            "1.2.3.4:notaport",
+            // an IPv6 Host must be bracketed (RFC 3986)
+            "::1",
+        ] {
+            assert!(!host_is_direct(host), "{host} should be rejected");
+        }
+    }
+
+    #[test]
+    fn origin_authority_extracts_host_and_port() {
+        assert_eq!(
+            origin_authority("http://1.2.3.4:8611"),
+            Some("1.2.3.4:8611")
+        );
+        assert_eq!(origin_authority("https://a.b/path?q"), Some("a.b"));
+        assert_eq!(origin_authority("null"), None);
+        assert_eq!(origin_authority("file://"), Some(""));
+    }
+
+    fn headers(host: Option<&str>, origin: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(host) = host {
+            h.insert(header::HOST, host.parse().unwrap());
+        }
+        if let Some(origin) = origin {
+            h.insert(header::ORIGIN, origin.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn origin_guard_matrix() {
+        // native clients: no Origin, direct Host
+        assert!(origin_host_allowed(&headers(Some("10.0.0.2:8611"), None)));
+        // missing Host is never allowed
+        assert!(!origin_host_allowed(&headers(None, None)));
+        // DNS rebinding: a name in Host is rejected even without Origin
+        assert!(!origin_host_allowed(&headers(
+            Some("attacker.example:8611"),
+            None
+        )));
+        // same-origin page served by this server
+        assert!(origin_host_allowed(&headers(
+            Some("10.0.0.2:8611"),
+            Some("http://10.0.0.2:8611")
+        )));
+        // case-insensitive comparison
+        assert!(origin_host_allowed(&headers(
+            Some("LOCALHOST:8611"),
+            Some("http://localhost:8611")
+        )));
+        // cross-origin browser page
+        assert!(!origin_host_allowed(&headers(
+            Some("10.0.0.2:8611"),
+            Some("http://evil.example")
+        )));
+        // same host, different port is a different origin
+        assert!(!origin_host_allowed(&headers(
+            Some("10.0.0.2:8611"),
+            Some("http://10.0.0.2:9999")
+        )));
+        // opaque origins (sandboxed iframes, file://) are rejected
+        assert!(!origin_host_allowed(&headers(
+            Some("10.0.0.2:8611"),
+            Some("null")
+        )));
+    }
+
+    // -- packet handling ---------------------------------------------------
+
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct Recorder {
+        execs: StdMutex<Vec<(i64, bool)>>,
+        sliders: StdMutex<Vec<(i64, f64)>>,
+        meta_reads: StdMutex<Vec<i64>>,
+    }
+
+    fn board(id: i64, name: &str) -> pulpit_db::BoardRow {
+        pulpit_db::BoardRow {
+            id,
+            name: name.into(),
+            background: "#000000".into(),
+            layout: 6,
+            image: String::new(),
+            sort: 0,
+            kind: "buttons".into(),
+            args: None,
+            order: 0,
+            width: 2,
+            height: 2,
+            converted: 1,
+        }
+    }
+
+    fn button(id: i64, kind: &str) -> pulpit_db::ButtonRow {
+        pulpit_db::ButtonRow {
+            id,
+            board_id: 1,
+            kind: kind.into(),
+            title: Some(format!("t{id}")),
+            x: Some(0),
+            y: Some(0),
+            w: 1,
+            h: 1,
+            mode: "button".into(),
+            ..pulpit_db::ButtonRow::default()
+        }
+    }
+
+    impl Backend for Recorder {
+        fn get_boards(&self) -> Vec<pulpit_db::BoardRow> {
+            vec![board(1, "One"), board(2, "Two")]
+        }
+        fn get_board(&self, id: i64) -> Option<pulpit_db::BoardRow> {
+            (id == 1 || id == 2).then(|| board(id, "B"))
+        }
+        fn get_buttons_by_board(&self, board_id: i64) -> Vec<pulpit_db::ButtonRow> {
+            if board_id == 1 {
+                vec![button(10, "url")]
+            } else {
+                Vec::new()
+            }
+        }
+        fn get_button(&self, _id: i64) -> Option<pulpit_db::ButtonRow> {
+            panic!("dispatch must use the image-less meta row");
+        }
+        fn get_button_meta(&self, id: i64) -> Option<pulpit_db::ButtonRow> {
+            self.meta_reads.lock().unwrap().push(id);
+            match id {
+                10 => Some(button(10, "url")),
+                11 => Some(button(11, "key")),
+                12 => Some(button(12, "board")),
+                _ => None,
+            }
+        }
+        fn exec(
+            &self,
+            button: pulpit_db::ButtonRow,
+            is_tap_start: bool,
+            sink: &mut dyn pulpit_actions::EventSink,
+        ) {
+            self.execs.lock().unwrap().push((button.id, is_tap_start));
+            if button.id == 12 {
+                sink.change_board(2);
+                sink.app_value("k", "v");
+                sink.third_party_value("tp", "1");
+            }
+        }
+        fn slider(&self, button: pulpit_db::ButtonRow, value: f64) {
+            self.sliders.lock().unwrap().push((button.id, value));
+        }
+    }
+
+    async fn fixture(pro: bool) -> (Arc<AppState>, Arc<Session>, Arc<Recorder>) {
+        let rec = Arc::new(Recorder::default());
+        let state = Arc::new(AppState {
+            hub: Arc::new(Hub::new()),
+            backend: rec.clone(),
+        });
+        let session = state.hub.create(rec.clone(), pro).await;
+        (state, session, rec)
+    }
+
+    async fn drain(session: &Session) -> Vec<String> {
+        let body = session.poll(1).await;
+        if body.is_empty() {
+            Vec::new()
+        } else {
+            body.split('\u{1e}').map(str::to_string).collect()
+        }
+    }
+
+    /// Detached execs finish on the blocking pool; wait for the side
+    /// effects instead of sleeping a fixed time.
+    async fn until(mut done: impl FnMut() -> bool) {
+        for _ in 0..400 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("condition never became true");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn engine_ping_answers_pong_and_noise_is_ignored() {
+        let (state, session, rec) = fixture(false).await;
+        for packet in [
+            "2",
+            "5",
+            "40",
+            "4",
+            "41",
+            "9junk",
+            "",
+            "42{not json",
+            r#"42["nobody_listens",{}]"#,
+            "42{}",
+        ] {
+            handle_packet(&state, &session, packet).await;
+        }
+        assert_eq!(drain(&session).await, vec!["3"]);
+        assert!(rec.execs.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_version_is_broadcast_to_every_session() {
+        let (state, session, rec) = fixture(false).await;
+        let other = state.hub.create(rec, true).await;
+        handle_packet(&state, &session, r#"42["get_version"]"#).await;
+        let expected = format!(r#"42["get_version",{}]"#, crate::LEGACY_VERSION_PACKET);
+        assert_eq!(drain(&session).await, vec![expected.clone()]);
+        assert_eq!(drain(&other).await, vec![expected]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_shortcuts_replies_only_to_the_asking_session() {
+        let (state, session, rec) = fixture(true).await;
+        let other = state.hub.create(rec, false).await;
+        handle_packet(&state, &session, r#"42["get_shortcuts"]"#).await;
+        let packets = drain(&session).await;
+        assert_eq!(packets.len(), 1);
+        let body = packets[0]
+            .strip_prefix(r#"42["get_shortcuts","#)
+            .and_then(|p| p.strip_suffix(']'))
+            .unwrap();
+        let boards: serde_json::Value = serde_json::from_str(body).unwrap();
+        let boards = boards.as_array().unwrap();
+        assert_eq!(boards.len(), 2);
+        assert_eq!(boards[0]["name"], "One");
+        assert_eq!(boards[1]["name"], "Two");
+        assert!(drain(&other).await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exec_shortcut_runs_detached_and_forwards_sink_events() {
+        let (state, session, rec) = fixture(false).await;
+        handle_packet(&state, &session, r#"42["exec_shortcut",{"id":"12"}]"#).await;
+        until(|| rec.execs.lock().unwrap().len() == 1).await;
+        assert_eq!(rec.execs.lock().unwrap()[0], (12, false));
+        let mut packets = Vec::new();
+        for _ in 0..400 {
+            packets.extend(drain(&session).await);
+            if packets.len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            packets,
+            vec![
+                r#"42["change_board",{"boardId":2}]"#.to_string(),
+                r#"42["app_status_update",{"app":"APP_CUSTOM_VALUE","data":{"k":"v"}}]"#
+                    .to_string(),
+                r#"42["app_status_update",{"app":"THIRD_PARTY_APP","data":{"tp":"1"}}]"#
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exec_shortcut_ignores_missing_or_unknown_ids() {
+        let (state, session, rec) = fixture(false).await;
+        handle_packet(&state, &session, r#"42["exec_shortcut"]"#).await;
+        handle_packet(&state, &session, r#"42["exec_shortcut",{"id":"nope"}]"#).await;
+        handle_packet(&state, &session, r#"42["exec_shortcut",{"id":999}]"#).await;
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(rec.execs.lock().unwrap().is_empty());
+        // only the parsable id reached storage
+        assert_eq!(*rec.meta_reads.lock().unwrap(), vec![999]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn key_tap_start_is_released_when_the_session_goes_away() {
+        let (state, session, rec) = fixture(false).await;
+        handle_packet(
+            &state,
+            &session,
+            r#"42["exec_shortcut",{"id":11,"isTapStart":true}]"#,
+        )
+        .await;
+        until(|| rec.execs.lock().unwrap().len() == 1).await;
+        state.hub.remove(&session.sid).await;
+        assert_eq!(*rec.execs.lock().unwrap(), vec![(11, true), (11, false)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn key_tap_end_clears_the_held_key() {
+        let (state, session, rec) = fixture(false).await;
+        handle_packet(
+            &state,
+            &session,
+            r#"42["exec_shortcut",{"id":11,"isTapStart":true}]"#,
+        )
+        .await;
+        handle_packet(
+            &state,
+            &session,
+            r#"42["exec_shortcut",{"id":11,"isTapStart":false}]"#,
+        )
+        .await;
+        until(|| rec.execs.lock().unwrap().len() == 2).await;
+        state.hub.remove(&session.sid).await;
+        // no third (release) exec: the tap end already released it
+        assert_eq!(rec.execs.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_key_tap_start_is_not_tracked_as_held() {
+        let (state, session, rec) = fixture(false).await;
+        handle_packet(
+            &state,
+            &session,
+            r#"42["exec_shortcut",{"id":10,"isTapStart":true}]"#,
+        )
+        .await;
+        until(|| rec.execs.lock().unwrap().len() == 1).await;
+        state.hub.remove(&session.sid).await;
+        assert_eq!(*rec.execs.lock().unwrap(), vec![(10, true)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exec_slider_passes_the_value_and_defaults_to_zero() {
+        let (state, session, rec) = fixture(false).await;
+        handle_packet(
+            &state,
+            &session,
+            r#"42["exec_slider",{"id":10,"value":0.75}]"#,
+        )
+        .await;
+        handle_packet(&state, &session, r#"42["exec_slider",{"id":"10"}]"#).await;
+        handle_packet(
+            &state,
+            &session,
+            r#"42["exec_slider",{"id":404,"value":1}]"#,
+        )
+        .await;
+        handle_packet(&state, &session, r#"42["exec_slider",{}]"#).await;
+        assert_eq!(*rec.sliders.lock().unwrap(), vec![(10, 0.75), (10, 0.0)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_capabilities_is_accepted_silently() {
+        let (state, session, _rec) = fixture(false).await;
+        handle_packet(
+            &state,
+            &session,
+            r#"42["client_capabilities",{"templates":["media"]}]"#,
+        )
+        .await;
+        assert!(drain(&session).await.is_empty());
+    }
 }

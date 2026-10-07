@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use pulpit_proto::{Frame, StatePatch, TYPE_STATE_PATCH};
 
-pub use assets::{AssetBody, AssetStore, is_valid_hash};
+pub use assets::{is_valid_hash, AssetBody, AssetStore};
 pub use boards::build_tile;
 pub use devices::{DeviceEntry, DeviceStore, PairError, PairRequests, Pairing, PAIR_CODE_TTL};
 pub use hub::V2Hub;

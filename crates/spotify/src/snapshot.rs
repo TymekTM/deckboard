@@ -25,13 +25,20 @@ impl AuthState {
 /// (string-typed custom values), in mobile `isActiveValue` and in the
 /// desktop's `stateActive` (design §3).
 fn on_off(on: bool) -> &'static str {
-    if on { "ON" } else { "OFF" }
+    if on {
+        "ON"
+    } else {
+        "OFF"
+    }
 }
 
 /// Pick the ~300 px cover URL from `album.images` (640/300/64 may be
 /// absent or empty entirely - design tolerates missing art).
 fn art_url(player: &Value) -> String {
-    let Some(images) = player.pointer("/item/album/images").and_then(Value::as_array) else {
+    let Some(images) = player
+        .pointer("/item/album/images")
+        .and_then(Value::as_array)
+    else {
         return String::new();
     };
     let mut best: Option<(u32, &str)> = None;
@@ -45,7 +52,8 @@ fn art_url(player: &Value) -> String {
         let width = image.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
         match best {
             // exact 300 wins; otherwise the closest to 300
-            Some((w, _)) if w == 300 || (w.abs_diff(300) <= width.abs_diff(300) && width != 300) => {}
+            Some((w, _))
+                if w == 300 || (w.abs_diff(300) <= width.abs_diff(300) && width != 300) => {}
             _ => best = Some((width, url)),
         }
     }
@@ -90,7 +98,10 @@ fn device_name(player: &Value) -> String {
 }
 
 fn playing(player: &Value) -> bool {
-    player.get("is_playing").and_then(Value::as_bool).unwrap_or(false)
+    player
+        .get("is_playing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// The `spotify-now-playing` status payload: the shape mobile/desktop
@@ -277,7 +288,12 @@ mod tests {
         // the 300 px art goes to the internal host-consumed key only
         assert_eq!(snapshot["spotify-art-url"], "https://i.scdn.co/image/300");
         // exactly the design §4 keys, nothing more
-        let mut keys: Vec<&str> = snapshot.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = snapshot
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
@@ -300,12 +316,25 @@ mod tests {
     #[test]
     fn now_playing_payload_shape() {
         let player = player_json();
-        let payload = build_snapshot(Some(&player), None, AuthState::Ok, None)["spotify-now-playing"].clone();
+        let payload =
+            build_snapshot(Some(&player), None, AuthState::Ok, None)["spotify-now-playing"].clone();
         assert_eq!(payload["title"], "Spotify");
-        assert_eq!(payload["rows"][0], json!({ "label": "Track", "value": "Song name" }));
-        assert_eq!(payload["rows"][1], json!({ "label": "Artist", "value": "A, B" }));
-        assert_eq!(payload["rows"][2], json!({ "label": "Album", "value": "Best Of" }));
-        assert_eq!(payload["rows"][3], json!({ "label": "Device", "value": "Kitchen" }));
+        assert_eq!(
+            payload["rows"][0],
+            json!({ "label": "Track", "value": "Song name" })
+        );
+        assert_eq!(
+            payload["rows"][1],
+            json!({ "label": "Artist", "value": "A, B" })
+        );
+        assert_eq!(
+            payload["rows"][2],
+            json!({ "label": "Album", "value": "Best Of" })
+        );
+        assert_eq!(
+            payload["rows"][3],
+            json!({ "label": "Device", "value": "Kitchen" })
+        );
         assert_eq!(payload["compact"], "Song name \u{2014} A, B");
         assert_eq!(payload["summary"], "Song name \u{2014} A, B");
         // optional new fields: progress present, image absent (host lane)
@@ -329,8 +358,14 @@ mod tests {
 
         let login = build_snapshot(None, None, AuthState::NeedsLogin, None);
         assert_eq!(login["spotify-auth"], "needs-login");
-        assert_eq!(login["spotify-now-playing"]["rows"][0]["value"], "Log in via Pulpit settings");
-        assert_eq!(login["spotify-now-playing"]["compact"], "Log in via Pulpit settings");
+        assert_eq!(
+            login["spotify-now-playing"]["rows"][0]["value"],
+            "Log in via Pulpit settings"
+        );
+        assert_eq!(
+            login["spotify-now-playing"]["compact"],
+            "Log in via Pulpit settings"
+        );
     }
 
     #[test]
@@ -338,10 +373,16 @@ mod tests {
         let mut player = player_json();
         // only a 640 image available
         player["item"]["album"]["images"] = json!([{ "url": "https://x/640", "width": 640 }]);
-        assert_eq!(build_snapshot(Some(&player), None, AuthState::Ok, None)["spotify-art-url"], "https://x/640");
+        assert_eq!(
+            build_snapshot(Some(&player), None, AuthState::Ok, None)["spotify-art-url"],
+            "https://x/640"
+        );
         // empty images list
         player["item"]["album"]["images"] = json!([]);
-        assert_eq!(build_snapshot(Some(&player), None, AuthState::Ok, None)["spotify-art-url"], "");
+        assert_eq!(
+            build_snapshot(Some(&player), None, AuthState::Ok, None)["spotify-art-url"],
+            ""
+        );
     }
 
     #[test]
@@ -352,6 +393,9 @@ mod tests {
         assert_eq!(snapshot["spotify-playing"], "OFF");
         // progress still reflects the paused position
         assert_eq!(snapshot["spotify-progress"], "0.305");
-        assert_eq!(snapshot["spotify-now-playing"]["progress"]["playing"], false);
+        assert_eq!(
+            snapshot["spotify-now-playing"]["progress"]["playing"],
+            false
+        );
     }
 }

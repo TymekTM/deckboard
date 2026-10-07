@@ -208,12 +208,7 @@ impl Spotify {
     /// Send one authorized request: pause gate, lazy token refresh, one
     /// 401-refresh-retry, 429 global pause. Statuses are the caller's
     /// business (204 is data here, not an error).
-    fn request(
-        &self,
-        method: Method,
-        url: &str,
-        body: Option<&Value>,
-    ) -> Result<HttpResponse> {
+    fn request(&self, method: Method, url: &str, body: Option<&Value>) -> Result<HttpResponse> {
         {
             let paused = self.inner.paused_until.lock().unwrap();
             let remaining = paused.saturating_duration_since(Instant::now());
@@ -241,16 +236,19 @@ impl Spotify {
         Ok(resp)
     }
 
-    fn send(&self, method: Method, url: &str, body: Option<&Value>, token: &str) -> Result<HttpResponse> {
+    fn send(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        token: &str,
+    ) -> Result<HttpResponse> {
         let req = HttpRequest {
             method,
             url: url.to_string(),
             headers: vec![
                 ("authorization".into(), format!("Bearer {token}")),
-                (
-                    "content-type".into(),
-                    "application/json".into(),
-                ),
+                ("content-type".into(), "application/json".into()),
             ],
             body: match body {
                 Some(v) => Some(serde_json::to_vec(v).map_err(|e| {
@@ -302,7 +300,11 @@ impl Spotify {
             self.enter_needs_login(auth);
             return Err(SpotifyError::NeedsLogin);
         };
-        match auth::refresh_tokens(self.inner.transport.as_ref(), &auth.client_id, &refresh_token) {
+        match auth::refresh_tokens(
+            self.inner.transport.as_ref(),
+            &auth.client_id,
+            &refresh_token,
+        ) {
             Ok(tokens) => {
                 auth.access_token = tokens.access_token;
                 auth.expires_at = Some(now_unix() + tokens.expires_in as i64);
@@ -344,7 +346,10 @@ impl Spotify {
             .min(MAX_PAUSE.as_secs());
         let until = Instant::now() + Duration::from_secs(retry_after) + PAUSE_SLACK;
         *self.inner.paused_until.lock().unwrap() = until;
-        tracing::warn!(retry_after_secs = retry_after, "spotify rate limit - pausing all calls");
+        tracing::warn!(
+            retry_after_secs = retry_after,
+            "spotify rate limit - pausing all calls"
+        );
         SpotifyError::RateLimited {
             retry_after_secs: retry_after as u32,
         }
@@ -353,8 +358,14 @@ impl Spotify {
     /// Map a non-2xx answer to the typed errors (design §3).
     fn api_error(resp: &HttpResponse) -> SpotifyError {
         let parsed = resp.json().unwrap_or_default();
-        let reason = parsed.pointer("/error/reason").and_then(Value::as_str).unwrap_or("");
-        let message = parsed.pointer("/error/message").and_then(Value::as_str).unwrap_or("");
+        let reason = parsed
+            .pointer("/error/reason")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let message = parsed
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         match (resp.status, reason) {
             (403, "PREMIUM_REQUIRED") => SpotifyError::PremiumRequired,
             (404, "NO_ACTIVE_DEVICE") => SpotifyError::NoActiveDevice,
@@ -405,8 +416,16 @@ impl Spotify {
         Ok(list
             .iter()
             .map(|d| Device {
-                id: d.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-                name: d.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                id: d
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                name: d
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
                 is_active: d.get("is_active").and_then(Value::as_bool).unwrap_or(false),
             })
             .filter(|d| !d.id.is_empty())
@@ -530,7 +549,10 @@ impl Spotify {
         for variant in order {
             let url = match variant {
                 LibraryEndpoint::New => {
-                    format!("{API}/me/library/contains?uris={}", crate::pkce::urlencode(uri))
+                    format!(
+                        "{API}/me/library/contains?uris={}",
+                        crate::pkce::urlencode(uri)
+                    )
                 }
                 LibraryEndpoint::Legacy => {
                     format!("{API}/me/tracks/contains?ids={}", Self::track_id(uri))
@@ -549,7 +571,9 @@ impl Spotify {
             }
             return Err(Self::api_error(&resp));
         }
-        Err(last.unwrap_or(SpotifyError::Api("library contains endpoints exhausted".into())))
+        Err(last.unwrap_or(SpotifyError::Api(
+            "library contains endpoints exhausted".into(),
+        )))
     }
 
     pub(crate) fn mark_liked_dirty(&self) {
@@ -585,14 +609,24 @@ impl Spotify {
                 let outcome = if playing {
                     self.control(Method::Put, &format!("{API}/me/player/pause"), None)
                 } else {
-                    self.control(Method::Put, &format!("{API}/me/player/play"), Some(&json!({})))
+                    self.control(
+                        Method::Put,
+                        &format!("{API}/me/player/play"),
+                        Some(&json!({})),
+                    )
                 };
                 self.after_control(outcome)
             }
-            Plan::Next => self.after_control(self.control(Method::Post, &format!("{API}/me/player/next"), None)),
-            Plan::Previous => {
-                self.after_control(self.control(Method::Post, &format!("{API}/me/player/previous"), None))
-            }
+            Plan::Next => self.after_control(self.control(
+                Method::Post,
+                &format!("{API}/me/player/next"),
+                None,
+            )),
+            Plan::Previous => self.after_control(self.control(
+                Method::Post,
+                &format!("{API}/me/player/previous"),
+                None,
+            )),
             Plan::VolumeUp => self.apply_volume_step(10),
             Plan::VolumeDown => self.apply_volume_step(-10),
             Plan::VolumeMute => self.apply_volume_mute(),
@@ -660,14 +694,17 @@ impl Spotify {
                 } else {
                     json!({ "context_uri": uri })
                 };
-                let outcome = self.control(Method::Put, &format!("{API}/me/player/play"), Some(&body));
+                let outcome =
+                    self.control(Method::Put, &format!("{API}/me/player/play"), Some(&body));
                 self.after_control(outcome)
             }
             Plan::TransferDevice(target) => {
                 let devices = self.devices_internal()?;
                 let matched = match_device(&devices, target);
                 let Some(device) = matched else {
-                    return Err(SpotifyError::Api(format!("unknown Spotify device {target:?}")));
+                    return Err(SpotifyError::Api(format!(
+                        "unknown Spotify device {target:?}"
+                    )));
                 };
                 let outcome = self.control(
                     Method::Put,
@@ -864,7 +901,8 @@ mod tests {
         HttpResponse {
             status,
             headers: Vec::new(),
-            body: serde_json::to_vec(&json!({ "error": { "message": "m", "reason": reason } })).unwrap(),
+            body: serde_json::to_vec(&json!({ "error": { "message": "m", "reason": reason } }))
+                .unwrap(),
         }
     }
 
@@ -903,7 +941,11 @@ mod tests {
         assert!(found.is_some());
         // the retry used the fresh token
         assert_eq!(
-            fake.requests()[2].headers.iter().find(|(k, _)| k == "authorization").map(|(_, v)| v.clone()),
+            fake.requests()[2]
+                .headers
+                .iter()
+                .find(|(k, _)| k == "authorization")
+                .map(|(_, v)| v.clone()),
             Some("Bearer FRESH".into())
         );
         // rotation is persisted: the file (not just memory) has it
@@ -968,7 +1010,10 @@ mod tests {
 
     #[test]
     fn needs_login_message_is_user_facing() {
-        assert_eq!(user_message(&SpotifyError::NeedsLogin), "Log in to Spotify in Pulpit settings");
+        assert_eq!(
+            user_message(&SpotifyError::NeedsLogin),
+            "Log in to Spotify in Pulpit settings"
+        );
     }
 
     // ---- design §7: library endpoint fallback ------------------------
@@ -993,7 +1038,10 @@ mod tests {
             ]
         );
         // the new-endpoint attempt carried the documented body
-        assert_eq!(body_of(&fake.requests()[0]).as_deref(), Some(r#"{"uris":["spotify:track:abc"]}"#));
+        assert_eq!(
+            body_of(&fake.requests()[0]).as_deref(),
+            Some(r#"{"uris":["spotify:track:abc"]}"#)
+        );
 
         // fresh handle: contains falls back new 404 -> legacy
         let (spotify, fake, _dir) = handle(logged_in(3600));
@@ -1030,14 +1078,18 @@ mod tests {
         fake.push(player_body(true));
         fake.push(ok(204));
         spotify.exec("spotify-playback", "vol_up", None).unwrap();
-        assert!(fake.last_url().ends_with("/me/player/volume?volume_percent=65"));
+        assert!(fake
+            .last_url()
+            .ends_with("/me/player/volume?volume_percent=65"));
 
         // mute remembers 55 and restores it
         let (spotify, fake, _dir) = handle(logged_in(3600));
         fake.push(player_body(true));
         fake.push(ok(204));
         spotify.exec("spotify-playback", "vol_mute", None).unwrap();
-        assert!(fake.last_url().ends_with("/me/player/volume?volume_percent=0"));
+        assert!(fake
+            .last_url()
+            .ends_with("/me/player/volume?volume_percent=0"));
         let mut muted = player_body(false);
         muted.body = serde_json::to_vec(&json!({
             "is_playing": false,
@@ -1047,13 +1099,17 @@ mod tests {
         fake.push(muted);
         fake.push(ok(204));
         spotify.exec("spotify-playback", "vol_mute", None).unwrap();
-        assert!(fake.last_url().ends_with("/me/player/volume?volume_percent=55"));
+        assert!(fake
+            .last_url()
+            .ends_with("/me/player/volume?volume_percent=55"));
 
         // slider: 0..1 -> percent
         let (spotify, fake, _dir) = handle(logged_in(3600));
         fake.push(ok(204));
         spotify.exec("spotify-volume", "", Some(0.55)).unwrap();
-        assert!(fake.last_url().ends_with("/me/player/volume?volume_percent=55"));
+        assert!(fake
+            .last_url()
+            .ends_with("/me/player/volume?volume_percent=55"));
     }
 
     #[test]
@@ -1062,7 +1118,9 @@ mod tests {
         fake.push(player_body(true)); // duration 200_000
         fake.push(ok(204));
         spotify.exec("spotify-seek", "", Some(0.5)).unwrap();
-        assert!(fake.last_url().ends_with("/me/player/seek?position_ms=100000"));
+        assert!(fake
+            .last_url()
+            .ends_with("/me/player/seek?position_ms=100000"));
     }
 
     #[test]
@@ -1091,9 +1149,14 @@ mod tests {
             ]}),
         );
         fake.push(ok(204));
-        spotify.exec("spotify-device", r#"{"device":"kitchen"}"#, None).unwrap();
+        spotify
+            .exec("spotify-device", r#"{"device":"kitchen"}"#, None)
+            .unwrap();
         assert!(fake.last_url().ends_with("/me/player"));
-        assert_eq!(body_of(&fake.requests()[1]).as_deref(), Some(r#"{"device_ids":["id-1"],"play":false}"#));
+        assert_eq!(
+            body_of(&fake.requests()[1]).as_deref(),
+            Some(r#"{"device_ids":["id-1"],"play":false}"#)
+        );
 
         let (spotify, fake, _dir) = handle(logged_in(3600));
         fake.push_json(
@@ -1101,8 +1164,13 @@ mod tests {
             json!({ "devices": [{ "id": "id-1", "name": "Kitchen" }, { "id": "id-2", "name": "PC" }] }),
         );
         fake.push(ok(204));
-        spotify.exec("spotify-device", r#"{"device":"id-2"}"#, None).unwrap();
-        assert_eq!(body_of(&fake.requests()[1]).as_deref(), Some(r#"{"device_ids":["id-2"],"play":false}"#));
+        spotify
+            .exec("spotify-device", r#"{"device":"id-2"}"#, None)
+            .unwrap();
+        assert_eq!(
+            body_of(&fake.requests()[1]).as_deref(),
+            Some(r#"{"device_ids":["id-2"],"play":false}"#)
+        );
     }
 
     #[test]
@@ -1138,9 +1206,15 @@ mod tests {
         fake.push(player_body(true)); // current track uri
         fake.push(ok(201));
         spotify
-            .exec("spotify-add", r#"{"playlist":"spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"}"#, None)
+            .exec(
+                "spotify-add",
+                r#"{"playlist":"spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"}"#,
+                None,
+            )
             .unwrap();
-        assert!(fake.last_url().ends_with("/playlists/37i9dQZF1DXcBWIGoYBM5M/tracks"));
+        assert!(fake
+            .last_url()
+            .ends_with("/playlists/37i9dQZF1DXcBWIGoYBM5M/tracks"));
         assert_eq!(
             body_of(&fake.requests()[1]).as_deref(),
             Some(r#"{"uris":["spotify:track:abc"]}"#)

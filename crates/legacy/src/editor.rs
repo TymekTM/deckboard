@@ -70,3 +70,127 @@ fn boards_payload(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    struct OneBoard;
+
+    fn board(id: i64, name: &str) -> pulpit_db::BoardRow {
+        pulpit_db::BoardRow {
+            id,
+            name: name.into(),
+            background: "#000000".into(),
+            layout: 6,
+            image: String::new(),
+            sort: 0,
+            kind: "buttons".into(),
+            args: None,
+            order: 0,
+            width: 2,
+            height: 2,
+            converted: 1,
+        }
+    }
+
+    impl Backend for OneBoard {
+        fn get_boards(&self) -> Vec<pulpit_db::BoardRow> {
+            vec![board(1, "Main"), board(2, "Empty")]
+        }
+        fn get_board(&self, id: i64) -> Option<pulpit_db::BoardRow> {
+            (id == 1).then(|| board(1, "Main"))
+        }
+        fn get_buttons_by_board(&self, board_id: i64) -> Vec<pulpit_db::ButtonRow> {
+            if board_id != 1 {
+                return Vec::new();
+            }
+            vec![pulpit_db::ButtonRow {
+                id: 3,
+                board_id: 1,
+                kind: "url".into(),
+                title: Some("Docs".into()),
+                x: Some(1),
+                y: Some(1),
+                w: 1,
+                h: 1,
+                mode: "button".into(),
+                ..pulpit_db::ButtonRow::default()
+            }]
+        }
+        fn get_button(&self, _id: i64) -> Option<pulpit_db::ButtonRow> {
+            None
+        }
+        fn exec(
+            &self,
+            _button: pulpit_db::ButtonRow,
+            _is_tap_start: bool,
+            _sink: &mut dyn pulpit_actions::EventSink,
+        ) {
+        }
+        fn slider(&self, _button: pulpit_db::ButtonRow, _value: f64) {}
+    }
+
+    #[tokio::test]
+    async fn refresh_of_an_unknown_board_sends_nothing() {
+        let hub = Arc::new(Hub::new());
+        let session = hub.create(Arc::new(OneBoard), false).await;
+        EditorBroadcaster::new(hub.clone(), Arc::new(OneBoard))
+            .refresh_board(99)
+            .await;
+        assert_eq!(session.poll(1).await, "");
+    }
+
+    #[tokio::test]
+    async fn refresh_reaches_polling_sessions_too() {
+        let hub = Arc::new(Hub::new());
+        let session = hub.create(Arc::new(OneBoard), true).await;
+        EditorBroadcaster::new(hub.clone(), Arc::new(OneBoard))
+            .refresh_board(1)
+            .await;
+        let packet = session.poll(1).await;
+        assert!(packet.starts_with(r#"42["refresh_board",{"#), "{packet}");
+    }
+
+    #[tokio::test]
+    async fn sync_boards_includes_boards_without_tiles() {
+        let hub = Arc::new(Hub::new());
+        let session = hub.create(Arc::new(OneBoard), false).await;
+        EditorBroadcaster::new(hub.clone(), Arc::new(OneBoard))
+            .sync_boards()
+            .await;
+        let packet = session.poll(1).await;
+        let body = packet
+            .strip_prefix(r#"42["get_shortcuts","#)
+            .and_then(|p| p.strip_suffix(']'))
+            .unwrap();
+        let payload: Value = serde_json::from_str(body).unwrap();
+        for room in ["basic", "pro"] {
+            let boards = payload[room].as_array().unwrap();
+            assert_eq!(boards.len(), 2, "{room}");
+            assert_eq!(boards[0]["name"], "Main");
+            assert_eq!(boards[1]["name"], "Empty");
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcasts_without_sessions_are_harmless() {
+        let hub = Arc::new(Hub::new());
+        let bc = EditorBroadcaster::new(hub, Arc::new(OneBoard));
+        bc.refresh_board(1).await;
+        bc.sync_boards().await;
+    }
+
+    #[test]
+    fn boards_payload_keeps_board_order_and_tolerates_missing_rows() {
+        let boards = vec![board(2, "B"), board(1, "A")];
+        let buttons: HashMap<i64, Vec<pulpit_db::ButtonRow>> = HashMap::new();
+        let mapper = Mapper::new();
+        let out = boards_payload(&boards, &buttons, &mapper, true);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["name"], "B");
+        assert_eq!(out[1]["name"], "A");
+        assert!(boards_payload(&[], &buttons, &mapper, false).is_empty());
+    }
+}

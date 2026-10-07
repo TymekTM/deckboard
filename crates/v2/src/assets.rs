@@ -137,14 +137,15 @@ impl AssetStore {
     /// and never deleted (returns false). Otherwise returns whether the
     /// entry existed; a file already gone counts as removed.
     pub fn remove(&self, hash: &str) -> bool {
-        if self.pinned.lock().expect("asset store poisoned").contains(hash) {
-            return false;
-        }
-        let ext = self
-            .exts
+        if self
+            .pinned
             .lock()
             .expect("asset store poisoned")
-            .remove(hash);
+            .contains(hash)
+        {
+            return false;
+        }
+        let ext = self.exts.lock().expect("asset store poisoned").remove(hash);
         let Some(ext) = ext else {
             return false;
         };

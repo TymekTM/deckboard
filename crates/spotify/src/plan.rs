@@ -54,13 +54,16 @@ pub fn plan(kind: &str, command: &str, slider_value: Option<f64>) -> Result<Plan
             .ok_or_else(|| SpotifyError::BadPayload("slider", "slider value missing".into()))
     };
     let field = |key: &str| -> Result<String> {
-        let parsed: serde_json::Value = serde_json::from_str(command)
-            .map_err(|e| SpotifyError::BadPayload("command", format!("command is not JSON: {e}")))?;
+        let parsed: serde_json::Value = serde_json::from_str(command).map_err(|e| {
+            SpotifyError::BadPayload("command", format!("command is not JSON: {e}"))
+        })?;
         let text = parsed
             .get(key)
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| SpotifyError::BadPayload("command", format!("missing \"{key}\" string")))?;
+            .ok_or_else(|| {
+                SpotifyError::BadPayload("command", format!("missing \"{key}\" string"))
+            })?;
         Ok(text.to_string())
     };
     let bare = command.trim().trim_matches('"');
@@ -86,7 +89,10 @@ pub fn plan(kind: &str, command: &str, slider_value: Option<f64>) -> Result<Plan
         "spotify-volume" => value(|v| Plan::SetVolume(v.clamp(0.0, 1.0))),
         "spotify-seek" => value(|v| Plan::Seek(v.clamp(0.0, 1.0))),
         "spotify-now-playing" => Ok(Plan::Noop),
-        other => Err(SpotifyError::BadPayload("kind", format!("not a spotify kind: {other}"))),
+        other => Err(SpotifyError::BadPayload(
+            "kind",
+            format!("not a spotify kind: {other}"),
+        )),
     }
 }
 
@@ -113,7 +119,12 @@ pub fn is_spotify_action(kind: &str) -> bool {
 /// `custom-value` marks live dual-state tiles (the pushed key drives
 /// both wires' toggle faces); `slider`/`status` pick the editor's tile
 /// shape for the non-button kinds.
-pub fn input_declarations() -> Vec<(&'static str, &'static str, &'static str, Option<&'static str>)> {
+pub fn input_declarations() -> Vec<(
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+)> {
     vec![
         ("spotify-playback", "play", "#1DB954", None),
         ("spotify-shuffle", "random", "#1DB954", Some("custom-value")),
@@ -134,14 +145,32 @@ mod tests {
 
     #[test]
     fn playback_commands_parse_per_bare_string() {
-        assert_eq!(plan("spotify-playback", "play", None).unwrap(), Plan::PlayPause);
+        assert_eq!(
+            plan("spotify-playback", "play", None).unwrap(),
+            Plan::PlayPause
+        );
         assert_eq!(plan("spotify-playback", "next", None).unwrap(), Plan::Next);
-        assert_eq!(plan("spotify-playback", "prev", None).unwrap(), Plan::Previous);
-        assert_eq!(plan("spotify-playback", "vol_up", None).unwrap(), Plan::VolumeUp);
-        assert_eq!(plan("spotify-playback", "vol_down", None).unwrap(), Plan::VolumeDown);
-        assert_eq!(plan("spotify-playback", "vol_mute", None).unwrap(), Plan::VolumeMute);
+        assert_eq!(
+            plan("spotify-playback", "prev", None).unwrap(),
+            Plan::Previous
+        );
+        assert_eq!(
+            plan("spotify-playback", "vol_up", None).unwrap(),
+            Plan::VolumeUp
+        );
+        assert_eq!(
+            plan("spotify-playback", "vol_down", None).unwrap(),
+            Plan::VolumeDown
+        );
+        assert_eq!(
+            plan("spotify-playback", "vol_mute", None).unwrap(),
+            Plan::VolumeMute
+        );
         // whitespace tolerated, a JSON-quoted select value too
-        assert_eq!(plan("spotify-playback", " \"play\" ", None).unwrap(), Plan::PlayPause);
+        assert_eq!(
+            plan("spotify-playback", " \"play\" ", None).unwrap(),
+            Plan::PlayPause
+        );
         assert!(plan("spotify-playback", "bogus", None).is_err());
         assert!(plan("spotify-playback", "", None).is_err());
     }
@@ -157,16 +186,31 @@ mod tests {
     #[test]
     fn json_kinds_parse_their_single_field() {
         assert_eq!(
-            plan("spotify-add", r#"{"playlist":"37i9dQZF1DXcBWIGoYBM5M"}"#, None).unwrap(),
+            plan(
+                "spotify-add",
+                r#"{"playlist":"37i9dQZF1DXcBWIGoYBM5M"}"#,
+                None
+            )
+            .unwrap(),
             Plan::AddToPlaylist("37i9dQZF1DXcBWIGoYBM5M".into())
         );
         // a playlist URI is equally valid
         assert_eq!(
-            plan("spotify-add", r#"{"playlist":"spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"}"#, None).unwrap(),
+            plan(
+                "spotify-add",
+                r#"{"playlist":"spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"}"#,
+                None
+            )
+            .unwrap(),
             Plan::AddToPlaylist("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M".into())
         );
         assert_eq!(
-            plan("spotify-tracks", r#"{"uri":"spotify:album:5z7tK5aXmnS7jlU6iv4Z7e"}"#, None).unwrap(),
+            plan(
+                "spotify-tracks",
+                r#"{"uri":"spotify:album:5z7tK5aXmnS7jlU6iv4Z7e"}"#,
+                None
+            )
+            .unwrap(),
             Plan::PlayUri("spotify:album:5z7tK5aXmnS7jlU6iv4Z7e".into())
         );
         assert_eq!(
@@ -181,11 +225,23 @@ mod tests {
 
     #[test]
     fn sliders_take_the_0_to_1_value() {
-        assert_eq!(plan("spotify-volume", "", Some(0.55)).unwrap(), Plan::SetVolume(0.55));
-        assert_eq!(plan("spotify-seek", "", Some(1.0)).unwrap(), Plan::Seek(1.0));
+        assert_eq!(
+            plan("spotify-volume", "", Some(0.55)).unwrap(),
+            Plan::SetVolume(0.55)
+        );
+        assert_eq!(
+            plan("spotify-seek", "", Some(1.0)).unwrap(),
+            Plan::Seek(1.0)
+        );
         // out-of-range values clamp instead of erroring
-        assert_eq!(plan("spotify-volume", "", Some(7.0)).unwrap(), Plan::SetVolume(1.0));
-        assert_eq!(plan("spotify-seek", "", Some(-1.0)).unwrap(), Plan::Seek(0.0));
+        assert_eq!(
+            plan("spotify-volume", "", Some(7.0)).unwrap(),
+            Plan::SetVolume(1.0)
+        );
+        assert_eq!(
+            plan("spotify-seek", "", Some(-1.0)).unwrap(),
+            Plan::Seek(0.0)
+        );
         // a slider tile pressed as a button has no value: that is a
         // payload error the dispatcher surfaces
         assert!(matches!(

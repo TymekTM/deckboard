@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use crate::config::SpotifyConfig;
 use crate::error::{Result, SpotifyError};
 use crate::http::{HttpRequest, Method, Transport};
-use crate::pkce::{authorize_url, new_state, new_verifier, s256_challenge, CALLBACK_TIMEOUT, REDIRECT_URI};
+use crate::pkce::{
+    authorize_url, new_state, new_verifier, s256_challenge, CALLBACK_TIMEOUT, REDIRECT_URI,
+};
 
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const ME_URL: &str = "https://api.spotify.com/v1/me";
@@ -47,24 +49,37 @@ fn token_request(transport: &dyn Transport, body: &str) -> Result<Tokens> {
     let resp = transport
         .send(&req)
         .map_err(|_| SpotifyError::Network("token request"))?;
-    let parsed = resp.json().ok_or_else(|| SpotifyError::Login("token endpoint returned no JSON".into()))?;
+    let parsed = resp
+        .json()
+        .ok_or_else(|| SpotifyError::Login("token endpoint returned no JSON".into()))?;
     if resp.status == 400 {
         // invalid_grant / invalid_client: Spotify itself rejected it
-        let error = parsed.pointer("/error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let error = parsed
+            .pointer("/error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         if error == "invalid_grant" {
             return Err(SpotifyError::NeedsLogin);
         }
-        return Err(SpotifyError::Login(format!("token endpoint rejected the grant: {error}")));
+        return Err(SpotifyError::Login(format!(
+            "token endpoint rejected the grant: {error}"
+        )));
     }
     if !(200..300).contains(&resp.status) {
-        return Err(SpotifyError::Login(format!("token endpoint answered HTTP {}", resp.status)));
+        return Err(SpotifyError::Login(format!(
+            "token endpoint answered HTTP {}",
+            resp.status
+        )));
     }
     let access_token = parsed
         .pointer("/access_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| SpotifyError::Login("token response has no access_token".into()))?
         .to_string();
-    let expires_in = parsed.pointer("/expires_in").and_then(|v| v.as_u64()).unwrap_or(3600);
+    let expires_in = parsed
+        .pointer("/expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3600);
     let refresh_token = parsed
         .pointer("/refresh_token")
         .and_then(|v| v.as_str())
@@ -77,7 +92,12 @@ fn token_request(transport: &dyn Transport, body: &str) -> Result<Tokens> {
 }
 
 /// Exchange the authorization code (PKCE verifier included, no secret).
-pub fn exchange_code(transport: &dyn Transport, client_id: &str, code: &str, verifier: &str) -> Result<Tokens> {
+pub fn exchange_code(
+    transport: &dyn Transport,
+    client_id: &str,
+    code: &str,
+    verifier: &str,
+) -> Result<Tokens> {
     token_request(
         transport,
         &form(&[
@@ -93,7 +113,11 @@ pub fn exchange_code(transport: &dyn Transport, client_id: &str, code: &str, ver
 /// Silent refresh. A rotating response carries a new refresh token -
 /// the caller MUST store it (Spotify reportedly invalidates the old one).
 /// `invalid_grant` maps to [`SpotifyError::NeedsLogin`] and is never retried.
-pub fn refresh_tokens(transport: &dyn Transport, client_id: &str, refresh_token: &str) -> Result<Tokens> {
+pub fn refresh_tokens(
+    transport: &dyn Transport,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<Tokens> {
     token_request(
         transport,
         &form(&[
@@ -106,7 +130,10 @@ pub fn refresh_tokens(transport: &dyn Transport, client_id: &str, refresh_token:
 
 /// `/v1/me`: display name + product, for the settings status line and
 /// the Free-account Premium warning.
-pub fn fetch_me(transport: &dyn Transport, access_token: &str) -> Result<(Option<String>, Option<String>)> {
+pub fn fetch_me(
+    transport: &dyn Transport,
+    access_token: &str,
+) -> Result<(Option<String>, Option<String>)> {
     let req = HttpRequest {
         method: Method::Get,
         url: ME_URL.into(),
@@ -120,14 +147,20 @@ pub fn fetch_me(transport: &dyn Transport, access_token: &str) -> Result<(Option
         return Err(SpotifyError::NeedsLogin);
     }
     if !(200..300).contains(&resp.status) {
-        return Err(SpotifyError::Api(format!("/v1/me answered HTTP {}", resp.status)));
+        return Err(SpotifyError::Api(format!(
+            "/v1/me answered HTTP {}",
+            resp.status
+        )));
     }
     let parsed = resp.json().unwrap_or_default();
     let name = parsed
         .pointer("/display_name")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let product = parsed.pointer("/product").and_then(|v| v.as_str()).map(str::to_string);
+    let product = parsed
+        .pointer("/product")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     Ok((name, product))
 }
 
@@ -267,7 +300,11 @@ fn write_page(stream: &mut TcpStream, page: &str) {
 /// the expected `state`. Probes and mismatched states get a short error
 /// page and the listener keeps waiting (a hostile probe must not be able
 /// to consume the login). Gives up after `timeout`.
-pub fn wait_callback(listener: TcpListener, expected_state: &str, timeout: Duration) -> Result<String> {
+pub fn wait_callback(
+    listener: TcpListener,
+    expected_state: &str,
+    timeout: Duration,
+) -> Result<String> {
     let deadline = Instant::now() + timeout;
     listener
         .set_nonblocking(false)
@@ -275,7 +312,9 @@ pub fn wait_callback(listener: TcpListener, expected_state: &str, timeout: Durat
     loop {
         let now = Instant::now();
         if now >= deadline {
-            return Err(SpotifyError::Login("login timed out waiting for the browser redirect".into()));
+            return Err(SpotifyError::Login(
+                "login timed out waiting for the browser redirect".into(),
+            ));
         }
         // poll accept so the deadline is noticed even without traffic
         listener
@@ -308,7 +347,10 @@ pub fn wait_callback(listener: TcpListener, expected_state: &str, timeout: Durat
             Some(Callback::Code(code)) if params_ok() => {
                 write_page(
                     &mut stream,
-                    &callback_page_body("Pulpit \u{2014} Spotify", "Login complete \u{2014} you can close this tab."),
+                    &callback_page_body(
+                        "Pulpit \u{2014} Spotify",
+                        "Login complete \u{2014} you can close this tab.",
+                    ),
                 );
                 return Ok(code);
             }
@@ -323,7 +365,10 @@ pub fn wait_callback(listener: TcpListener, expected_state: &str, timeout: Durat
                 // wrong path, wrong state, or a probe: answer and keep waiting
                 write_page(
                     &mut stream,
-                    &callback_page_body("Pulpit \u{2014} Spotify", "Unexpected callback \u{2014} waiting for the login redirect."),
+                    &callback_page_body(
+                        "Pulpit \u{2014} Spotify",
+                        "Unexpected callback \u{2014} waiting for the login redirect.",
+                    ),
                 );
             }
         }
@@ -393,7 +438,8 @@ mod tests {
     use crate::http::HttpResponse;
 
     fn token_ok(refresh: Option<&str>) -> HttpResponse {
-        let mut body = r#"{"access_token":"NEW-ACCESS","token_type":"Bearer","expires_in":3600}"#.to_string();
+        let mut body =
+            r#"{"access_token":"NEW-ACCESS","token_type":"Bearer","expires_in":3600}"#.to_string();
         if let Some(r) = refresh {
             body = format!(
                 r#"{{"access_token":"NEW-ACCESS","token_type":"Bearer","expires_in":3600,"refresh_token":"{r}"}}"#
@@ -420,7 +466,10 @@ mod tests {
         assert!(body.contains("grant_type=authorization_code"));
         assert!(body.contains("code=the-code"));
         assert!(body.contains("code_verifier=the-verifier"));
-        assert!(body.contains(&format!("redirect_uri={}", crate::pkce::urlencode(REDIRECT_URI))));
+        assert!(body.contains(&format!(
+            "redirect_uri={}",
+            crate::pkce::urlencode(REDIRECT_URI)
+        )));
     }
 
     #[test]
@@ -464,7 +513,10 @@ mod tests {
             Some(Callback::Denied)
         );
         assert_eq!(classify_callback("GET /favicon.ico HTTP/1.1"), None);
-        assert_eq!(classify_callback("GET /spotify/callback?code=&state=st HTTP/1.1"), None);
+        assert_eq!(
+            classify_callback("GET /spotify/callback?code=&state=st HTTP/1.1"),
+            None
+        );
     }
 
     #[test]
@@ -482,7 +534,9 @@ mod tests {
     fn callback_listener_accepts_matching_state_and_rejects_probes() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
-        let waiter = std::thread::spawn(move || wait_callback(listener, "expected", Duration::from_secs(10)));
+        let waiter = std::thread::spawn(move || {
+            wait_callback(listener, "expected", Duration::from_secs(10))
+        });
 
         // a probe with the wrong state is answered but does not finish the login
         let mut probe = TcpStream::connect(addr).unwrap();
@@ -496,7 +550,9 @@ mod tests {
         // the real redirect
         let mut browser = TcpStream::connect(addr).unwrap();
         browser
-            .write_all(b"GET /spotify/callback?code=AQCreal&state=expected HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(
+                b"GET /spotify/callback?code=AQCreal&state=expected HTTP/1.1\r\nHost: x\r\n\r\n",
+            )
             .unwrap();
         let mut page = String::new();
         browser.read_to_string(&mut page).unwrap();
@@ -509,7 +565,9 @@ mod tests {
     fn declined_callback_fails_the_login() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
-        let waiter = std::thread::spawn(move || wait_callback(listener, "expected", Duration::from_secs(10)));
+        let waiter = std::thread::spawn(move || {
+            wait_callback(listener, "expected", Duration::from_secs(10))
+        });
         let mut browser = TcpStream::connect(addr).unwrap();
         browser
             .write_all(b"GET /spotify/callback?error=access_denied&state=expected HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -517,6 +575,9 @@ mod tests {
         let mut page = String::new();
         browser.read_to_string(&mut page).unwrap();
         assert!(page.contains("declined"));
-        assert!(matches!(waiter.join().unwrap(), Err(SpotifyError::Login(_))));
+        assert!(matches!(
+            waiter.join().unwrap(),
+            Err(SpotifyError::Login(_))
+        ));
     }
 }

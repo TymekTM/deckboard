@@ -89,8 +89,7 @@ impl PackageSource {
             });
         }
         let signature = extraction_signature(path);
-        if let Some(root) = cache_root.and_then(|root| signature.map(|sig| (root, sig))) {
-            let (root, sig) = root;
+        if let Some((root, sig)) = cache_root.zip(signature) {
             if let Some(dir) = cached_extraction(root, &package, sig) {
                 tracing::debug!(package = %package, dir = %dir.display(), "asar extraction reused from cache");
                 return Ok(PackageSource {
@@ -140,7 +139,6 @@ impl PackageSource {
     pub fn into_root(self) -> (PathBuf, SourceKeep) {
         (self.root, self.keep)
     }
-
 }
 
 /// Temp extraction prefix for the uncached fallback; the directory itself
@@ -171,7 +169,9 @@ fn extraction_signature(path: &Path) -> Option<u64> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_nanos() as u64;
-    Some(splitmix(meta.len().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ mtime))
+    Some(splitmix(
+        meta.len().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ mtime,
+    ))
 }
 
 /// splitmix64 finalizer: avalanche the mixed inputs over the whole u64.
@@ -242,8 +242,9 @@ fn extract_into_cache(
             // lost a race with a concurrent extractor, or leftovers: if
             // the winner's entry validates, reuse it
             let _ = fs::remove_dir_all(&staging_path);
-            cached_extraction(root, package, sig)
-                .ok_or_else(|| SourceError::Io(std::io::Error::other("cache promotion lost the race")))
+            cached_extraction(root, package, sig).ok_or_else(|| {
+                SourceError::Io(std::io::Error::other("cache promotion lost the race"))
+            })
         }
     }
 }
@@ -333,8 +334,7 @@ mod tests {
 
     fn distinct_mtime(path: &std::path::Path) {
         // bump mtime by a second so even identical sizes re-signature
-        let t = fs::metadata(path).unwrap().modified().unwrap()
-            + std::time::Duration::from_secs(1);
+        let t = fs::metadata(path).unwrap().modified().unwrap() + std::time::Duration::from_secs(1);
         let f = fs::File::options().write(true).open(path).unwrap();
         let _ = f.set_modified(t);
     }
@@ -464,14 +464,13 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
         std::fs::write(dir.path().join("pkg/index.js"), "x").unwrap();
 
-        let (root, _keep) =
-            PackageSource::open_with_cache_root(
-                dir.path().join("pkg").as_path(),
-                "pkg".to_string(),
-                None,
-            )
-            .unwrap()
-            .into_root();
+        let (root, _keep) = PackageSource::open_with_cache_root(
+            dir.path().join("pkg").as_path(),
+            "pkg".to_string(),
+            None,
+        )
+        .unwrap()
+        .into_root();
         assert_eq!(root, dir.path().join("pkg"));
     }
 }
