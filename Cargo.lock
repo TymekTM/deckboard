@@ -3695,6 +3695,7 @@ dependencies = [
  "pulpit-ext",
  "pulpit-host",
  "pulpit-legacy",
+ "pulpit-os",
  "pulpit-proto",
  "pulpit-spotify",
  "pulpit-sysinfo",
@@ -3750,18 +3751,22 @@ dependencies = [
 name = "pulpit-host"
 version = "1.4.0"
 dependencies = [
+ "base64 0.23.1",
  "dirs 5.0.1",
+ "hex",
  "pulpit-actions",
  "pulpit-aidev",
  "pulpit-db",
  "pulpit-discord",
  "pulpit-ext",
  "pulpit-legacy",
+ "pulpit-os",
  "pulpit-spotify",
  "pulpit-sysinfo",
  "pulpit-v2",
  "pulpit-vm",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
@@ -3788,10 +3793,15 @@ dependencies = [
 name = "pulpit-os"
 version = "1.4.0"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
  "image",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tracing",
  "windows 0.58.0",
 ]
 
@@ -3818,6 +3828,7 @@ dependencies = [
  "pulpit-ext",
  "pulpit-host",
  "pulpit-legacy",
+ "pulpit-os",
  "pulpit-proto",
  "pulpit-spotify",
  "pulpit-sysinfo",
