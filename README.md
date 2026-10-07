@@ -60,6 +60,12 @@ extensions load in a native runtime.
   clients extrapolate the ticking locally (plus a 1 Hz text label for the
   stock client while something runs). Timer finish can play a sound on the
   PC or switch the board, and the tile flashes on every surface.
+- **Multimedia (system)**: a global "now playing" source over Windows
+  Global System Media Transport Controls - cover art, title/artist, a live
+  progress bar and play/pause, next/previous/stop transport tiles for ANY
+  player the system reports (browser YouTube, Tidal, VLC, foobar2000),
+  not only Spotify. Tiles can target a specific app by name; the original
+  virtual-media-key "Multimedia" kind is unchanged.
 
 **Pairing and clients**
 

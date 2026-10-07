@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { open, ask } from "@tauri-apps/plugin-dialog";
 import { CATALOG, parsePlanWindows, setPlanWindows } from "../catalog";
 import { api, vmDevicesState, refreshVmDevices } from "../api";
@@ -70,6 +70,47 @@ function setPlanWindow(key, event) {
     ...planWindows.value,
     [key]: event.target.checked,
   });
+}
+
+// SMTC media tiles: the optional target app ("Aplikacja") lives in the
+// options column as {"app": "<name substring>"} - the now-playing status
+// tile keys its live payload by `command || type`, so the command must
+// stay empty. The dropdown lists the live system playback sessions; a
+// failed fetch leaves the picker empty (the current session stays the
+// default), and clearing it back selects exactly that.
+const isMediaTile = computed(() =>
+  ["media-now-playing", "media-control", "media-seek"].includes(form.type)
+);
+const mediaApps = ref([]);
+const mediaApp = computed(() => {
+  try {
+    return JSON.parse(form.options || "{}")?.app || "";
+  } catch {
+    return "";
+  }
+});
+watch(
+  isMediaTile,
+  (yes) => {
+    if (yes && !mediaApps.value.length) {
+      api
+        .mediaSessions()
+        .then((list) => (mediaApps.value = Array.isArray(list) ? list : []))
+        .catch(() => {});
+    }
+  },
+  { immediate: true }
+);
+function setMediaApp(name) {
+  let obj = {};
+  try {
+    obj = JSON.parse(form.options || "{}") || {};
+  } catch {
+    obj = {};
+  }
+  if (name) obj.app = name;
+  else delete obj.app;
+  form.options = Object.keys(obj).length ? JSON.stringify(obj) : "";
 }
 
 // ---- action catalog (static groups + live extension inputs) ----------------
@@ -955,6 +996,21 @@ function colorOr(val, fallback) {
             Command
             <input v-model="form.command" placeholder="command" @keydown.enter.prevent />
           </label>
+
+          <template v-if="isMediaTile">
+            <div class="field sel-field">
+              <span class="sel-label">Aplikacja (opcjonalnie)</span>
+              <SelectField
+                :model-value="mediaApp"
+                :options="[
+                  { value: '', label: '- bieżąca sesja -' },
+                  ...mediaApps.map((a) => ({ value: a, label: a })),
+                ]"
+                label="Aplikacja"
+                @update:model-value="setMediaApp"
+              />
+            </div>
+          </template>
 
           <template v-if="isPlanTile">
             <div class="field">

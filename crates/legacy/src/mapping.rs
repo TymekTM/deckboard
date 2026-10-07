@@ -9,12 +9,15 @@ use serde_json::{json, Map, Value};
 use crate::props::{Props, StyleResolver, FALLBACK_COLOR};
 
 /// Types whose raw command string is sent to the client untouched.
+/// `media-control` is a select-style kind exactly like `vol` (the raw
+/// transport action is the whole command).
 const RAW_COMMAND_TYPES: &[&str] = &[
     "board",
     "obs-control",
     "slobs-control",
     "xsplit-control",
     "vol",
+    "media-control",
 ];
 
 /// Defensive ceiling for board dimensions on the wire
@@ -312,9 +315,22 @@ fn spotify_listener(kind: &str, command: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// System-media (SMTC) tiles follow the same rule: the seek slider reads
+/// the pushed `media-progress` fraction. The display and control kinds
+/// watch nothing (the payload rides the status lane under the kind).
+fn media_listener(kind: &str) -> Option<&'static str> {
+    match kind {
+        "media-seek" => Some("media-progress"),
+        _ => None,
+    }
+}
+
 /// The `extra` field: which state key the client watches for toggles/graphs.
 fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props) -> String {
     if let Some(key) = spotify_listener(kind, command) {
+        return key.to_string();
+    }
+    if let Some(key) = media_listener(kind) {
         return key.to_string();
     }
     let raw = command.unwrap_or_default();
@@ -663,6 +679,30 @@ mod tests {
         np.mode = "status".into();
         let s = m.shortcut_payload(&np);
         assert!(s.get("app").is_none());
+        assert_eq!(s["extra"], "");
+    }
+
+    #[test]
+    fn media_tiles_follow_the_spotify_shape() {
+        let m = Mapper::new();
+        // the seek slider reads the pushed progress fraction
+        let mut seek = button("media-seek", None, 0, 0, 1, 1);
+        seek.mode = "slider".into();
+        let s = m.shortcut_payload(&seek);
+        assert_eq!(s["extra"], "media-progress");
+        // transport control: plain button, no state plumbing
+        let s = m.shortcut_payload(&button("media-control", Some("play-pause"), 0, 0, 1, 1));
+        assert_eq!(s["command"], "play-pause");
+        assert!(s.get("app").is_none());
+        assert_eq!(s["extra"], "");
+        // now-playing: status display tile, payload rides the kind
+        let mut np = button("media-now-playing", None, 0, 0, 2, 2);
+        np.mode = "status".into();
+        let s = m.shortcut_payload(&np);
+        assert!(s.get("app").is_none());
+        assert_eq!(s["extra"], "");
+        // the original virtual-media-key kind is untouched
+        let s = m.shortcut_payload(&button("vol", Some("play"), 0, 0, 1, 1));
         assert_eq!(s["extra"], "");
     }
 

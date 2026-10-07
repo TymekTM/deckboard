@@ -256,6 +256,18 @@ async fn main() -> anyhow::Result<()> {
             ));
         }
     }
+    // System media (SMTC): always on where the OS supports it - no
+    // config file gates it. The poller idles when no client watches, and
+    // on non-Windows the receiver closes immediately (no-op pump).
+    {
+        let consumers =
+            pulpit_host::consumer_reader(state.hub.clone(), Some(v2.hub.clone()), None);
+        tokio::spawn(pulpit_host::media::forward_media(
+            feed.clone(),
+            pulpit_os::media::spawn_push(consumers),
+            Some(v2.assets.clone()),
+        ));
+    }
     tokio::spawn(pulpit_host::activity_loop(
         ext_manager.clone(),
         state.hub.clone(),

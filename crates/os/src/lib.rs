@@ -13,6 +13,7 @@
 
 pub mod capture;
 pub mod clipboard;
+pub mod media;
 pub mod play;
 pub use play::play_audio;
 

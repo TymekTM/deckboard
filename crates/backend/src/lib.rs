@@ -511,6 +511,7 @@ impl Backend for SqlBackend {
             || self.exec_voicemeeter(&cmd, Some(value))
             || self.exec_spotify(&cmd, Some(value))
             || self.exec_speaker_volume(&cmd, value)
+            || self.exec_media(&cmd, Some(value))
         {
             return;
         }
@@ -523,10 +524,10 @@ impl Backend for SqlBackend {
 impl SqlBackend {
     /// The native/extension dispatch chain, shared by top-level tile
     /// presses and multiaction steps: run-command, extension, sysinfo,
-    /// aidev, callurl, voicemeeter, discord, spotify, speaker, play.
-    /// Returns true when one of them claimed the command (the builtin
-    /// dispatcher is skipped, mirroring the original `runCommand`
-    /// default case).
+    /// aidev, callurl, voicemeeter, discord, spotify, speaker, play,
+    /// system media. Returns true when one of them claimed the command
+    /// (the builtin dispatcher is skipped, mirroring the original
+    /// `runCommand` default case).
     fn exec_native(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
         self.exec_runcommand(cmd)
             || self.exec_extension(cmd, None)
@@ -540,6 +541,7 @@ impl SqlBackend {
             || self.exec_speaker(cmd, sink)
             || self.exec_play(cmd)
             || self.exec_tool(cmd)
+            || self.exec_media(cmd, None)
     }
 
     fn exec_tool(&self, cmd: &pulpit_actions::Command) -> bool {
@@ -963,6 +965,24 @@ impl SqlBackend {
         Ok(fresh)
     }
 
+    /// Run one system-media (SMTC) tile action against the active or
+    /// options-targeted session (`crates/os` media). The display tile's
+    /// tap is the play/pause toggle, the control tile's select value is
+    /// the raw transport action, the seek slider passes its 0..1 value.
+    /// Failures are logged (fire-and-forget like the Voicemeeter bridge).
+    /// Returns true when the kind belongs to this integration.
+    fn exec_media(&self, cmd: &pulpit_actions::Command, slider_value: Option<f64>) -> bool {
+        let Some((action, target_app)) =
+            media_request(&cmd.kind, cmd.command.as_deref(), cmd.options.as_deref())
+        else {
+            return false;
+        };
+        if let Err(e) = pulpit_os::media::control(target_app.as_deref(), &action, slider_value) {
+            tracing::warn!(kind = %cmd.kind, action = %action, error = %e, "media control failed");
+        }
+        true
+    }
+
     /// Run one Spotify tile action through the native handle
     /// (`crates/spotify`). Slider kinds arrive here a second time from
     /// [`Backend::slider`] with their 0..1 value. Failures surface as
@@ -1042,6 +1062,48 @@ impl SqlBackend {
 /// anyway blocks the action thread for its whole timeout for nothing.
 fn refresh_failure_needs_popup(err: &pulpit_discord::DiscordError) -> bool {
     !matches!(err, pulpit_discord::DiscordError::Network(_))
+}
+
+/// One system-media command parsed: the transport action plus the
+/// optional target app. Pure so the grammar is unit-testable without
+/// touching WinRT. Grammar:
+///
+/// - `media-now-playing`: tap toggles play/pause (no command),
+/// - `media-control`: the select's raw value (`play-pause` / `next` /
+///   `previous` / `stop`; an empty command defaults to `play-pause`),
+/// - `media-seek`: the slider's 0..1 value rides `slider_value`,
+/// - the optional "Aplikacja" target lives in the options column as
+///   `{"app": "<name substring>"}` on every kind.
+fn media_request(
+    kind: &str,
+    command: Option<&str>,
+    options: Option<&str>,
+) -> Option<(String, Option<String>)> {
+    if !pulpit_os::media::is_media_action(kind) {
+        return None;
+    }
+    let target_app = options
+        .and_then(|opts| serde_json::from_str::<serde_json::Value>(opts).ok())
+        .and_then(|v| {
+            v.get("app")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    let action = match kind {
+        "media-now-playing" => "play-pause".to_string(),
+        "media-seek" => "seek".to_string(),
+        _ => {
+            let raw = command.unwrap_or_default().trim().trim_matches('"');
+            if raw.is_empty() {
+                "play-pause".to_string()
+            } else {
+                raw.to_string()
+            }
+        }
+    };
+    Some((action, target_app))
 }
 
 /// Shell runner for `run-command`, byte-for-byte the same invocation the
@@ -1456,6 +1518,53 @@ mod tests {
         backend.exec(row, false, &mut RecSink::default());
         assert!(input.effects().is_empty());
         assert!(fake.0.last_url().ends_with("/me/player/next"));
+    }
+
+    #[test]
+    fn media_request_parses_the_smtc_grammar() {
+        // tap on the display tile toggles play/pause; the control tile's
+        // select value is the raw action; the slider kind seeks
+        assert_eq!(
+            media_request("media-now-playing", None, None),
+            Some(("play-pause".into(), None))
+        );
+        assert_eq!(
+            media_request("media-control", Some("next"), None),
+            Some(("next".into(), None))
+        );
+        // an emptied / quoted / JSON-quoted command defaults to play-pause
+        assert_eq!(
+            media_request("media-control", Some(""), None),
+            Some(("play-pause".into(), None))
+        );
+        assert_eq!(
+            media_request("media-control", Some("\"stop\""), None),
+            Some(("stop".into(), None))
+        );
+        assert_eq!(
+            media_request("media-seek", None, None),
+            Some(("seek".into(), None))
+        );
+
+        // the optional "Aplikacja" target rides the options column JSON
+        assert_eq!(
+            media_request("media-control", Some("play-pause"), Some(r#"{"app":"Spotify"}"#)),
+            Some(("play-pause".into(), Some("Spotify".into())))
+        );
+        // blank app strings mean "no target", not an empty pattern
+        assert_eq!(
+            media_request("media-now-playing", None, Some(r#"{"app":"  "}"#)),
+            Some(("play-pause".into(), None))
+        );
+        // non-JSON options (other tiles' dialects) parse as no target
+        assert_eq!(
+            media_request("media-seek", None, Some("windows:5h")),
+            Some(("seek".into(), None))
+        );
+
+        // foreign kinds stay unclaimed
+        assert_eq!(media_request("vol", Some("play"), None), None);
+        assert_eq!(media_request("media-future", None, None), None);
     }
 
     #[test]

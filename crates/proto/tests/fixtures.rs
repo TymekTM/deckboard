@@ -116,6 +116,25 @@ fn boards_sync() {
     let slider = &board.tiles[1];
     assert_eq!(slider.manifest.kind, WidgetKind::Slider);
     assert_eq!(slider.manifest.interactions, vec![Interaction::Slide]);
+
+    // system media tiles (SMTC): the now-playing display tile is a List
+    // over the pushed payload with the tap toggle, the seek slider reads
+    // the pushed progress fraction
+    let media = &board.tiles[3];
+    assert_eq!(media.id, 22);
+    assert_eq!(media.manifest.kind, WidgetKind::List);
+    assert_eq!(media.manifest.interactions, vec![Interaction::Tap]);
+    assert_eq!(
+        media.manifest.state.as_ref().unwrap().channel,
+        "ext.media-now-playing"
+    );
+    let seek = &board.tiles[4];
+    assert_eq!(seek.id, 23);
+    assert_eq!(seek.manifest.kind, WidgetKind::Slider);
+    assert_eq!(
+        seek.manifest.state.as_ref().unwrap().channel,
+        "ext.media-progress"
+    );
     // style parity fields (012 C5): border/icon/title colors travel as
     // optional pairs; state 2 falls back to state 1 per field client-side
     let style = button.manifest.style.as_ref().unwrap();

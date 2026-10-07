@@ -308,6 +308,12 @@ fn widget_kind_for(
             (WidgetKind::Button, interactions)
         }
     };
+    // The system now-playing display tile stays a List (it renders the
+    // pushed payload) but is tappable: the backend maps its tap to the
+    // play/pause toggle, like tapping the tile on the desktop.
+    if row.kind == "media-now-playing" && !interactions.contains(&Interaction::Tap) {
+        interactions.insert(0, Interaction::Tap);
+    }
     // M5 custom gestures (`{"gestures": [...]}` in the options JSON):
     // alternative triggers of the tile's action, on top of the kind's
     // defaults. Slider/knob tiles keep the drag surface for the value
@@ -948,6 +954,52 @@ mod tests {
             engine.catalog()["ext.ai-plan-limits"].shape,
             StateShape::Scalar
         );
+    }
+
+    #[test]
+    fn system_media_tiles_shape_like_the_spotify_ones() {
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+
+        // now-playing: a List over the pushed status payload, plus the
+        // tap interaction (tap = play/pause through the backend dispatch)
+        let tile = build_tile(
+            &row("media-now-playing", "status", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::List);
+        assert_eq!(tile.manifest.interactions, vec![Interaction::Tap]);
+        assert_eq!(
+            tile.manifest.state.unwrap().channel,
+            "ext.media-now-playing"
+        );
+        // the per-event gate agrees with the manifest (a tap the manifest
+        // declares must not be rejected server-side)
+        assert_eq!(allowed_interactions(&row("media-now-playing", "status", None)), vec![Interaction::Tap]);
+
+        // seek slider watches the pushed progress fraction
+        let tile = build_tile(
+            &row("media-seek", "slider", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::Slider);
+        assert_eq!(tile.manifest.interactions, vec![Interaction::Slide]);
+        assert_eq!(tile.manifest.state.unwrap().channel, "ext.media-progress");
+
+        // transport control: a plain tappable button, no state channel
+        let tile = build_tile(
+            &row("media-control", "button", Some("play-pause")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::Button);
+        assert_eq!(tile.manifest.interactions, vec![Interaction::Tap]);
+        assert!(tile.manifest.state.is_none());
     }
 
     #[test]
