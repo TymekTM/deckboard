@@ -354,4 +354,204 @@ mod tests {
         assert!(got.is_empty());
         assert!(started.elapsed() >= std::time::Duration::from_millis(40));
     }
+
+    /// Backend that records key releases from teardown paths.
+    #[derive(Default)]
+    struct Releases(std::sync::Mutex<Vec<(i64, bool)>>);
+    impl Backend for Releases {
+        fn get_boards(&self) -> Vec<pulpit_db::BoardRow> {
+            Vec::new()
+        }
+        fn get_board(&self, _board_id: i64) -> Option<pulpit_db::BoardRow> {
+            None
+        }
+        fn get_buttons_by_board(&self, _board_id: i64) -> Vec<pulpit_db::ButtonRow> {
+            Vec::new()
+        }
+        fn get_button(&self, _id: i64) -> Option<pulpit_db::ButtonRow> {
+            None
+        }
+        fn exec(
+            &self,
+            button: pulpit_db::ButtonRow,
+            is_tap_start: bool,
+            _sink: &mut dyn pulpit_actions::EventSink,
+        ) {
+            self.0.lock().unwrap().push((button.id, is_tap_start));
+        }
+        fn slider(&self, _button: pulpit_db::ButtonRow, _value: f64) {}
+    }
+
+    fn key(id: i64) -> pulpit_db::ButtonRow {
+        pulpit_db::ButtonRow {
+            id,
+            kind: "key".into(),
+            ..pulpit_db::ButtonRow::default()
+        }
+    }
+
+    #[test]
+    fn event_packet_shapes() {
+        assert_eq!(event_packet("x", None), r#"42["x"]"#);
+        assert_eq!(event_packet("x", Some("{}")), r#"42["x",{}]"#);
+        assert_eq!(event_packet("x", Some("[1,2]")), r#"42["x",[1,2]]"#);
+    }
+
+    #[test]
+    fn sids_are_twenty_hex_chars_and_unique() {
+        let a = new_sid();
+        let b = new_sid();
+        assert_eq!(a.len(), 20);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(a, b);
+    }
+
+    #[tokio::test]
+    async fn get_len_and_remove_track_sessions() {
+        let hub = Hub::new();
+        assert!(hub.is_empty().await);
+        assert_eq!(hub.try_len(), Some(0));
+        let a = hub.create(backend(), false).await;
+        let b = hub.create(backend(), true).await;
+        assert_eq!(hub.len().await, 2);
+        assert_eq!(hub.try_len(), Some(2));
+        assert!(Arc::ptr_eq(&hub.get(&a.sid).await.unwrap(), &a));
+        assert!(hub.get("missing").await.is_none());
+        hub.remove(&a.sid).await;
+        hub.remove(&a.sid).await; // second remove is a no-op
+        hub.remove("missing").await;
+        assert_eq!(hub.len().await, 1);
+        assert!(hub.get(&b.sid).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn broadcast_reaches_polling_and_ws_sessions() {
+        let hub = Hub::new();
+        let polling = hub.create(backend(), false).await;
+        let ws = hub.create(backend(), true).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        ws.upgrade_to_ws(tx).await;
+        hub.broadcast("change_board", Some(r#"{"boardId":3}"#)).await;
+        let expected = r#"42["change_board",{"boardId":3}]"#;
+        assert_eq!(polling.poll(10).await, expected);
+        match rx.recv().await {
+            Some(WsOut::Packet(p)) => assert_eq!(p, expected),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_joins_queued_packets_with_the_record_separator() {
+        let hub = Hub::new();
+        let s = hub.create(backend(), false).await;
+        s.send("40".into()).await;
+        s.send("3".into()).await;
+        s.send(r#"42["a"]"#.into()).await;
+        assert_eq!(s.poll(10).await, "40\u{1e}3\u{1e}42[\"a\"]");
+        // drained: the next poll is empty
+        assert_eq!(s.poll(1).await, "");
+    }
+
+    #[tokio::test]
+    async fn poll_wakes_as_soon_as_a_packet_arrives() {
+        let hub = Hub::new();
+        let s = hub.create(backend(), false).await;
+        let sender = s.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            sender.send("3".into()).await;
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(s.poll(5_000).await, "3");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn poll_on_a_ws_session_returns_immediately() {
+        let hub = Hub::new();
+        let s = hub.create(backend(), false).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        s.upgrade_to_ws(tx).await;
+        let started = std::time::Instant::now();
+        assert_eq!(s.poll(5_000).await, "");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn upgrade_flushes_the_queue_in_order() {
+        let hub = Hub::new();
+        let s = hub.create(backend(), false).await;
+        s.send("a".into()).await;
+        s.send("b".into()).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        s.upgrade_to_ws(tx).await;
+        for want in ["a", "b"] {
+            match rx.recv().await {
+                Some(WsOut::Packet(p)) => assert_eq!(p, want),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn send_to_a_closed_ws_channel_does_not_panic() {
+        let hub = Hub::new();
+        let s = hub.create(backend(), false).await;
+        let (tx, rx) = mpsc::unbounded_channel();
+        s.upgrade_to_ws(tx).await;
+        drop(rx);
+        s.send("x".into()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_releases_every_held_key_once() {
+        let rec = Arc::new(Releases::default());
+        let hub = Hub::new();
+        let s = hub.create(rec.clone(), false).await;
+        s.hold_key(key(1)).await;
+        s.hold_key(key(2)).await;
+        s.hold_key(key(1)).await; // re-press replaces, never doubles
+        s.key_released(2).await;
+        hub.remove(&s.sid).await;
+        assert_eq!(*rec.0.lock().unwrap(), vec![(1, false)]);
+        // releasing again (already drained) runs nothing
+        s.release_held_keys().await;
+        assert_eq!(rec.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reap_drops_only_idle_sessions_and_releases_their_keys() {
+        let rec = Arc::new(Releases::default());
+        let hub = Hub::new();
+        let stale = hub.create(rec.clone(), false).await;
+        let fresh = hub.create(rec.clone(), false).await;
+        stale.hold_key(key(5)).await;
+        *stale.last_seen.lock().await =
+            std::time::Instant::now() - std::time::Duration::from_secs(120);
+        assert_eq!(hub.reap(85).await, 1);
+        assert!(hub.get(&stale.sid).await.is_none());
+        assert!(hub.get(&fresh.sid).await.is_some());
+        assert_eq!(*rec.0.lock().unwrap(), vec![(5, false)]);
+        // nothing else is idle
+        assert_eq!(hub.reap(85).await, 0);
+    }
+
+    #[tokio::test]
+    async fn touch_resets_the_idle_clock() {
+        let hub = Hub::new();
+        let s = hub.create(backend(), false).await;
+        *s.last_seen.lock().await = std::time::Instant::now() - std::time::Duration::from_secs(50);
+        assert!(s.idle_secs().await >= 50);
+        s.touch().await;
+        assert_eq!(s.idle_secs().await, 0);
+    }
+
+    #[tokio::test]
+    async fn try_len_reports_none_while_the_map_is_locked() {
+        let hub = Hub::new();
+        let guard = hub.sessions.lock().await;
+        assert_eq!(hub.try_len(), None);
+        drop(guard);
+        assert_eq!(hub.try_len(), Some(0));
+    }
 }

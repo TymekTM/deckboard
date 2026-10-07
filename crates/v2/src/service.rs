@@ -448,3 +448,687 @@ impl V2State {
         .expect("boards build panicked")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use pulpit_db::{BoardRow, ButtonRow};
+    use tokio::sync::mpsc;
+
+    use crate::session::WsOut;
+
+    #[derive(Default)]
+    struct Mock {
+        boards: Mutex<Vec<BoardRow>>,
+        buttons: Mutex<Vec<ButtonRow>>,
+        board_reads: AtomicUsize,
+    }
+
+    impl Backend for Mock {
+        fn get_boards(&self) -> Vec<BoardRow> {
+            self.board_reads.fetch_add(1, Ordering::Relaxed);
+            self.boards.lock().unwrap().clone()
+        }
+        fn get_board(&self, id: i64) -> Option<BoardRow> {
+            self.boards
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|b| b.id == id)
+                .cloned()
+        }
+        fn get_buttons_by_board(&self, board_id: i64) -> Vec<ButtonRow> {
+            self.buttons
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|b| b.board_id == board_id)
+                .cloned()
+                .collect()
+        }
+        fn get_button(&self, id: i64) -> Option<ButtonRow> {
+            self.buttons
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|b| b.id == id)
+                .cloned()
+        }
+        fn exec(&self, _: ButtonRow, _: bool, _: &mut dyn pulpit_actions::EventSink) {}
+        fn slider(&self, _: ButtonRow, _: f64) {}
+    }
+
+    fn board(id: i64, width: i64, height: i64) -> BoardRow {
+        BoardRow {
+            id,
+            name: format!("Board {id}"),
+            background: "#112233".into(),
+            layout: 6,
+            image: String::new(),
+            sort: 0,
+            kind: "buttons".into(),
+            args: None,
+            order: id,
+            width,
+            height,
+            converted: 1,
+        }
+    }
+
+    fn tile(id: i64, board_id: i64, x: i64, y: i64, w: i64, h: i64) -> ButtonRow {
+        ButtonRow {
+            id,
+            board_id,
+            kind: "url".into(),
+            title: Some(format!("t{id}")),
+            command: Some("https://example.com".into()),
+            x: Some(x),
+            y: Some(y),
+            w,
+            h,
+            mode: "button".into(),
+            ..ButtonRow::default()
+        }
+    }
+
+    struct Fixture {
+        state: Arc<V2State>,
+        backend: Arc<Mock>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn fixture_with(pair_requests: crate::devices::PairRequests) -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Mock::default());
+        backend.boards.lock().unwrap().push(board(1, 4, 3));
+        backend
+            .buttons
+            .lock()
+            .unwrap()
+            .push(tile(10, 1, 0, 0, 1, 1));
+        let state = Arc::new(V2State {
+            hub: Arc::new(V2Hub::new()),
+            backend: backend.clone(),
+            devices: Arc::new(DeviceStore::load(dir.path().join("devices.json")).unwrap()),
+            pairing: Arc::new(Pairing::new()),
+            assets: Arc::new(AssetStore::open(dir.path().join("assets")).unwrap()),
+            engine: Arc::new(StateEngine::new(120)),
+            generation: Generation::starting_at(1),
+            boards_cache: Default::default(),
+            pair_requests,
+            config: V2Config::default(),
+        });
+        Fixture {
+            state,
+            backend,
+            _dir: dir,
+        }
+    }
+
+    fn fixture() -> Fixture {
+        fixture_with(Default::default())
+    }
+
+    fn lan() -> ConnectInfo<SocketAddr> {
+        ConnectInfo("192.168.1.20:50000".parse().unwrap())
+    }
+
+    fn loopback() -> ConnectInfo<SocketAddr> {
+        ConnectInfo("127.0.0.1:50000".parse().unwrap())
+    }
+
+    fn host(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, value.parse().unwrap());
+        h
+    }
+
+    fn browser() -> HeaderMap {
+        let mut h = host("192.168.1.5:8611");
+        h.insert(header::ORIGIN, "http://evil.example".parse().unwrap());
+        h
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn body_bytes(resp: Response) -> Vec<u8> {
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    fn token_query(token: Option<&str>) -> Query<WsQuery> {
+        Query(WsQuery {
+            token: token.map(str::to_string),
+            pair: None,
+        })
+    }
+
+    // -- defaults and helpers ----------------------------------------------
+
+    #[test]
+    fn config_defaults_match_the_protocol() {
+        let c = V2Config::default();
+        assert_eq!(c.desktop_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(c.min_client, "0.0.0");
+        assert_eq!(c.patch_interval, Duration::from_millis(100));
+        assert_eq!(c.ping_interval, Duration::from_secs(60));
+        assert_eq!(c.hello_timeout, Duration::from_secs(5));
+        assert_eq!(c.hold_cap, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn request_ids_are_32_lowercase_hex_chars() {
+        let a = hex_string_16();
+        assert_eq!(a.len(), 32);
+        assert!(a
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert_ne!(a, hex_string_16());
+    }
+
+    #[test]
+    fn minted_message_is_static_and_code_free() {
+        let msg = pair_minted_message();
+        assert!(msg.contains("suppressed"));
+        // the only digit in it is the TTL ("5 minutes")
+        assert_eq!(msg.chars().filter(char::is_ascii_digit).count(), 1);
+    }
+
+    // -- /v2/ws upgrade gate (no upgrade available in a unit test) ---------
+
+    #[tokio::test]
+    async fn ws_connect_rejects_browsers_before_auth() {
+        let f = fixture();
+        let resp = ws_connect(State(f.state), token_query(None), browser(), None).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn ws_connect_needs_a_known_token_or_a_pair_code() {
+        let f = fixture();
+        let resp = ws_connect(
+            State(f.state.clone()),
+            token_query(None),
+            host("10.0.0.2:8611"),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = ws_connect(
+            State(f.state),
+            token_query(Some("bogus")),
+            host("10.0.0.2:8611"),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ws_connect_with_valid_auth_but_no_upgrade_is_a_bad_request() {
+        let f = fixture();
+        let (_, token) = f.state.devices.create("Tab");
+        let resp = ws_connect(
+            State(f.state.clone()),
+            token_query(Some(&token)),
+            host("10.0.0.2:8611"),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // pair codes are checked on the socket, so any code passes the gate
+        let resp = ws_connect(
+            State(f.state),
+            Query(WsQuery {
+                token: None,
+                pair: Some("000000".into()),
+            }),
+            host("10.0.0.2:8611"),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -- POST /v2/pair -----------------------------------------------------
+
+    #[tokio::test]
+    async fn pair_create_is_loopback_only() {
+        let f = fixture();
+        let resp = pair_create(State(f.state), lan(), host("192.168.1.5:8611")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn pair_create_refuses_browser_pages_on_loopback() {
+        let f = fixture();
+        let mut h = host("127.0.0.1:8611");
+        h.insert(header::ORIGIN, "http://evil.example".parse().unwrap());
+        let resp = pair_create(State(f.state), loopback(), h).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn pair_create_mints_a_usable_code() {
+        let f = fixture();
+        let resp = pair_create(State(f.state.clone()), loopback(), host("127.0.0.1:8611")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["expires_in"], crate::devices::PAIR_CODE_TTL.as_secs());
+        let code = body["code"].as_str().unwrap();
+        assert!(f.state.pairing.peek(code).is_ok());
+    }
+
+    // -- /v2/pair-request --------------------------------------------------
+
+    fn pair_body(name: &str) -> Json<PairRequestBody> {
+        Json(PairRequestBody { name: name.into() })
+    }
+
+    async fn poll_status(state: &Arc<V2State>, id: &str) -> (StatusCode, serde_json::Value) {
+        let resp = pair_request_status(State(state.clone()), Path(id.to_string())).await;
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    async fn poll_until_decided(state: &Arc<V2State>, id: &str) -> serde_json::Value {
+        for _ in 0..400 {
+            let (status, body) = poll_status(state, id).await;
+            assert_eq!(status, StatusCode::OK);
+            if body["status"] != "pending" {
+                return body;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("pair request never decided");
+    }
+
+    #[tokio::test]
+    async fn pair_request_refuses_loopback_and_browsers_without_taking_the_slot() {
+        let f = fixture();
+        let resp = pair_request_create(
+            State(f.state.clone()),
+            loopback(),
+            host("127.0.0.1:8611"),
+            pair_body("Tab"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let resp =
+            pair_request_create(State(f.state.clone()), lan(), browser(), pair_body("Tab")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let resp = pair_request_create(
+            State(f.state),
+            lan(),
+            host("192.168.1.5:8611"),
+            pair_body("Tab"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pair_request_flow_with_an_approving_gate() {
+        let f = fixture();
+        let seen = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let seen_gate = seen.clone();
+        f.state.pairing.set_pair_request_gate(move |name, code| {
+            seen_gate
+                .lock()
+                .unwrap()
+                .push((name.to_string(), code.to_string()));
+            true
+        });
+        let resp = pair_request_create(
+            State(f.state.clone()),
+            lan(),
+            host("192.168.1.5:8611"),
+            pair_body("Kitchen\ntablet"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = body_json(resp).await;
+        let id = body["request_id"].as_str().unwrap().to_string();
+        let code = body["code"].as_str().unwrap().to_string();
+        assert_eq!(id.len(), 32);
+        assert_eq!(
+            body["expires_in_secs"],
+            crate::devices::PAIR_CODE_TTL.as_secs()
+        );
+
+        // a second request while the first is live conflicts
+        let resp = pair_request_create(
+            State(f.state.clone()),
+            lan(),
+            host("192.168.1.5:8611"),
+            pair_body("Other"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(resp).await["code"], "request-in-flight");
+
+        assert_eq!(poll_until_decided(&f.state, &id).await["status"], "approved");
+        // the gate saw a sanitized name and the code the tablet shows
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert!(!seen[0].0.contains('\n'), "{:?}", seen[0].0);
+        assert_eq!(seen[0].1, code);
+        // the approved code skips the second trust prompt
+        assert!(f.state.pairing.take_pre_approved(&code));
+        // the terminal answer freed the slot
+        let (status, body) = poll_status(&f.state, &id).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], "unknown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pair_request_rejected_by_the_operator() {
+        let f = fixture();
+        f.state.pairing.set_pair_request_gate(|_, _| false);
+        let resp = pair_request_create(
+            State(f.state.clone()),
+            lan(),
+            host("192.168.1.5:8611"),
+            pair_body("Tab"),
+        )
+        .await;
+        let body = body_json(resp).await;
+        let id = body["request_id"].as_str().unwrap().to_string();
+        let code = body["code"].as_str().unwrap().to_string();
+        assert_eq!(poll_until_decided(&f.state, &id).await["status"], "rejected");
+        assert!(!f.state.pairing.take_pre_approved(&code));
+        // the slot is free again
+        let resp = pair_request_create(
+            State(f.state),
+            lan(),
+            host("192.168.1.5:8611"),
+            pair_body("Tab"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn pair_request_status_reports_expiry_and_unknown_ids() {
+        let f = fixture_with(crate::devices::PairRequests::with_ttl(Duration::ZERO));
+        let (status, body) = poll_status(&f.state, "nope").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], "unknown");
+        f.state
+            .pair_requests
+            .begin("abc".into(), "123456".into(), "Tab".into())
+            .unwrap();
+        let (status, body) = poll_status(&f.state, "abc").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "expired");
+        assert!(f.state.pair_requests.get("abc").is_none());
+    }
+
+    #[tokio::test]
+    async fn pair_request_status_pending_keeps_the_slot() {
+        let f = fixture();
+        f.state
+            .pair_requests
+            .begin("abc".into(), "123456".into(), "Tab".into())
+            .unwrap();
+        assert_eq!(poll_status(&f.state, "abc").await.1["status"], "pending");
+        assert_eq!(poll_status(&f.state, "abc").await.1["status"], "pending");
+        assert!(f.state.pair_requests.get("abc").is_some());
+    }
+
+    // -- GET /assets/:hash -------------------------------------------------
+
+    #[tokio::test]
+    async fn assets_need_a_known_token() {
+        let f = fixture();
+        let hash = f.state.assets.import_bytes(b"png-bytes", "png").unwrap();
+        let resp = asset_get(
+            State(f.state.clone()),
+            Path(hash.clone()),
+            token_query(None),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = asset_get(
+            State(f.state),
+            Path(hash),
+            token_query(Some("bogus")),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn assets_404_for_malformed_or_unknown_hashes() {
+        let f = fixture();
+        let (_, token) = f.state.devices.create("Tab");
+        for hash in ["../devices.json".to_string(), "abc".into(), "f".repeat(64)] {
+            let resp = asset_get(
+                State(f.state.clone()),
+                Path(hash.clone()),
+                token_query(Some(&token)),
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{hash}");
+        }
+    }
+
+    async fn get_range(f: &Fixture, token: &str, hash: &str, range: Option<&str>) -> Response {
+        let mut headers = HeaderMap::new();
+        if let Some(range) = range {
+            headers.insert(header::RANGE, range.parse().unwrap());
+        }
+        asset_get(
+            State(f.state.clone()),
+            Path(hash.to_string()),
+            token_query(Some(token)),
+            headers,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn assets_serve_full_partial_and_unsatisfiable_bodies() {
+        let f = fixture();
+        let (_, token) = f.state.devices.create("Tab");
+        let hash = f.state.assets.import_bytes(b"0123456789", "png").unwrap();
+
+        let resp = get_range(&f, &token, &hash, None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(resp.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(
+            resp.headers()[header::CACHE_CONTROL],
+            "immutable, max-age=31536000"
+        );
+        assert!(resp.headers().get(header::CONTENT_RANGE).is_none());
+        assert_eq!(body_bytes(resp).await, b"0123456789");
+
+        let resp = get_range(&f, &token, &hash, Some("bytes=2-4")).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 2-4/10");
+        assert_eq!(body_bytes(resp).await, b"234");
+
+        let resp = get_range(&f, &token, &hash, Some("bytes=-3")).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 7-9/10");
+        assert_eq!(body_bytes(resp).await, b"789");
+
+        let resp = get_range(&f, &token, &hash, Some("bytes=50-")).await;
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes */10");
+    }
+
+    #[tokio::test]
+    async fn assets_removed_from_the_store_answer_404() {
+        let f = fixture();
+        let (_, token) = f.state.devices.create("Tab");
+        let hash = f.state.assets.import_bytes(b"x", "png").unwrap();
+        assert!(f.state.assets.remove(&hash));
+        let resp = get_range(&f, &token, &hash, None).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -- V2State write path ------------------------------------------------
+
+    fn attached(state: &V2State) -> (Arc<crate::hub::V2Session>, mpsc::Receiver<WsOut>) {
+        let (tx, rx) = mpsc::channel(16);
+        let session = state.hub.create(tx);
+        state.hub.attach(&session);
+        (session, rx)
+    }
+
+    fn next_frame(rx: &mut mpsc::Receiver<WsOut>) -> Frame {
+        match rx.try_recv() {
+            Ok(WsOut::Text(text)) => serde_json::from_str(&text).unwrap(),
+            Ok(_) => panic!("expected a text frame"),
+            Err(e) => panic!("no frame queued: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_delta_bumps_the_generation_and_broadcasts() {
+        let f = fixture();
+        let (_session, mut rx) = attached(&f.state);
+        assert_eq!(f.state.generation(), 1);
+        let op = pulpit_proto::BoardOp::TileRemove { board: 1, tile: 10 };
+        assert_eq!(f.state.publish_delta(vec![op.clone()]), 2);
+        assert_eq!(f.state.generation(), 2);
+        let frame = next_frame(&mut rx);
+        assert_eq!(frame.kind, pulpit_proto::TYPE_BOARDS_DELTA);
+        let delta: pulpit_proto::BoardsDelta =
+            serde_json::from_value(frame.payload.unwrap()).unwrap();
+        assert_eq!(delta.generation, 2);
+        assert_eq!(delta.ops, vec![op]);
+        assert_eq!(f.state.publish_delta(Vec::new()), 3);
+    }
+
+    #[test]
+    fn publish_delta_skips_sessions_that_never_attached() {
+        let f = fixture();
+        let (tx, mut rx) = mpsc::channel(4);
+        let _pending = f.state.hub.create(tx);
+        f.state.publish_delta(Vec::new());
+        assert!(rx.try_recv().is_err());
+    }
+
+    fn tile_of(op: pulpit_proto::BoardOp) -> (i64, pulpit_proto::Tile) {
+        match op {
+            pulpit_proto::BoardOp::TileSet { board, tile } => (board, *tile),
+            other => panic!("expected tile-set, got {other:?}"),
+        }
+    }
+
+    fn placement(x: u32, y: u32, w: u32, h: u32) -> pulpit_proto::Placement {
+        pulpit_proto::Placement { x, y, w, h }
+    }
+
+    #[test]
+    fn tile_set_op_builds_the_committed_row() {
+        let f = fixture();
+        let (board, tile) = tile_of(f.state.tile_set_op(1, 10).unwrap());
+        assert_eq!(board, 1);
+        assert_eq!(tile.id, 10);
+        assert_eq!(tile.placement, placement(0, 0, 1, 1));
+    }
+
+    #[test]
+    fn tile_set_op_is_none_for_a_deleted_row() {
+        let f = fixture();
+        assert!(f.state.tile_set_op(1, 999).is_none());
+    }
+
+    #[test]
+    fn tile_set_op_clamps_off_grid_rows_to_the_board() {
+        let f = fixture();
+        f.backend
+            .buttons
+            .lock()
+            .unwrap()
+            .push(tile(11, 1, 9, 9, 3, 2));
+        let (_, t) = tile_of(f.state.tile_set_op(1, 11).unwrap());
+        // 4x3 board: a 3x2 tile can start at most at (1,1)
+        assert_eq!(t.placement, placement(1, 1, 3, 2));
+    }
+
+    #[test]
+    fn tile_set_op_for_a_vanished_board_bounds_by_max_dim() {
+        let f = fixture();
+        f.backend
+            .buttons
+            .lock()
+            .unwrap()
+            .push(tile(12, 77, 100, 100, 50, 1));
+        let (board, t) = tile_of(f.state.tile_set_op(77, 12).unwrap());
+        assert_eq!(board, 77);
+        let max = MAX_BOARD_DIM as u32;
+        assert_eq!(t.placement, placement(0, max - 1, max, 1));
+    }
+
+    #[test]
+    fn board_set_op_carries_the_board_and_its_tiles() {
+        let f = fixture();
+        match f.state.board_set_op(1).unwrap() {
+            pulpit_proto::BoardOp::BoardSet { board } => {
+                assert_eq!(board.id, 1);
+                assert_eq!(board.name, "Board 1");
+                assert_eq!((board.width, board.height), (4, 3));
+                assert_eq!(board.tiles.len(), 1);
+                assert_eq!(board.tiles[0].id, 10);
+            }
+            other => panic!("expected board-set, got {other:?}"),
+        }
+        assert!(f.state.board_set_op(404).is_none());
+    }
+
+    // -- boards.sync snapshot cache ----------------------------------------
+
+    fn sync_of(frame: &Frame) -> BoardsSync {
+        assert_eq!(frame.kind, TYPE_BOARDS_SYNC);
+        serde_json::from_value(frame.payload.clone().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn snapshot_is_cached_per_generation() {
+        let f = fixture();
+        let (first, generation) = f.state.boards_snapshot().await;
+        assert_eq!(generation, 1);
+        let sync = sync_of(&first);
+        assert_eq!(sync.generation, 1);
+        assert_eq!(sync.boards.len(), 1);
+        let reads = f.backend.board_reads.load(Ordering::Relaxed);
+        let (second, _) = f.state.boards_snapshot().await;
+        assert!(Arc::ptr_eq(&first, &second));
+        // served from the cache: no storage reads at all
+        assert_eq!(f.backend.board_reads.load(Ordering::Relaxed), reads);
+    }
+
+    #[tokio::test]
+    async fn snapshot_rebuilds_after_a_published_write() {
+        let f = fixture();
+        let (first, _) = f.state.boards_snapshot().await;
+        f.backend.boards.lock().unwrap().push(board(2, 2, 2));
+        f.state.publish_delta(Vec::new());
+        let (second, generation) = f.state.boards_snapshot().await;
+        assert_eq!(generation, 2);
+        assert!(!Arc::ptr_eq(&first, &second));
+        let sync = sync_of(&second);
+        assert_eq!(sync.generation, 2);
+        assert_eq!(
+            sync.boards.iter().map(|b| b.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+}

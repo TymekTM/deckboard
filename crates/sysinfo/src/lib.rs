@@ -274,4 +274,121 @@ mod tests {
         let (tx, _rx) = tokio_mpsc::unbounded_channel::<serde_json::Value>();
         assert!(send(&tx, "CPU", 1.0, &(8, 4)));
     }
+
+    fn one_payload(load: f64, mem: (u64, u64)) -> serde_json::Value {
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        assert!(send(&tx, "Ryzen 7", load, &mem));
+        rx.try_recv().unwrap()
+    }
+
+    #[test]
+    fn payload_carries_the_four_js_keys() {
+        let p = one_payload(12.345, (8_000_000_000, 2_000_000_000));
+        let keys: Vec<&str> = p.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            vec![
+                "si-load-cpu",
+                "si-load-gb-ram",
+                "si-load-p-ram",
+                "si-temperature-cpu"
+            ]
+        );
+        assert_eq!(p["si-load-cpu"]["title"], "CPU Load");
+        assert_eq!(p["si-load-cpu"]["description"], "Ryzen 7");
+        assert_eq!(p["si-load-cpu"]["value"], "12.3");
+        assert_eq!(p["si-load-cpu"]["suffix"], "%");
+    }
+
+    #[test]
+    fn temperature_is_null_with_the_celsius_suffix() {
+        let p = one_payload(0.0, (1, 1));
+        assert!(p["si-temperature-cpu"]["value"].is_null());
+        assert_eq!(p["si-temperature-cpu"]["suffix"], "°C");
+        assert_eq!(p["si-temperature-cpu"]["description"], "Ryzen 7");
+    }
+
+    #[test]
+    fn ram_values_follow_the_js_formulas() {
+        // 6 GB used of 8 GB: the "percent" key is the raw fraction (JS parity)
+        let p = one_payload(0.0, (8_000_000_000, 2_000_000_000));
+        assert_eq!(p["si-load-p-ram"]["value"], "0.8");
+        assert_eq!(p["si-load-p-ram"]["suffix"], "%");
+        assert_eq!(p["si-load-gb-ram"]["value"], "6.0");
+        assert_eq!(p["si-load-gb-ram"]["suffix"], "GB");
+    }
+
+    #[test]
+    fn ram_values_survive_missing_or_inconsistent_readings() {
+        // a failed GlobalMemoryStatusEx reads as zero total
+        let p = one_payload(0.0, (0, 0));
+        assert_eq!(p["si-load-p-ram"]["value"], "0.0");
+        assert_eq!(p["si-load-gb-ram"]["value"], "0.0");
+        // available above total must not underflow
+        let p = one_payload(0.0, (1_000, 5_000));
+        assert_eq!(p["si-load-p-ram"]["value"], "0.0");
+    }
+
+    #[test]
+    fn cpu_load_is_busy_over_user_plus_kernel() {
+        // idle 50, kernel 60 (idle included), user 40 -> busy 50 of 100
+        assert_eq!(cpu_load_pct((0, 0, 0), (50, 60, 40)), 50.0);
+        // fully idle
+        assert_eq!(cpu_load_pct((100, 100, 0), (200, 200, 0)), 0.0);
+        // fully busy
+        assert_eq!(cpu_load_pct((0, 0, 0), (0, 30, 70)), 100.0);
+    }
+
+    #[test]
+    fn cpu_load_without_progress_or_with_counter_resets_is_zero() {
+        assert_eq!(cpu_load_pct((5, 5, 5), (5, 5, 5)), 0.0);
+        // counters going backwards saturate instead of wrapping
+        assert_eq!(cpu_load_pct((100, 100, 100), (0, 0, 0)), 0.0);
+    }
+
+    #[test]
+    fn declarations_and_actions_agree() {
+        let decls = input_declarations();
+        assert_eq!(decls.len(), 2);
+        for (value, _, font, color, mode) in &decls {
+            assert!(is_sysinfo_action(value), "{value}");
+            assert_eq!(*font, "fas");
+            assert!(color.starts_with('#') && color.len() == 7);
+            assert_eq!(*mode, "graph");
+        }
+        assert!(!is_sysinfo_action("si-load-cpu"));
+        assert!(!is_sysinfo_action(""));
+        assert!(!is_sysinfo_action("SI-CPU"));
+    }
+
+    #[test]
+    fn execute_is_a_no_op() {
+        execute("si-cpu");
+        execute("unknown");
+    }
+
+    #[test]
+    fn native_readings_are_sane() {
+        let brand = cpu_brand();
+        assert!(!brand.is_empty());
+        assert_eq!(brand, brand.trim());
+        let (total, avail) = mem_info();
+        assert!(avail <= total || total == 0);
+        let (idle, kernel, user) = cpu_times();
+        assert!(idle <= kernel || (idle, kernel, user) == (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn spawn_push_delivers_a_first_sample_right_away() {
+        let mut rx = spawn_push();
+        let first = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("first push within the timeout")
+            .expect("channel open");
+        // no delta yet: the warm-up push reports zero load
+        assert_eq!(first["si-load-cpu"]["value"], "0.0");
+        assert!(first["si-load-gb-ram"]["value"].is_string());
+    }
 }

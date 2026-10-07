@@ -203,3 +203,225 @@ impl Transport for FakeTransport {
         Ok(responses.remove(0))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    fn response(status: u16, headers: &[(&str, &str)], body: &[u8]) -> HttpResponse {
+        HttpResponse {
+            status,
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: body.to_vec(),
+        }
+    }
+
+    #[test]
+    fn method_names() {
+        assert_eq!(Method::Get.as_str(), "GET");
+        assert_eq!(Method::Post.as_str(), "POST");
+        assert_eq!(Method::Put.as_str(), "PUT");
+        assert_eq!(Method::Delete.as_str(), "DELETE");
+    }
+
+    #[test]
+    fn header_lookup_is_case_insensitive_and_first_wins() {
+        let r = response(429, &[("Retry-After", "3"), ("retry-after", "9")], b"");
+        assert_eq!(r.header("retry-after"), Some("3"));
+        assert_eq!(r.header("RETRY-AFTER"), Some("3"));
+        assert_eq!(r.header("x-missing"), None);
+    }
+
+    #[test]
+    fn json_body_parses_or_reads_as_none() {
+        assert_eq!(
+            response(200, &[], br#"{"a":1}"#).json(),
+            Some(serde_json::json!({"a": 1}))
+        );
+        assert_eq!(response(204, &[], b"").json(), None);
+        assert_eq!(response(502, &[], b"<html>").json(), None);
+    }
+
+    #[test]
+    fn transport_error_display() {
+        assert_eq!(
+            TransportError("GET timeout".into()).to_string(),
+            "transport: GET timeout"
+        );
+    }
+
+    fn get(url: &str) -> HttpRequest {
+        HttpRequest {
+            method: Method::Get,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    #[test]
+    fn fake_transport_records_and_replays_in_order() {
+        let fake = FakeTransport::new();
+        fake.push_json(200, serde_json::json!({"n": 1}))
+            .push(response(204, &[], b""));
+        let first = fake.send(&get("https://a/1")).unwrap();
+        let second = fake.send(&get("https://a/2")).unwrap();
+        assert_eq!(first.status, 200);
+        assert_eq!(first.json().unwrap()["n"], 1);
+        assert_eq!(second.status, 204);
+        assert_eq!(fake.last_url(), "https://a/2");
+        assert_eq!(
+            fake.requests()
+                .iter()
+                .map(|r| r.url.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://a/1", "https://a/2"]
+        );
+    }
+
+    #[test]
+    fn fake_transport_fails_when_the_script_runs_out() {
+        let fake = FakeTransport::new();
+        let err = fake.send(&get("https://a/")).unwrap_err();
+        assert!(err.0.contains("no scripted response"));
+        // the attempt is still recorded
+        assert_eq!(fake.requests().len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "a request was made")]
+    fn last_url_without_requests_panics() {
+        FakeTransport::new().last_url();
+    }
+
+    /// What the one-shot local server saw.
+    struct Seen {
+        request_line: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    /// Serves exactly one request with the canned raw `reply`.
+    fn one_shot(reply: &'static str) -> (String, std::thread::JoinHandle<Seen>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let mut headers = Vec::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let line = line.trim_end();
+                if line.is_empty() {
+                    break;
+                }
+                let (k, v) = line.split_once(':').unwrap();
+                headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+            }
+            let len = headers
+                .iter()
+                .find(|(k, _)| k == "content-length")
+                .map(|(_, v)| v.parse::<usize>().unwrap())
+                .unwrap_or(0);
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            stream.write_all(reply.as_bytes()).unwrap();
+            stream.flush().unwrap();
+            Seen {
+                request_line: request_line.trim_end().to_string(),
+                headers,
+                body,
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[test]
+    fn ureq_transport_sends_headers_and_body() {
+        let (base, server) = one_shot(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+        );
+        let resp = UreqTransport::new()
+            .send(&HttpRequest {
+                method: Method::Put,
+                url: format!("{base}/v1/me/player/volume?volume_percent=40"),
+                headers: vec![("Authorization".into(), "Bearer tok".into())],
+                body: Some(b"{}".to_vec()),
+            })
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.header("content-type"), Some("application/json"));
+        assert_eq!(resp.json().unwrap()["ok"], true);
+        let seen = server.join().unwrap();
+        assert_eq!(
+            seen.request_line,
+            "PUT /v1/me/player/volume?volume_percent=40 HTTP/1.1"
+        );
+        assert!(seen
+            .headers
+            .iter()
+            .any(|(k, v)| k == "authorization" && v == "Bearer tok"));
+        assert_eq!(seen.body, b"{}");
+    }
+
+    #[test]
+    fn ureq_transport_returns_error_statuses_as_data() {
+        let (base, server) = one_shot(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 4\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let resp = UreqTransport::default()
+            .send(&get(&format!("{base}/x")))
+            .unwrap();
+        assert_eq!(resp.status, 429);
+        assert_eq!(resp.header("retry-after"), Some("4"));
+        assert!(resp.body.is_empty());
+        assert!(server.join().unwrap().request_line.starts_with("GET /x "));
+    }
+
+    #[test]
+    fn ureq_transport_sends_bodiless_post_and_delete() {
+        for method in [Method::Post, Method::Delete] {
+            let (base, server) =
+                one_shot("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+            let resp = UreqTransport::new()
+                .send(&HttpRequest {
+                    method,
+                    url: format!("{base}/p"),
+                    headers: Vec::new(),
+                    body: None,
+                })
+                .unwrap();
+            assert_eq!(resp.status, 204);
+            let seen = server.join().unwrap();
+            assert!(
+                seen.request_line
+                    .starts_with(&format!("{} /p ", method.as_str())),
+                "{}",
+                seen.request_line
+            );
+            assert!(seen.body.is_empty());
+        }
+    }
+
+    #[test]
+    fn ureq_transport_maps_refused_connections_to_transport_errors() {
+        // bind then drop: nothing listens on the port any more
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = UreqTransport::new()
+            .send(&get(&format!("http://127.0.0.1:{port}/")))
+            .unwrap_err();
+        assert!(err.0.starts_with("GET "), "{}", err.0);
+    }
+}

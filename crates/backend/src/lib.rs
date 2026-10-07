@@ -1648,4 +1648,418 @@ mod tests {
             "the JS execute must never run: the native executor claims run-command first"
         );
     }
+
+    // ---- editor/import edge cases ----------------------------------------
+
+    #[test]
+    fn command_args_parse_json_or_fall_back_to_null() {
+        let cmd = |c: Option<&str>| pulpit_actions::Command::from_row("vm-mute", c, None, "button");
+        assert_eq!(
+            SqlBackend::command_args(&cmd(Some(r#"{"strip":1}"#))),
+            serde_json::json!({"strip": 1})
+        );
+        assert_eq!(SqlBackend::command_args(&cmd(Some("not json"))), serde_json::Value::Null);
+        assert_eq!(SqlBackend::command_args(&cmd(Some(""))), serde_json::Value::Null);
+        assert_eq!(SqlBackend::command_args(&cmd(None)), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn exported_button_rows_drop_only_the_id() {
+        let row = ButtonRow {
+            id: 42,
+            board_id: 7,
+            kind: "url".into(),
+            title: Some("T".into()),
+            ..ButtonRow::default()
+        };
+        let json = button_json(&row);
+        assert!(json.get("id").is_none());
+        assert_eq!(json["board_id"], 7);
+        assert_eq!(json["type"], "url");
+        assert_eq!(json["title"], "T");
+    }
+
+    #[test]
+    fn export_skips_unknown_ids_and_keeps_request_order() {
+        let backend = test_backend();
+        let a = backend.create_board("A", "#000000", 2, 2).unwrap();
+        let b = backend.create_board("B", "#000000", 3, 1).unwrap();
+        backend.create_button(b, "key", "button", 0, 0).unwrap();
+        let out = backend.export_boards(&[b, 9_999, a]).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["name"], "B");
+        assert_eq!(out[0]["macros"].as_array().unwrap().len(), 1);
+        assert_eq!(out[1]["name"], "A");
+        assert_eq!(out[1]["macros"], serde_json::json!([]));
+        assert!(backend.export_boards(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn import_forces_converted_and_fresh_ids() {
+        let backend = test_backend();
+        let mut entry = original_style_board();
+        entry["id"] = serde_json::json!(555);
+        entry["converted"] = serde_json::json!(0);
+        entry["macros"][0]["id"] = serde_json::json!(777);
+        let ids = backend.import_boards(&[entry]).unwrap();
+        assert_ne!(ids[0], 555);
+        let board = backend.get_board(ids[0]).unwrap();
+        assert_eq!(board.converted, 1);
+        let buttons = backend.get_buttons_by_board(ids[0]);
+        assert_ne!(buttons[0].id, 777);
+        // the stale board_id from the file is re-parented
+        assert_eq!(buttons[0].board_id, ids[0]);
+    }
+
+    #[test]
+    fn import_returns_ids_in_input_order() {
+        let backend = test_backend();
+        let mut first = original_style_board();
+        first["name"] = "First".into();
+        let mut second = original_style_board();
+        second["name"] = "Second".into();
+        let ids = backend.import_boards(&[first, second]).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(backend.get_board(ids[0]).unwrap().name, "First");
+        assert_eq!(backend.get_board(ids[1]).unwrap().name, "Second");
+    }
+
+    #[test]
+    fn import_without_macros_creates_an_empty_board() {
+        let backend = test_backend();
+        let mut entry = original_style_board();
+        entry.as_object_mut().unwrap().remove("macros");
+        let ids = backend.import_boards(&[entry]).unwrap();
+        assert!(backend.get_buttons_by_board(ids[0]).is_empty());
+        // a non-array macros value is ignored the same way
+        let mut odd = original_style_board();
+        odd["macros"] = serde_json::json!({"not": "a list"});
+        let ids = backend.import_boards(&[odd]).unwrap();
+        assert!(backend.get_buttons_by_board(ids[0]).is_empty());
+    }
+
+    #[test]
+    fn import_rejects_zero_sized_boards_and_too_many_boards() {
+        let backend = test_backend();
+        let mut zero = original_style_board();
+        zero["width"] = serde_json::json!(0);
+        assert!(matches!(
+            backend.import_boards(&[zero]),
+            Err(pulpit_db::DbError::Corrupt(_))
+        ));
+        let many = vec![original_style_board(); 101];
+        let err = backend.import_boards(&many).unwrap_err();
+        assert!(err.to_string().contains("too many boards"), "{err}");
+        assert!(backend.get_boards().is_empty());
+        // exactly at the bound is fine
+        let ids = backend
+            .import_boards(&vec![original_style_board(); 100])
+            .unwrap();
+        assert_eq!(ids.len(), 100);
+    }
+
+    #[test]
+    fn import_accepts_the_largest_allowed_grid() {
+        let backend = test_backend();
+        let mut entry = original_style_board();
+        entry["width"] = serde_json::json!(MAX_BOARD_DIM);
+        entry["height"] = serde_json::json!(MAX_BOARD_DIM);
+        assert!(backend.import_boards(&[entry.clone()]).is_ok());
+        entry["height"] = serde_json::json!(MAX_BOARD_DIM + 1);
+        assert!(backend.import_boards(&[entry]).is_err());
+    }
+
+    #[test]
+    fn create_button_places_a_1x1_tile() {
+        let backend = test_backend();
+        let board = backend.create_board("B", "#000000", 4, 3).unwrap();
+        let id = backend.create_button(board, "key", "toggle", 3, 2).unwrap();
+        let row = backend.get_button(id).unwrap();
+        assert_eq!(row.board_id, board);
+        assert_eq!(row.kind, "key");
+        assert_eq!(row.mode, "toggle");
+        assert_eq!((row.x, row.y, row.w, row.h), (Some(3), Some(2), 1, 1));
+        // the meta read sees the same row
+        assert_eq!(backend.get_button_meta(id).unwrap().id, id);
+        backend.delete_button(id).unwrap();
+        assert!(backend.get_button(id).is_none());
+    }
+
+    #[test]
+    fn grouped_reads_cover_every_board() {
+        let backend = test_backend();
+        let a = backend.create_board("A", "#000000", 2, 2).unwrap();
+        let b = backend.create_board("B", "#000000", 2, 2).unwrap();
+        backend.create_button(a, "key", "button", 0, 0).unwrap();
+        backend.create_button(a, "url", "button", 1, 0).unwrap();
+        backend.create_button(b, "url", "button", 0, 0).unwrap();
+        let grouped = backend.all_buttons_by_board();
+        assert_eq!(grouped[&a].len(), 2);
+        assert_eq!(grouped[&b].len(), 1);
+        assert!(backend.get_board(9_999).is_none());
+    }
+
+    // ---- native chain ----------------------------------------------------
+
+    /// Speaker fake that records every call for the speaker tests.
+    #[derive(Clone, Default)]
+    struct RecSpeaker(std::sync::Arc<Mutex<Vec<String>>>);
+    impl RecSpeaker {
+        fn calls(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+    impl pulpit_os::Speaker for RecSpeaker {
+        fn volume(&mut self) -> pulpit_os::Result<f32> {
+            Ok(42.0)
+        }
+        fn muted(&mut self) -> pulpit_os::Result<bool> {
+            Ok(true)
+        }
+        fn set_volume(&mut self, percent: f32) -> pulpit_os::Result<()> {
+            self.0.lock().unwrap().push(format!("volume:{percent}"));
+            Ok(())
+        }
+        fn devices(&mut self) -> pulpit_os::Result<Vec<pulpit_os::AudioDevice>> {
+            Ok(vec![pulpit_os::AudioDevice {
+                id: "{dev-1}".into(),
+                name: "Speakers".into(),
+                is_default: true,
+            }])
+        }
+        fn active_device(&mut self) -> pulpit_os::Result<String> {
+            Ok("{dev-1}".into())
+        }
+        fn set_active_device(&mut self, id: &str) -> pulpit_os::Result<()> {
+            if id == "broken" {
+                return Err(pulpit_os::OsError::Unsupported("broken"));
+            }
+            self.0.lock().unwrap().push(format!("device:{id}"));
+            Ok(())
+        }
+    }
+
+    fn with_rec_speaker(backend: &SqlBackend) -> (SharedRecInput, RecSpeaker) {
+        let input = SharedRecInput::default();
+        let speaker = RecSpeaker::default();
+        *backend.input.lock().unwrap() = Some(Box::new(input.clone()));
+        *backend.speaker.lock().unwrap() = Some(Box::new(speaker.clone()));
+        (input, speaker)
+    }
+
+    #[test]
+    fn speaker_device_switches_and_announces_the_new_id() {
+        let backend = test_backend();
+        let (input, speaker) = with_rec_speaker(&backend);
+        let mut sink = RecSink::default();
+        backend.exec(
+            button_row("speaker-device", Some(r#"{"speaker":"{dev-2}"}"#)),
+            false,
+            &mut sink,
+        );
+        assert_eq!(speaker.calls(), vec!["device:{dev-2}"]);
+        assert_eq!(
+            sink.third_party,
+            vec![("speaker-device".to_string(), "{dev-2}".to_string())]
+        );
+        assert_eq!(
+            sink.app_values,
+            vec![("speaker-device".to_string(), "{dev-2}".to_string())]
+        );
+        assert!(input.effects().is_empty());
+    }
+
+    #[test]
+    fn speaker_device_ignores_the_tap_start_phase() {
+        let backend = test_backend();
+        let (_input, speaker) = with_rec_speaker(&backend);
+        let button = button_row("speaker-device", Some(r#"{"speaker":"{dev-2}"}"#));
+        backend.exec(button.clone(), true, &mut RecSink::default());
+        assert!(speaker.calls().is_empty());
+        backend.exec(button, false, &mut RecSink::default());
+        assert_eq!(speaker.calls().len(), 1);
+    }
+
+    #[test]
+    fn speaker_device_without_id_or_with_a_failed_switch_announces_nothing() {
+        let backend = test_backend();
+        let (input, speaker) = with_rec_speaker(&backend);
+        let mut sink = RecSink::default();
+        backend.exec(button_row("speaker-device", Some("{}")), false, &mut sink);
+        backend.exec(button_row("speaker-device", None), false, &mut sink);
+        backend.exec(
+            button_row("speaker-device", Some(r#"{"speaker":"broken"}"#)),
+            false,
+            &mut sink,
+        );
+        assert!(speaker.calls().is_empty());
+        assert!(sink.app_values.is_empty() && sink.third_party.is_empty());
+        // claimed: never fell through to the macro dispatcher
+        assert!(input.effects().is_empty());
+    }
+
+    #[test]
+    fn speaker_volume_slider_scales_to_percent() {
+        let backend = test_backend();
+        let (_input, speaker) = with_rec_speaker(&backend);
+        backend.slider(button_row("speaker-volume", None), 0.25);
+        backend.slider(button_row("speaker-volume", None), 1.0);
+        assert_eq!(speaker.calls(), vec!["volume:25", "volume:100"]);
+    }
+
+    #[test]
+    fn speaker_watchers_read_through_the_shared_instance() {
+        let backend = test_backend();
+        let (_input, _speaker) = with_rec_speaker(&backend);
+        assert_eq!(backend.speaker_status(), (Some(42.0), Some(true)));
+        assert_eq!(
+            backend.speaker_snapshot(true),
+            (Some(42.0), Some(true), Some("{dev-1}".to_string()))
+        );
+        assert_eq!(backend.speaker_snapshot(false), (Some(42.0), Some(true), None));
+        assert_eq!(backend.speaker_device_id().as_deref(), Some("{dev-1}"));
+        assert_eq!(
+            backend.speaker_devices(),
+            vec![("{dev-1}".to_string(), "Speakers".to_string())]
+        );
+        // the trait object path (what the legacy watchers call) agrees
+        let dyn_backend: &dyn Backend = &backend;
+        assert_eq!(dyn_backend.speaker_status(), (Some(42.0), Some(true)));
+        assert_eq!(dyn_backend.speaker_device_id().as_deref(), Some("{dev-1}"));
+    }
+
+    #[test]
+    fn display_only_kinds_are_claimed_no_ops() {
+        let backend = test_backend();
+        let (input, speaker) = with_rec_speaker(&backend);
+        for kind in ["si-cpu", "si-ram", "ai-plan-limits", "ai-agent-status"] {
+            backend.exec(button_row(kind, None), false, &mut RecSink::default());
+            backend.slider(button_row(kind, None), 0.5);
+        }
+        assert!(input.effects().is_empty());
+        assert!(speaker.calls().is_empty());
+    }
+
+    #[test]
+    fn play_without_a_path_is_a_claimed_no_op() {
+        let backend = test_backend();
+        let (input, _speaker) = with_rec_speaker(&backend);
+        backend.exec(button_row("play", None), false, &mut RecSink::default());
+        backend.exec(button_row("play", Some("")), false, &mut RecSink::default());
+        assert!(input.effects().is_empty());
+    }
+
+    #[test]
+    fn discord_without_configuration_stays_claimed() {
+        let backend = test_backend();
+        let (input, _speaker) = with_rec_speaker(&backend);
+        backend.exec(
+            button_row("toggle-microphone", None),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(input.effects().is_empty());
+        // no keep-alive client was spawned for an unconfigured Discord
+        assert!(backend.discord_client.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn url_to_call_without_a_url_is_claimed() {
+        let backend = test_backend();
+        let (input, _speaker) = with_rec_speaker(&backend);
+        backend.exec(
+            button_row("url-to-call", Some("{}")),
+            false,
+            &mut RecSink::default(),
+        );
+        backend.exec(
+            button_row("url-to-call", Some("garbage")),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(input.effects().is_empty());
+    }
+
+    #[test]
+    fn url_to_call_fires_a_get_at_the_configured_url() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 500 Oops\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            line
+        });
+        let backend = test_backend();
+        let (input, _speaker) = with_rec_speaker(&backend);
+        let command = format!(r#"{{"urlToCall":"http://{addr}/hook?x=1"}}"#);
+        backend.exec(
+            button_row("url-to-call", Some(&command)),
+            false,
+            &mut RecSink::default(),
+        );
+        assert_eq!(server.join().unwrap().trim_end(), "GET /hook?x=1 HTTP/1.1");
+        // the error status is ignored like the JS fetch() was
+        assert!(input.effects().is_empty());
+    }
+
+    #[test]
+    fn run_command_with_a_blank_line_is_a_claimed_no_op() {
+        let backend = test_backend();
+        let (input, _speaker) = with_rec_speaker(&backend);
+        backend.exec(
+            button_row("run-command", Some(r#"{"commandAction":"   "}"#)),
+            false,
+            &mut RecSink::default(),
+        );
+        backend.slider(
+            button_row("run-command", Some(r#"{"commandAction":""}"#)),
+            0.5,
+        );
+        assert!(input.effects().is_empty());
+    }
+
+    #[test]
+    fn unknown_slider_kinds_reach_the_slider_dispatcher_quietly() {
+        let backend = test_backend();
+        let (input, speaker) = with_rec_speaker(&backend);
+        backend.slider(button_row("wheels-volume", None), 0.3);
+        backend.slider(button_row("no-such-slider", None), 0.3);
+        assert!(input.effects().is_empty());
+        assert!(speaker.calls().is_empty());
+    }
+
+    #[test]
+    fn key_tap_start_presses_and_release_lets_go() {
+        let backend = test_backend();
+        let (input, _speaker) = with_rec_speaker(&backend);
+        let key = button_row("key", Some("ctrl+c"));
+        backend.exec(key.clone(), true, &mut RecSink::default());
+        backend.exec(key, false, &mut RecSink::default());
+        let effects = input.effects();
+        assert_eq!(effects.len(), 2, "{effects:?}");
+        assert!(matches!(effects[0], pulpit_actions::Effect::KeyDown(_)));
+        assert!(matches!(effects[1], pulpit_actions::Effect::KeyUp(_)));
+    }
+
+    #[test]
+    fn board_tiles_switch_through_the_sink() {
+        let backend = test_backend();
+        let (_input, _speaker) = with_rec_speaker(&backend);
+        let mut sink = RecSink::default();
+        backend.exec(button_row("board", Some(r#"{"id":7}"#)), false, &mut sink);
+        assert_eq!(sink.boards, vec![7]);
+    }
+
+    #[test]
+    fn spotify_error_slot_starts_empty() {
+        let backend = test_backend();
+        assert_eq!(backend.take_last_spotify_error(), None);
+    }
 }
