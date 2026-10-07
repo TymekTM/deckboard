@@ -947,6 +947,15 @@ function tileSlider(tile, value) {
 
 // "Run now" (context menu) and touch-mode taps share one failure surface:
 // the exec is fire-and-forget otherwise (012 lower-priority feedback)
+
+async function onTileGesture({ tile, gesture }) {
+  try {
+    await api.execButtonGesture(tile.id, gesture);
+  } catch (e) {
+    flashError(`Gest "${gesture}" nie powiódł się`, e);
+  }
+}
+
 function runTileNow(id) {
   api.execButton(id).catch((e) => flashError("Running the tile failed", e));
 }
@@ -1440,6 +1449,7 @@ function onKeydown(event) {
             :custom-values="customValues"
             :board-names="boardNames"
             @tile-exec="runTileNow($event.id)"
+            @tile-gesture="onTileGesture"
             @tile-slider="tileSlider"
             @tile-open="editingTile = $event"
           />

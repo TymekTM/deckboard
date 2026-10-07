@@ -46,4 +46,5 @@ export const api = {
   spotifyPlaylists: () => invoke("spotify_playlists"),
   spotifyDevices: () => invoke("spotify_devices"),
   assetDataUrl: (hash) => invoke("asset_data_url", { hash }),
+  execButtonGesture: (id, gesture) => invoke("exec_button_gesture", { id, gesture }),
 };

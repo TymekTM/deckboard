@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watchEffect } from "vue";
+import { computed, onUnmounted, ref, watchEffect } from "vue";
 import {
   stateActive,
   VM_SLIDER_RESET,
@@ -27,7 +27,7 @@ const props = defineProps({
   dragging: { type: Boolean, default: false },
   selected: { type: Boolean, default: false },
 });
-const emit = defineEmits(["open", "ctx", "down", "resize", "tap", "slider"]);
+const emit = defineEmits(["open", "ctx", "down", "resize", "tap", "slider", "gesture"]);
 
 function metaOf(tile) {
   return props.typeMeta?.[tile.type] || {};
@@ -377,6 +377,124 @@ const tileAriaLabel = computed(() => {
   return metaOf(props.tile).label || String(props.tile.type).replace(/-/g, " ");
 });
 
+// ---- custom gestures (M5), desktop touch mode ------------------------------
+
+// Gestures this tile declares, from its options JSON: the `gestures` list
+// plus every `gesture_actions` key the editor wrote. Only declared
+// gestures fire, mirroring the server's per-event gate for tablets -
+// a hand-edited tile without declarations keeps its plain tap.
+const declaredGestures = computed(() => {
+  const names = new Set();
+  try {
+    const opts = JSON.parse(props.tile.options || "{}");
+    if (opts && typeof opts === "object" && !Array.isArray(opts)) {
+      if (Array.isArray(opts.gestures)) {
+        for (const g of opts.gestures) if (typeof g === "string") names.add(g);
+      }
+      for (const g of Object.keys(opts.gesture_actions || {})) names.add(g);
+    }
+  } catch {}
+  return names;
+});
+
+// Whether the current press runs through the gesture path; when armed the
+// click event must not fire too (the pointer handlers own the tap).
+let gestureArmed = false;
+let touchState = null;
+let longPressTimer = null;
+let singleTapTimer = null;
+let lastTapTime = 0;
+
+function clearGestureTimers() {
+  clearTimeout(longPressTimer);
+  clearTimeout(singleTapTimer);
+}
+
+onUnmounted(clearGestureTimers);
+
+function onTilePointerDown(e) {
+  emit("down", e);
+  gestureArmed = false;
+  if (!props.touch) return;
+  if (props.tile.mode === "slider") return;
+  if (!declaredGestures.value.size) return;
+  gestureArmed = true;
+
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const startTime = Date.now();
+  touchState = { startX, startY, startTime, moved: false };
+
+  if (declaredGestures.value.has("long-press")) {
+    longPressTimer = setTimeout(() => {
+      if (touchState && !touchState.moved) {
+        touchState = null;
+        emit("gesture", { tile: props.tile, gesture: "long-press" });
+      }
+    }, 450);
+  }
+}
+
+function onTilePointerMove(e) {
+  if (!touchState) return;
+  if (Math.hypot(e.clientX - touchState.startX, e.clientY - touchState.startY) > 10) {
+    touchState.moved = true;
+    clearTimeout(longPressTimer);
+  }
+}
+
+function onTilePointerUp(e) {
+  if (!touchState) return;
+  clearTimeout(longPressTimer);
+  const { moved } = touchState;
+  const dx = e.clientX - touchState.startX;
+  const dy = e.clientY - touchState.startY;
+  const dt = Date.now() - touchState.startTime;
+  touchState = null;
+
+  if (dt < 400 && Math.abs(dx) > 35 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+    const gesture = dx < 0 ? "swipe-left" : "swipe-right";
+    if (declaredGestures.value.has(gesture)) {
+      emit("gesture", { tile: props.tile, gesture });
+    }
+    return;
+  }
+
+  if (!moved && dt < 300) {
+    const now = Date.now();
+    if (declaredGestures.value.has("double-tap")) {
+      if (lastTapTime && now - lastTapTime < 300) {
+        clearTimeout(singleTapTimer);
+        lastTapTime = 0;
+        emit("gesture", { tile: props.tile, gesture: "double-tap" });
+        return;
+      }
+      // possible first tap of a pair: hold the single tap back briefly
+      lastTapTime = now;
+      singleTapTimer = setTimeout(() => {
+        lastTapTime = 0;
+        onTap();
+      }, 260);
+      return;
+    }
+    lastTapTime = 0;
+    onTap();
+  }
+}
+
+function onTilePointerCancel() {
+  clearGestureTimers();
+  touchState = null;
+  lastTapTime = 0;
+}
+
+function onTileClick() {
+  // a gesture-declaring tile routes taps through the pointer handlers;
+  // the trailing click would double-fire the delayed single tap
+  if (gestureArmed) return;
+  onTap();
+}
+
 function onTap() {
   if (props.tile.type === "ai-tokens-hour" && graphData.value?.rows?.length) {
     // the hour tile's tap flips between the shared sparkline and the
@@ -515,8 +633,11 @@ function onTileKeydown(event) {
       :aria-pressed="tile.mode === 'toggle' ? activeState : undefined"
       @dblclick="!touch && emit('open')"
       @contextmenu.prevent="emit('ctx', $event)"
-      @pointerdown="emit('down', $event)"
-      @click.stop="onTap"
+      @pointerdown="onTilePointerDown"
+      @pointermove="onTilePointerMove"
+      @pointerup="onTilePointerUp"
+      @pointercancel="onTilePointerCancel"
+      @click.stop="onTileClick"
       @keydown="onTileKeydown"
     >
       <img

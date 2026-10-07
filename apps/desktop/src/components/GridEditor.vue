@@ -31,6 +31,7 @@ const emit = defineEmits([
   "clear-selection",
   "tiles-bulk-moved",
   "move-refused",
+  "tile-gesture",
 ]);
 
 // tiles whose stored mode is "toggle" flip to their second state when
@@ -459,6 +460,7 @@ function onGridClick(event) {
         @ctx="onTileContext(tile, $event)"
         @down="startDrag(tile, 'move', $event)"
         @tap="onTileTap(tile)"
+        @gesture="$emit('tile-gesture', $event)"
         @slider="(value) => $emit('tile-slider', tile, value)"
         @resize="startDrag(tile, 'resize', $event)"
       />

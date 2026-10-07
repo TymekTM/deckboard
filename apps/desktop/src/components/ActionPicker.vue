@@ -167,7 +167,9 @@ function closePop(refocus = true) {
 }
 function pick(it) {
   if (it.unavailable) return;
-  recordRecentAction(it.value);
+  // the gesture editor's "tile's own action" entry (value "") is not an
+  // action - it must not land in the recent list
+  if (it.value !== "") recordRecentAction(it.value);
   emit("update:modelValue", it.value);
   closePop();
 }
