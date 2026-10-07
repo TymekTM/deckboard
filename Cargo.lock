@@ -3657,6 +3657,7 @@ dependencies = [
  "pulpit-spotify",
  "pulpit-sysinfo",
  "pulpit-vm",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",

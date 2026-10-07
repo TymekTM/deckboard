@@ -10,6 +10,8 @@ use pulpit_actions::{EnigoInput, EventSink};
 use pulpit_db::{BoardRow, ButtonRow, Db};
 use pulpit_discord::DiscordConfig;
 use pulpit_ext::ExtManager;
+mod http_request;
+
 use pulpit_legacy::service::Backend;
 use pulpit_spotify::SpotifyError;
 use pulpit_vm::VoicemeeterState;
@@ -44,6 +46,8 @@ pub struct SqlBackend {
     /// taken by the host's exec command so a desktop tap surfaces it as
     /// a toast; tablets keep their log-only path.
     spotify_last_error: std::sync::Mutex<Option<String>>,
+    http_last_error: std::sync::Mutex<Option<String>>,
+    custom_values: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
     speaker: Mutex<Option<Box<dyn pulpit_os::Speaker>>>,
@@ -64,6 +68,8 @@ impl SqlBackend {
             discord_client: Mutex::new(None),
             spotify: None,
             spotify_last_error: std::sync::Mutex::new(None),
+            http_last_error: std::sync::Mutex::new(None),
+            custom_values: std::sync::Mutex::new(std::collections::HashMap::new()),
             speaker: Mutex::new(None),
             http_agent: pulpit_db::http_agent(std::time::Duration::from_secs(10), true),
         }
@@ -360,6 +366,7 @@ impl Backend for SqlBackend {
         // those tiles.
         let builtin = pulpit_actions::is_builtin_kind(&cmd.kind);
         self.spotify_last_error.lock().unwrap().take();
+        self.http_last_error.lock().unwrap().take();
         if !builtin && !is_tap_start && self.exec_native(&cmd, sink) {
             return;
         }
@@ -382,6 +389,7 @@ impl Backend for SqlBackend {
             &button.mode,
         );
         self.spotify_last_error.lock().unwrap().take();
+        self.http_last_error.lock().unwrap().take();
         if self.exec_runcommand(&cmd)
             || self.exec_extension(&cmd, Some(value))
             || self.exec_sysinfo(&cmd)
@@ -412,6 +420,7 @@ impl SqlBackend {
             || self.exec_sysinfo(cmd)
             || self.exec_aidev(cmd)
             || self.exec_callurl(cmd)
+            || self.exec_http(cmd, sink)
             || self.exec_voicemeeter(cmd, None)
             || self.exec_discord(cmd, sink)
             || self.exec_spotify(cmd, None)
@@ -506,6 +515,15 @@ impl SqlBackend {
             }
             None => tracing::warn!(kind = "url-to-call", "tile has no urlToCall configured"),
         }
+        true
+    }
+
+    /// Native http-request: full HTTP request action.
+    fn exec_http(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
+        if cmd.kind != "http-request" {
+            return false;
+        }
+        http_request::execute_http_action(self, cmd, sink);
         true
     }
 
@@ -829,6 +847,25 @@ impl SqlBackend {
     /// toast.
     pub fn take_last_spotify_error(&self) -> Option<String> {
         self.spotify_last_error.lock().unwrap().take()
+    }
+
+    pub fn take_last_http_error(&self) -> Option<String> {
+        self.http_last_error.lock().unwrap().take()
+    }
+
+    pub fn set_last_http_error(&self, err: String) {
+        *self.http_last_error.lock().unwrap() = Some(err);
+    }
+
+    pub fn set_custom_value(&self, key: &str, value: &str) {
+        self.custom_values
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
+    }
+
+    pub fn get_custom_value(&self, key: &str) -> Option<String> {
+        self.custom_values.lock().unwrap().get(key).cloned()
     }
 
     fn with_input(&self, f: impl FnOnce(&mut dyn pulpit_actions::Input)) {

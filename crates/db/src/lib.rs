@@ -776,18 +776,36 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// back as a `Response`).
 ///
 /// Users today: pulpit-discord (OAuth calls), pulpit-aidev (provider
-/// limits + Antigravity quota), pulpit-backend (third-party app pings).
-/// Skip-sized timeouts on purpose: Discord's local pipe API answers
-/// instantly, quota/limits endpoints can be slow. New HTTP consumers -
-/// `crates/spotify` is next - must build their agents through this
-/// instead of rolling another `Agent::config_builder()` chain.
+/// limits + Antigravity quota), pulpit-backend (third-party app pings
+/// and the http-request tile). Skip-sized timeouts on purpose: Discord's
+/// local pipe API answers instantly, quota/limits endpoints can be slow.
+/// New HTTP consumers - `crates/spotify` is next - must build their
+/// agents through this instead of rolling another `Agent::config_builder()`
+/// chain.
 pub fn http_agent(global_timeout: std::time::Duration, status_as_error: bool) -> ureq::Agent {
-    ureq::Agent::config_builder()
+    http_agent_insecure(global_timeout, status_as_error, false)
+}
+
+/// [`http_agent`] with certificate verification optionally disabled, for
+/// the http-request tile's "Ignoruj błędy certyfikatu" opt-in (self-signed
+/// Home Assistant / internal-CA setups). Everything else - timeout policy
+/// and user agent - stays identical to [`http_agent`].
+pub fn http_agent_insecure(
+    global_timeout: std::time::Duration,
+    status_as_error: bool,
+    insecure: bool,
+) -> ureq::Agent {
+    let mut config = ureq::Agent::config_builder()
         .timeout_global(Some(global_timeout))
         .http_status_as_error(status_as_error)
-        .user_agent(concat!("pulpit/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .new_agent()
+        .user_agent(concat!("pulpit/", env!("CARGO_PKG_VERSION")));
+    if insecure {
+        config = config
+            .tls_config(ureq::tls::TlsConfig::builder()
+                .disable_verification(true)
+                .build());
+    }
+    config.build().new_agent()
 }
 
 /// `<path>.tmp` in the same directory, so the rename stays on one volume.
