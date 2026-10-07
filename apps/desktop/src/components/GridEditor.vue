@@ -269,6 +269,7 @@ const ARROW_DIRS = {
 const gridEl = ref(null);
 
 function onGridKeydown(event) {
+  if (props.selectedIds.size > 0) return;
   const dir = ARROW_DIRS[event.key];
   if (!dir) return;
   if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;

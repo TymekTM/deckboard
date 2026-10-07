@@ -244,6 +244,123 @@ async function duplicateTiles(tiles) {
   }
 }
 
+
+async function pasteClipboardTiles() {
+  if (!tileClipboard.value) return;
+  const board = currentBoard.value;
+  if (!board) return;
+  const tiles = Array.isArray(tileClipboard.value) ? tileClipboard.value : [tileClipboard.value];
+  if (!tiles.length) return;
+
+  const minX = Math.min(...tiles.map((t) => t.x));
+  const minY = Math.min(...tiles.map((t) => t.y));
+  const maxX = Math.max(...tiles.map((t) => t.x + t.w));
+  const maxY = Math.max(...tiles.map((t) => t.y + t.h));
+  const groupW = maxX - minX;
+  const groupH = maxY - minY;
+
+  let offsetX = 0;
+  let offsetY = 0;
+  let found = false;
+  for (let y = 0; y <= Math.max(0, board.height - groupH); y++) {
+    for (let x = 0; x <= Math.max(0, board.width - groupW); x++) {
+      let collides = false;
+      for (const t of tiles) {
+        const targetX = x + (t.x - minX);
+        const targetY = y + (t.y - minY);
+        for (const other of board.buttons) {
+          const overlap = !(targetX + t.w <= other.x || targetX >= other.x + other.w || targetY + t.h <= other.y || targetY >= other.y + other.h);
+          if (overlap) {
+            collides = true;
+            break;
+          }
+        }
+        if (collides) break;
+      }
+      if (!collides) {
+        offsetX = x - minX;
+        offsetY = y - minY;
+        found = true;
+        break;
+      }
+    }
+    if (found) break;
+  }
+
+  const createdTiles = [];
+  const newSelection = new Set();
+  try {
+    for (const t of tiles) {
+      const tx = clamp(t.x + offsetX, 0, Math.max(0, board.width - t.w));
+      const ty = clamp(t.y + offsetY, 0, Math.max(0, board.height - t.h));
+      const newId = await api.createButton(
+        board.id,
+        t.type || "key",
+        t.mode || "button",
+        tx,
+        ty
+      );
+      const snapshot = {
+        ...t,
+        id: newId,
+        board_id: board.id,
+        x: tx,
+        y: ty,
+      };
+      await api.updateButton(snapshot);
+      createdTiles.push({ id: newId, snapshot });
+      newSelection.add(newId);
+    }
+    history.push(tileBulkCreateCommand({ createdTiles, boardId: board.id }));
+    updateHistoryFlags();
+    selectedTileIds.value = newSelection;
+    await loadBoards();
+  } catch (e) {
+    flashError("Wklejanie kafli nie powiodło się", e);
+    await loadBoards();
+  }
+}
+
+async function nudgeSelection(dx, dy) {
+  const ids = selectedTileIds.value;
+  if (!ids.size) return;
+  const board = currentBoard.value;
+  if (!board) return;
+
+  const selectedTiles = board.buttons.filter((b) => ids.has(b.id));
+  const unselectedTiles = board.buttons.filter((b) => !ids.has(b.id));
+
+  let invalid = false;
+  for (const t of selectedTiles) {
+    const nx = t.x + dx;
+    const ny = t.y + dy;
+    if (nx < 0 || ny < 0 || nx + t.w > board.width || ny + t.h > board.height) {
+      invalid = true;
+      break;
+    }
+    for (const u of unselectedTiles) {
+      const overlap = !(nx + t.w <= u.x || nx >= u.x + u.w || ny + t.h <= u.y || ny >= u.y + u.h);
+      if (overlap) {
+        invalid = true;
+        break;
+      }
+    }
+    if (invalid) break;
+  }
+
+  if (invalid) {
+    flashError("Nie można przesunąć: kafelki wychodziłyby poza siatkę lub nachodziły na inne");
+    return;
+  }
+
+  const moves = selectedTiles.map((t) => ({
+    tile: t,
+    prevGeom: { x: t.x, y: t.y, w: t.w, h: t.h },
+    nextGeom: { x: t.x + dx, y: t.y + dy, w: t.w, h: t.h },
+  }));
+  await onTilesBulkMoved(moves);
+}
+
 async function applyBulkColor(color) {
   const ids = Array.from(selectedTileIds.value);
   if (!ids.length) return;
@@ -514,7 +631,14 @@ function emptyContextMenu(pos, event) {
           {
             label: "Paste button here",
             icon: "paste",
-            run: () => pasteTile(tileClipboard.value, pos),
+            run: () => {
+              const tiles = Array.isArray(tileClipboard.value) ? tileClipboard.value : [tileClipboard.value];
+              if (tiles.length === 1) {
+                pasteTile(tiles[0], pos);
+              } else {
+                pasteClipboardTiles();
+              }
+            },
           },
         ]
       : []),
@@ -955,21 +1079,62 @@ function isModalActive() {
 }
 
 function onKeydown(event) {
-  if (event.key === "Escape") closeContextMenu();
+  if (event.key === "Escape") {
+    closeContextMenu();
+    if (selectedTileIds.value.size > 0) {
+      selectedTileIds.value = new Set();
+      event.preventDefault();
+      return;
+    }
+  }
 
   if (isInputTarget(event.target) || isModalActive()) return;
 
   if ((event.ctrlKey || event.metaKey) && !event.altKey) {
-    if (event.key === "z" || event.key === "Z") {
+    const k = event.key.toLowerCase();
+    if (k === "z") {
       event.preventDefault();
       if (event.shiftKey) {
         doRedo();
       } else {
         doUndo();
       }
-    } else if (event.key === "y" || event.key === "Y") {
+    } else if (k === "y") {
       event.preventDefault();
       doRedo();
+    } else if (k === "c") {
+      if (selectedTileIds.value.size > 0) {
+        event.preventDefault();
+        copySelectedTiles();
+      }
+    } else if (k === "v") {
+      if (tileClipboard.value) {
+        event.preventDefault();
+        pasteClipboardTiles();
+      }
+    } else if (k === "d") {
+      if (selectedTileIds.value.size > 0) {
+        event.preventDefault();
+        duplicateSelectedTiles();
+      }
+    }
+  } else if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+    if (event.key === "Delete" || event.key === "Backspace") {
+      if (selectedTileIds.value.size > 0) {
+        event.preventDefault();
+        deleteSelectedTiles();
+      }
+    } else if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+      if (selectedTileIds.value.size > 0) {
+        event.preventDefault();
+        const dir = {
+          ArrowUp: [0, -1],
+          ArrowDown: [0, 1],
+          ArrowLeft: [-1, 0],
+          ArrowRight: [1, 0],
+        }[event.key];
+        nudgeSelection(dir[0], dir[1]);
+      }
     }
   }
 }
