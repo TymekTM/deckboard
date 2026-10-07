@@ -356,6 +356,141 @@ pub fn save_tokens(path: &std::path::Path, tokens: &AuthTokens) -> std::io::Resu
     pulpit_db::write_atomic(path, json.as_bytes())
 }
 
+/// Persist client_id (and, when given, client_secret) into settings.json
+/// under `discord-deckboard`, preserving every other field and extension
+/// configuration. `None` keeps the stored secret - the settings UI never
+/// echoes it, so an empty secret input means "unchanged", not "erase".
+pub fn save_config(
+    path: &std::path::Path,
+    client_id: &str,
+    client_secret: Option<&str>,
+) -> std::io::Result<()> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+        Err(e) => return Err(e),
+    };
+    let mut settings: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => return Err(corrupt_settings(e)),
+    };
+    let obj = settings
+        .as_object_mut()
+        .ok_or_else(|| not_an_object(&raw))?;
+    let package = obj
+        .entry("discord-deckboard")
+        .or_insert_with(|| Value::Object(Default::default()));
+    let package = package.as_object_mut().ok_or_else(|| not_an_object(&raw))?;
+    let mut field = |name: &str, value: &str, desc: &str, ftype: &str| {
+        let entry = package.entry(name.to_string()).or_insert_with(|| {
+            json!({
+                "descriptions": desc,
+                "name": name,
+                "type": ftype,
+                "value": "",
+            })
+        });
+        if let Some(f) = entry.as_object_mut() {
+            f.insert("value".into(), json!(value));
+        }
+    };
+    field(
+        "discordClientId",
+        client_id.trim(),
+        "Discord Application Client ID",
+        "text",
+    );
+    if let Some(secret) = client_secret {
+        field(
+            "discordClientSecret",
+            secret.trim(),
+            "Discord Application Client Secret",
+            "password",
+        );
+    }
+
+    let json = serde_json::to_string_pretty(&settings)
+        .map_err(|e| std::io::Error::other(format!("settings serialization failed: {e}")))?;
+    pulpit_db::write_atomic(path, json.as_bytes())
+}
+
+/// Clear saved Discord OAuth tokens from settings.json while keeping client_id,
+/// client_secret, and all other extensions intact.
+pub fn clear_tokens(path: &std::path::Path) -> std::io::Result<()> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut settings: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => return Err(corrupt_settings(e)),
+    };
+    let Some(obj) = settings.as_object_mut() else {
+        return Ok(());
+    };
+    if let Some(package) = obj.get_mut("discord-deckboard").and_then(Value::as_object_mut) {
+        if let Some(f) = package.get_mut("discordAccessToken").and_then(Value::as_object_mut) {
+            f.insert("value".into(), json!(""));
+        }
+        if let Some(f) = package.get_mut("discordRefreshToken").and_then(Value::as_object_mut) {
+            f.insert("value".into(), json!(""));
+        }
+    }
+    let json = serde_json::to_string_pretty(&settings)
+        .map_err(|e| std::io::Error::other(format!("settings serialization failed: {e}")))?;
+    pulpit_db::write_atomic(path, json.as_bytes())
+}
+
+/// Status of the Discord RPC connection.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DiscordStatus {
+    NotConfigured,
+    NotRunning,
+    NeedsAuth,
+    Connected { username: String },
+    Error { message: String },
+}
+
+/// Probe Discord connection status.
+pub fn probe_status(config: &DiscordConfig) -> DiscordStatus {
+    if config.client_id.trim().is_empty() {
+        return DiscordStatus::NotConfigured;
+    }
+    if config.access_token.trim().is_empty() {
+        return DiscordStatus::NeedsAuth;
+    }
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    match Conn::connect(config, deadline) {
+        Ok(conn) => {
+            let user = conn.username.unwrap_or_else(|| "Discord".to_string());
+            DiscordStatus::Connected { username: user }
+        }
+        Err(DiscordError::NotRunning) => DiscordStatus::NotRunning,
+        Err(DiscordError::AuthRejected) => {
+            match refresh(config) {
+                Ok(new_tokens) => {
+                    let mut fresh = config.clone();
+                    fresh.access_token = new_tokens.access_token;
+                    fresh.refresh_token = new_tokens.refresh_token;
+                    let retry_deadline = Instant::now() + Duration::from_millis(1500);
+                    match Conn::connect(&fresh, retry_deadline) {
+                        Ok(conn) => {
+                            let user = conn.username.unwrap_or_else(|| "Discord".to_string());
+                            DiscordStatus::Connected { username: user }
+                        }
+                        Err(DiscordError::NotRunning) => DiscordStatus::NotRunning,
+                        Err(_) => DiscordStatus::NeedsAuth,
+                    }
+                }
+                Err(_) => DiscordStatus::NeedsAuth,
+            }
+        }
+        Err(e) => DiscordStatus::Error { message: e.to_string() },
+    }
+}
+
 /// Parse failure of an existing settings.json. The serde message carries
 /// only positions, never file content - the file may hold credentials.
 fn corrupt_settings(e: serde_json::Error) -> std::io::Error {
@@ -838,6 +973,7 @@ struct Conn {
     /// Last known voice settings, kept fresh by VOICE_SETTINGS_UPDATE
     /// pushes so toggles can send SET without a GET round trip.
     cache: Option<Value>,
+    username: Option<String>,
 }
 
 impl Conn {
@@ -850,6 +986,7 @@ impl Conn {
             buf: Vec::new(),
             inbox: VecDeque::new(),
             cache: None,
+            username: None,
         };
         conn.pipe.write_all(&encode_frame(
             OP_HANDSHAKE,
@@ -882,6 +1019,13 @@ impl Conn {
         if reply.get("evt").and_then(Value::as_str) == Some("ERROR") {
             return Err(DiscordError::AuthRejected);
         }
+        let user = reply
+            .pointer("/data/user/global_name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or_else(|| reply.pointer("/data/user/username").and_then(Value::as_str))
+            .map(str::to_string);
+        conn.username = user;
         let reply = conn.request_until(deadline, "GET_VOICE_SETTINGS", json!({}))?;
         require_ok(&reply)?;
         if let Some(data) = reply.get("data").filter(|v| v.is_object()) {
@@ -1426,6 +1570,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn probe_status_without_config_or_token_needs_no_network() {
+        // both branches return before any pipe/HTTP dial: safe to assert
+        // on a machine without Discord
+        assert_eq!(
+            probe_status(&DiscordConfig::default()),
+            DiscordStatus::NotConfigured
+        );
+        assert_eq!(
+            probe_status(&DiscordConfig {
+                client_id: "123".into(),
+                ..Default::default()
+            }),
+            DiscordStatus::NeedsAuth
+        );
+    }
+
+    #[test]
+    fn save_config_and_clear_tokens_preserve_foreign_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "foreign-ext": { "custom": { "value": "keep-me" } },
+                "discord-deckboard": {
+                    "discordAccessToken": { "value": "old-token" },
+                    "discordRefreshToken": { "value": "old-refresh" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        save_config(&path, "my-client-id", Some("my-client-secret")).unwrap();
+        let val: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(val["foreign-ext"]["custom"]["value"], "keep-me");
+        assert_eq!(
+            val["discord-deckboard"]["discordClientId"]["value"],
+            "my-client-id"
+        );
+        assert_eq!(
+            val["discord-deckboard"]["discordClientSecret"]["value"],
+            "my-client-secret"
+        );
+        assert_eq!(
+            val["discord-deckboard"]["discordAccessToken"]["value"],
+            "old-token"
+        );
+
+        // None keeps the stored secret (the UI never echoes it, so an
+        // empty secret input must not erase the saved one)
+        save_config(&path, "changed-id", None).unwrap();
+        let val_kept: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            val_kept["discord-deckboard"]["discordClientId"]["value"],
+            "changed-id"
+        );
+        assert_eq!(
+            val_kept["discord-deckboard"]["discordClientSecret"]["value"],
+            "my-client-secret",
+            "None must keep the stored secret"
+        );
+
+        clear_tokens(&path).unwrap();
+        let val2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(val2["foreign-ext"]["custom"]["value"], "keep-me");
+        assert_eq!(
+            val2["discord-deckboard"]["discordClientId"]["value"],
+            "changed-id",
+            "clearing tokens must keep the credentials"
+        );
+        assert_eq!(
+            val2["discord-deckboard"]["discordClientSecret"]["value"],
+            "my-client-secret"
+        );
+        assert_eq!(
+            val2["discord-deckboard"]["discordAccessToken"]["value"],
+            ""
+        );
+        assert_eq!(
+            val2["discord-deckboard"]["discordRefreshToken"]["value"],
+            ""
+        );
+    }
+
+    #[test]
     fn transport_failures_are_network_not_rejections() {
         // port 9 (discard) on loopback refuses instantly: the request
         // never reaches a Discord endpoint, so the error must be Network -
@@ -1832,6 +2064,7 @@ mod tests {
             buf: Vec::new(),
             inbox: VecDeque::new(),
             cache: None,
+            username: None,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let wake = std::sync::Arc::new(WakeEvent::new());
