@@ -4,7 +4,8 @@
 
 use std::sync::Arc;
 
-use pulpit_backend::SqlBackend;use pulpit_db::{BoardRow, ButtonRow};
+use pulpit_backend::SqlBackend;
+use pulpit_db::{BoardRow, ButtonRow};
 use pulpit_ext::ExtManager;
 use pulpit_legacy::{AppState, Backend, EditorBroadcaster, Hub};
 use serde::Serialize;
@@ -518,10 +519,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         engine: v2.as_ref().map(|v2| v2.engine.clone()),
         hub: hub.clone(),
     });
-    tauri::async_runtime::spawn(pulpit_host::forward_ext_events(
-        feed.clone(),
-        ext_events,
-    ));
+    tauri::async_runtime::spawn(pulpit_host::forward_ext_events(feed.clone(), ext_events));
     tauri::async_runtime::spawn(pulpit_host::forward_producer(
         feed.clone(),
         pulpit_sysinfo::spawn_push(),
@@ -1402,7 +1400,9 @@ fn parse_update_manifest(text: &str) -> Result<UpdateManifest, String> {
         .ok_or("Manifest nie ma pola \"sha256\" - bez sumy kontrolnej odmowa instalacji.")?
         .to_string();
     if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("Pole \"sha256\" manifestu nie jest sumą kontrolną (64 znaki hex).".to_string());
+        return Err(
+            "Pole \"sha256\" manifestu nie jest sumą kontrolną (64 znaki hex).".to_string(),
+        );
     }
     Ok(UpdateManifest {
         version,
@@ -1465,10 +1465,9 @@ async fn check_for_updates(state: State<'_, DesktopState>) -> Result<serde_json:
             .ok_or("Sprawdzanie aktualizacji jest wyłączone (update_url: \"off\").")?
     };
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let manifest =
-        tauri::async_runtime::spawn_blocking(move || fetch_manifest(url.trim()))
-            .await
-            .map_err(|e| e.to_string())??;
+    let manifest = tauri::async_runtime::spawn_blocking(move || fetch_manifest(url.trim()))
+        .await
+        .map_err(|e| e.to_string())??;
     let update_available = version_newer(&manifest.version, &current);
     Ok(serde_json::json!({
         "current": current,
@@ -1493,10 +1492,7 @@ fn download_update(url: &str, dest: &std::path::Path) -> Result<(), String> {
         .get(url)
         .call()
         .map_err(|e| format!("Nie udało się pobrać aktualizacji: {e}"))?;
-    let mut body = resp
-        .into_body()
-        .into_reader()
-        .take(UPDATE_MAX_BYTES + 1);
+    let mut body = resp.into_body().into_reader().take(UPDATE_MAX_BYTES + 1);
     let mut file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
     let written =
         std::io::copy(&mut body, &mut file).map_err(|e| format!("Pobieranie przerwane: {e}"))?;
@@ -1576,14 +1572,10 @@ fn spawn_update_guard(
     // mangled. Paths cannot contain a literal `"` on Windows; a
     // %-sequence in a path would still expand, like in every cmd line.
     let mut cmd = std::process::Command::new("cmd");
-    cmd.raw_arg(relaunch_script(
-        exe,
-        staged,
-        &exe.with_extension("exe.old"),
-    ))
-    .creation_flags(DETACHED | NO_WINDOW)
-    .spawn()
-    .map_err(|e| format!("Nie udało się zaplanować restartu: {e}"))
+    cmd.raw_arg(relaunch_script(exe, staged, &exe.with_extension("exe.old")))
+        .creation_flags(DETACHED | NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("Nie udało się zaplanować restartu: {e}"))
 }
 
 /// Download (manifest URL again, so the check cannot go stale), verify
@@ -2193,10 +2185,11 @@ async fn reorder_boards(
     ordered_ids: Vec<i64>,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    let changed = tauri::async_runtime::spawn_blocking(move || backend.reorder_boards(&ordered_ids))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let changed =
+        tauri::async_runtime::spawn_blocking(move || backend.reorder_boards(&ordered_ids))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
     state.broadcaster()?.sync_boards().await;
     state.publish_board_set_many(&changed);
     Ok(())
@@ -2625,10 +2618,7 @@ const IMPORT_READ_CAP_BYTES: u64 = 64 * 1024 * 1024;
 /// Read, parse and import a `.boardjson` file written by this editor or
 /// the original app. Split out of the command so the size-cap behavior
 /// is testable without a Tauri app; runs on the blocking pool.
-fn import_boards_blocking(
-    backend: Arc<SqlBackend>,
-    path: &str,
-) -> Result<Vec<i64>, String> {
+fn import_boards_blocking(backend: Arc<SqlBackend>, path: &str) -> Result<Vec<i64>, String> {
     // stat first: an oversized file rejects before a single byte is read
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > IMPORT_READ_CAP_BYTES {
@@ -2797,16 +2787,20 @@ async fn spotify_playlists(
             }
         }
     }
-    let list = tauri::async_runtime::spawn_blocking(move || spotify.playlists().map_err(|e| e.to_string()))
-        .await
-        .map_err(|e| e.to_string())??;
+    let list = tauri::async_runtime::spawn_blocking(move || {
+        spotify.playlists().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     *state.spotify_playlists.lock().unwrap() = Some((std::time::Instant::now(), list.clone()));
     Ok(list)
 }
 
 /// Active Spotify Connect devices for the editor picker.
 #[tauri::command]
-async fn spotify_devices(state: State<'_, DesktopState>) -> Result<Vec<pulpit_spotify::Device>, String> {
+async fn spotify_devices(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<pulpit_spotify::Device>, String> {
     let spotify = state
         .spotify
         .clone()
@@ -2832,7 +2826,9 @@ async fn asset_data_url(state: State<'_, DesktopState>, hash: String) -> Result<
         .ok_or_else(|| "protocol v2 unavailable".to_string())?;
     use base64::Engine as _;
     tauri::async_runtime::spawn_blocking(move || {
-        let bytes = assets.get(&hash).ok_or_else(|| "unknown asset".to_string())?;
+        let bytes = assets
+            .get(&hash)
+            .ok_or_else(|| "unknown asset".to_string())?;
         let mime = assets
             .content_type(&hash)
             .unwrap_or("application/octet-stream");

@@ -389,8 +389,7 @@ mod tests {
     #[test]
     fn ureq_transport_sends_bodiless_post_and_delete() {
         for method in [Method::Post, Method::Delete] {
-            let (base, server) =
-                one_shot("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+            let (base, server) = one_shot("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
             let resp = UreqTransport::new()
                 .send(&HttpRequest {
                     method,

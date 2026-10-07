@@ -5,7 +5,8 @@
 use rand::Rng;
 
 /// Characters allowed in a verifier (RFC 7636 §4.1: unreserved ASCII).
-const VERIFIER_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+const VERIFIER_ALPHABET: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
 /// The redirect URI the user must register in the Spotify dashboard.
 /// The port is fixed and independent of `PULPIT_PORT`: the URI has to

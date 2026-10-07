@@ -568,7 +568,11 @@ mod tests {
             mode: None,
             command: None,
         });
-        let r = row("run-command", "button", Some(r#"{"commandAction":"calc.exe"}"#));
+        let r = row(
+            "run-command",
+            "button",
+            Some(r#"{"commandAction":"calc.exe"}"#),
+        );
 
         // Legacy payload (stock Deckboard tablets): color/icon resolved
         // through the extension-input registry, like getExtensionButton.
@@ -890,7 +894,13 @@ mod tests {
         fn get_button(&self, _id: i64) -> Option<ButtonRow> {
             None
         }
-        fn exec(&self, _button: ButtonRow, _tap_start: bool, _sink: &mut dyn pulpit_actions::EventSink) {}
+        fn exec(
+            &self,
+            _button: ButtonRow,
+            _tap_start: bool,
+            _sink: &mut dyn pulpit_actions::EventSink,
+        ) {
+        }
         fn slider(&self, _button: ButtonRow, _value: f64) {}
     }
 

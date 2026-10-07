@@ -564,7 +564,9 @@ impl SqlBackend {
                             tracing::warn!(command = %what, %status, "run-command failed");
                         }
                         Ok(_) => tracing::debug!(command = %what, "run-command finished"),
-                        Err(e) => tracing::warn!(command = %what, error = %e, "run-command wait failed"),
+                        Err(e) => {
+                            tracing::warn!(command = %what, error = %e, "run-command wait failed")
+                        }
                     });
                 if let Err(e) = reaper {
                     tracing::warn!(error = %e, "run-command reaper thread failed to start");
@@ -1137,11 +1139,8 @@ mod tests {
         .save(&path)
         .unwrap();
         let config = pulpit_spotify::SpotifyConfig::load(&path).unwrap();
-        let spotify = pulpit_spotify::Spotify::with_transport(
-            config,
-            path.clone(),
-            Box::new(fake.clone()),
-        );
+        let spotify =
+            pulpit_spotify::Spotify::with_transport(config, path.clone(), Box::new(fake.clone()));
         (test_backend().with_spotify(Some(spotify)), path, dir)
     }
 
@@ -1159,7 +1158,8 @@ mod tests {
             pulpit_spotify::http::FakeTransport::new(),
         ));
         // playing -> pause; then the pause answer
-        fake.0.push_json(200, serde_json::json!({ "is_playing": true }));
+        fake.0
+            .push_json(200, serde_json::json!({ "is_playing": true }));
         fake.0.push(control_answer(204));
         let (backend, _path, _dir) = spotify_backend(&fake);
         let input = SharedRecInput::default();
@@ -1248,7 +1248,8 @@ mod tests {
 
         // the next exec starts clean even though nothing changed the
         // error slot since
-        fake.0.push_json(200, serde_json::json!({ "is_playing": false }));
+        fake.0
+            .push_json(200, serde_json::json!({ "is_playing": false }));
         fake.0.push(control_answer(204));
         backend.exec(
             button_row("spotify-playback", Some("play")),
@@ -1591,7 +1592,11 @@ mod tests {
             false,
             &mut RecSink::default(),
         );
-        backend.exec(button_row("run-command", None), false, &mut RecSink::default());
+        backend.exec(
+            button_row("run-command", None),
+            false,
+            &mut RecSink::default(),
+        );
     }
 
     #[test]
@@ -1658,9 +1663,18 @@ mod tests {
             SqlBackend::command_args(&cmd(Some(r#"{"strip":1}"#))),
             serde_json::json!({"strip": 1})
         );
-        assert_eq!(SqlBackend::command_args(&cmd(Some("not json"))), serde_json::Value::Null);
-        assert_eq!(SqlBackend::command_args(&cmd(Some(""))), serde_json::Value::Null);
-        assert_eq!(SqlBackend::command_args(&cmd(None)), serde_json::Value::Null);
+        assert_eq!(
+            SqlBackend::command_args(&cmd(Some("not json"))),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            SqlBackend::command_args(&cmd(Some(""))),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            SqlBackend::command_args(&cmd(None)),
+            serde_json::Value::Null
+        );
     }
 
     #[test]
@@ -1916,7 +1930,10 @@ mod tests {
             backend.speaker_snapshot(true),
             (Some(42.0), Some(true), Some("{dev-1}".to_string()))
         );
-        assert_eq!(backend.speaker_snapshot(false), (Some(42.0), Some(true), None));
+        assert_eq!(
+            backend.speaker_snapshot(false),
+            (Some(42.0), Some(true), None)
+        );
         assert_eq!(backend.speaker_device_id().as_deref(), Some("{dev-1}"));
         assert_eq!(
             backend.speaker_devices(),

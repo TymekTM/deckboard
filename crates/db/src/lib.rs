@@ -1219,7 +1219,10 @@ mod tests {
         assert_eq!(db.set_board_order(&[c, b, a]).unwrap(), Vec::<i64>::new());
 
         // an id that names no board is ignored, order stays intact
-        assert_eq!(db.set_board_order(&[c, b, a, 999]).unwrap(), Vec::<i64>::new());
+        assert_eq!(
+            db.set_board_order(&[c, b, a, 999]).unwrap(),
+            Vec::<i64>::new()
+        );
         let listed: Vec<i64> = db.get_boards().unwrap().into_iter().map(|r| r.id).collect();
         assert_eq!(listed, [c, b, a]);
     }
@@ -1557,6 +1560,9 @@ mod tests {
             .expect("user agent header present");
         let (name, value) = header.split_once(':').unwrap();
         assert_eq!(name.to_ascii_lowercase(), "user-agent");
-        assert_eq!(value.trim(), format!("pulpit/{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            value.trim(),
+            format!("pulpit/{}", env!("CARGO_PKG_VERSION"))
+        );
     }
 }

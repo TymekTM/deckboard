@@ -597,8 +597,7 @@ fn zai_rows_from(v: serde_json::Value) -> Vec<ProviderRow> {
                 .and_then(|p| p.as_str())
                 .map(str::to_string)
         });
-    let mut windows: Vec<(u64, ProviderRow)> =
-        limits.iter().filter_map(zai_window).collect();
+    let mut windows: Vec<(u64, ProviderRow)> = limits.iter().filter_map(zai_window).collect();
     windows.sort_by_key(|(minutes, _)| *minutes);
     if windows.is_empty() {
         return vec![ProviderRow {
@@ -1369,7 +1368,10 @@ mod tests {
         )
         .unwrap();
         // input (incl. cache read + creation) plus output, like the local sums
-        assert_eq!(anthropic_totals(&v), Some(1500 + 500 + 200 + 10 + 5 + 100 + 40));
+        assert_eq!(
+            anthropic_totals(&v),
+            Some(1500 + 500 + 200 + 10 + 5 + 100 + 40)
+        );
 
         // a bucket without results contributes nothing; a report with no
         // rows at all leaves the lane empty
@@ -1390,9 +1392,7 @@ mod tests {
     fn anthropic_usage_url_uses_rfc3339_bounds_and_a_daily_bucket() {
         let url = anthropic_usage_url(0, 3600);
         assert!(
-            url.starts_with(
-                "https://api.anthropic.com/v1/organizations/usage_report/messages?"
-            ),
+            url.starts_with("https://api.anthropic.com/v1/organizations/usage_report/messages?"),
             "{url}"
         );
         // RFC-3339 strings, not epoch ints; Z form so nothing needs escaping

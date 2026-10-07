@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::{ClientFeed, ProducerGate, StatusApp, forward_snapshot};
+use crate::{forward_snapshot, ClientFeed, ProducerGate, StatusApp};
 
 /// The poller's host-consumed key carrying the raw cover URL
 /// (`crates/spotify/src/snapshot.rs`). Internal: stripped before any
@@ -121,11 +121,19 @@ async fn resolve_art(
     .ok()??;
     let hash = assets.import_bytes(&bytes, ext).ok()?;
     let store = assets.clone();
-    lru_remember(&mut lru.lock().unwrap(), url, hash.clone(), &mut |evicted| {
-        if store.remove(evicted) {
-            tracing::debug!(hash = evicted, "evicted spotify album art from the asset store");
-        }
-    });
+    lru_remember(
+        &mut lru.lock().unwrap(),
+        url,
+        hash.clone(),
+        &mut |evicted| {
+            if store.remove(evicted) {
+                tracing::debug!(
+                    hash = evicted,
+                    "evicted spotify album art from the asset store"
+                );
+            }
+        },
+    );
     Some(hash)
 }
 
@@ -193,8 +201,7 @@ pub async fn forward_spotify<F: ClientFeed>(
     assets: Option<Arc<pulpit_v2::AssetStore>>,
 ) {
     let agent = art_agent();
-    let fetch: ArtFetch =
-        Arc::new(move |url: &str| download_art(&agent, url));
+    let fetch: ArtFetch = Arc::new(move |url: &str| download_art(&agent, url));
     forward_spotify_with(feed, rx, assets, fetch).await;
 }
 
@@ -336,7 +343,12 @@ mod tests {
         }
         assert!(deleted.borrow().is_empty());
         // one more entry evicts the oldest (h0) - deleted through remove
-        lru_remember(&mut entries, "new".to_string(), "hnew".to_string(), &mut remove);
+        lru_remember(
+            &mut entries,
+            "new".to_string(),
+            "hnew".to_string(),
+            &mut remove,
+        );
         assert_eq!(*deleted.borrow(), ["h0"]);
         assert_eq!(entries.len(), ART_LRU_CAP);
         assert!(lru_lookup(&mut entries, "u0").is_none());
@@ -347,8 +359,18 @@ mod tests {
         let deleted: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
         let mut entries: VecDeque<(String, String)> = VecDeque::new();
         let mut remove = |hash: &str| deleted.borrow_mut().push(hash.to_string());
-        lru_remember(&mut entries, "a".to_string(), "shared".to_string(), &mut remove);
-        lru_remember(&mut entries, "b".to_string(), "shared".to_string(), &mut remove);
+        lru_remember(
+            &mut entries,
+            "a".to_string(),
+            "shared".to_string(),
+            &mut remove,
+        );
+        lru_remember(
+            &mut entries,
+            "b".to_string(),
+            "shared".to_string(),
+            &mut remove,
+        );
         for i in 0..ART_LRU_CAP {
             lru_remember(&mut entries, format!("x{i}"), format!("hx{i}"), &mut remove);
         }
@@ -369,11 +391,13 @@ mod tests {
 
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let fetch_calls = calls.clone();
-        let fetch: ArtFetch =
-            Arc::new(move |url: &str| {
-                fetch_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Some((format!("bytes-of-{url}").into_bytes(), "jpg" as &'static str))
-            });
+        let fetch: ArtFetch = Arc::new(move |url: &str| {
+            fetch_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some((
+                format!("bytes-of-{url}").into_bytes(),
+                "jpg" as &'static str,
+            ))
+        });
         let pump_feed = feed.clone();
         let assets_for_pump = Some(assets.clone());
         let pump = tokio::spawn(async move {
@@ -424,7 +448,9 @@ mod tests {
             Some(first.as_str()),
             "same album resolves to the same hash"
         );
-        assert!(data(&emits[2])["spotify-now-playing"].get("image").is_none());
+        assert!(data(&emits[2])["spotify-now-playing"]
+            .get("image")
+            .is_none());
 
         // the art landed in the store exactly once
         assert_eq!(
@@ -438,8 +464,7 @@ mod tests {
         // no AssetStore (v2 stack down): no download, no image
         let feed = feed();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let fetch: ArtFetch =
-            Arc::new(|_url: &str| panic!("must not download without a store"));
+        let fetch: ArtFetch = Arc::new(|_url: &str| panic!("must not download without a store"));
         let pump_feed = feed.clone();
         let pump = tokio::spawn(async move {
             forward_spotify_with(pump_feed, rx, None, fetch).await;
@@ -448,7 +473,9 @@ mod tests {
         drop(tx);
         pump.await.unwrap();
         let emits = feed.emits.lock().unwrap();
-        assert!(emits[0]["data"]["spotify-now-playing"].get("image").is_none());
+        assert!(emits[0]["data"]["spotify-now-playing"]
+            .get("image")
+            .is_none());
         // the art URL is still stripped even with no store
         assert!(emits[0]["data"].get("spotify-art-url").is_none());
     }
@@ -463,9 +490,7 @@ mod tests {
         let feed = feed();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let fetch: ArtFetch =
-            Arc::new(|url: &str| {
-                Some((format!("art-{url}").into_bytes(), "jpg" as &'static str))
-            });
+            Arc::new(|url: &str| Some((format!("art-{url}").into_bytes(), "jpg" as &'static str)));
         let assets_for_pump = Some(assets.clone());
         let pump_feed = feed.clone();
         let pump = tokio::spawn(async move {

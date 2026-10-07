@@ -402,7 +402,9 @@ mod tests {
         let a = new_sid();
         let b = new_sid();
         assert_eq!(a.len(), 20);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert_ne!(a, b);
     }
 
@@ -431,7 +433,8 @@ mod tests {
         let ws = hub.create(backend(), true).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         ws.upgrade_to_ws(tx).await;
-        hub.broadcast("change_board", Some(r#"{"boardId":3}"#)).await;
+        hub.broadcast("change_board", Some(r#"{"boardId":3}"#))
+            .await;
         let expected = r#"42["change_board",{"boardId":3}]"#;
         assert_eq!(polling.poll(10).await, expected);
         match rx.recv().await {

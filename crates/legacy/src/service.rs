@@ -632,7 +632,10 @@ mod tests {
 
     #[test]
     fn origin_authority_extracts_host_and_port() {
-        assert_eq!(origin_authority("http://1.2.3.4:8611"), Some("1.2.3.4:8611"));
+        assert_eq!(
+            origin_authority("http://1.2.3.4:8611"),
+            Some("1.2.3.4:8611")
+        );
         assert_eq!(origin_authority("https://a.b/path?q"), Some("a.b"));
         assert_eq!(origin_authority("null"), None);
         assert_eq!(origin_authority("file://"), Some(""));
@@ -945,9 +948,19 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn exec_slider_passes_the_value_and_defaults_to_zero() {
         let (state, session, rec) = fixture(false).await;
-        handle_packet(&state, &session, r#"42["exec_slider",{"id":10,"value":0.75}]"#).await;
+        handle_packet(
+            &state,
+            &session,
+            r#"42["exec_slider",{"id":10,"value":0.75}]"#,
+        )
+        .await;
         handle_packet(&state, &session, r#"42["exec_slider",{"id":"10"}]"#).await;
-        handle_packet(&state, &session, r#"42["exec_slider",{"id":404,"value":1}]"#).await;
+        handle_packet(
+            &state,
+            &session,
+            r#"42["exec_slider",{"id":404,"value":1}]"#,
+        )
+        .await;
         handle_packet(&state, &session, r#"42["exec_slider",{}]"#).await;
         assert_eq!(*rec.sliders.lock().unwrap(), vec![(10, 0.75), (10, 0.0)]);
     }

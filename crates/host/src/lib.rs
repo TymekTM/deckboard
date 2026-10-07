@@ -90,7 +90,10 @@ pub struct ProducerGate {
 impl ProducerGate {
     /// The keys of `snapshot` the lane has not delivered yet (`None`
     /// when there is nothing to send).
-    fn pending(lane: &mut std::collections::BTreeMap<String, Value>, snapshot: &Value) -> Option<Value> {
+    fn pending(
+        lane: &mut std::collections::BTreeMap<String, Value>,
+        snapshot: &Value,
+    ) -> Option<Value> {
         let mut out = serde_json::Map::new();
         if let Some(map) = snapshot.as_object() {
             for (key, value) in map {
@@ -374,7 +377,14 @@ pub fn register_inputs(ext: &pulpit_ext::ExtManager) {
         register_input(value, Some(icon), Some(color), font_icon, Some(mode), None);
     }
     // native callurl (from the JS package's single input)
-    register_input("url-to-call", Some("link"), Some("#ff29df"), "fas", None, None);
+    register_input(
+        "url-to-call",
+        Some("link"),
+        Some("#ff29df"),
+        "fas",
+        None,
+        None,
+    );
     // native AI dev-work display tiles (plan limits, agent progress)
     for (value, icon, color, mode) in pulpit_aidev::input_declarations() {
         register_input(value, Some(icon), Some(color), "fas", Some(mode), None);
@@ -614,7 +624,10 @@ mod tests {
         assert_eq!(feed.broadcasts().len(), 2);
         assert_eq!(feed.emits().len(), 2);
         let sync = feed.engine.snapshot();
-        assert_eq!(sync.values["ext.toggle-microphone"], serde_json::json!("ON"));
+        assert_eq!(
+            sync.values["ext.toggle-microphone"],
+            serde_json::json!("ON")
+        );
     }
 
     #[tokio::test]
@@ -635,7 +648,10 @@ mod tests {
         let sync = feed.engine.snapshot();
         assert_eq!(sync.values["ext.speaker-volume"], serde_json::json!(level));
         assert_eq!(sync.values["ext.speaker-muted"], serde_json::json!(false));
-        assert_eq!(sync.values["ext.speaker-device"], serde_json::json!("speakers"));
+        assert_eq!(
+            sync.values["ext.speaker-device"],
+            serde_json::json!("speakers")
+        );
 
         // volume/mute under APP_CUSTOM_VALUE, device under
         // THIRD_PARTY_APP, both in the legacy packet shapes
@@ -678,7 +694,10 @@ mod tests {
     fn native_replaced_lists_the_js_packages_native_code_replaces() {
         assert_eq!(
             native_replaced(),
-            ["deckboard-system-info".to_string(), "deckboard-callurl".to_string()]
+            [
+                "deckboard-system-info".to_string(),
+                "deckboard-callurl".to_string()
+            ]
         );
     }
 }

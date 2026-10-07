@@ -188,7 +188,10 @@ mod tests {
             "progress_ms": 199_000,
             "item": { "duration_ms": 200_000 }
         });
-        assert_eq!(next_deadline(Some(&ending)), Duration::from_millis(1000) + TRACK_END_MARGIN);
+        assert_eq!(
+            next_deadline(Some(&ending)),
+            Duration::from_millis(1000) + TRACK_END_MARGIN
+        );
 
         let paused = serde_json::json!({ "is_playing": false, "progress_ms": 5 });
         assert_eq!(next_deadline(Some(&paused)), PAUSED_POLL);
@@ -236,7 +239,11 @@ mod tests {
     fn config(logged_in: bool) -> SpotifyConfig {
         SpotifyConfig {
             client_id: "cid".into(),
-            access_token: if logged_in { "ACCESS".into() } else { String::new() },
+            access_token: if logged_in {
+                "ACCESS".into()
+            } else {
+                String::new()
+            },
             refresh_token: logged_in.then(|| "REFRESH".into()),
             expires_at: logged_in.then(|| now_unix() + 3600),
             user: None,

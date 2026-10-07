@@ -42,13 +42,18 @@ fn coldstart_phases() {
     // the second app session (or a second lazy spawn) pays.
     let cache = tempfile::tempdir().unwrap();
     let t = Instant::now();
-    let source =
-        pulpit_ext::PackageSource::open_with_cache_root(&asar, "deckboard-commands".into(), Some(cache.path()))
-            .unwrap();
+    let source = pulpit_ext::PackageSource::open_with_cache_root(
+        &asar,
+        "deckboard-commands".into(),
+        Some(cache.path()),
+    )
+    .unwrap();
     let extract_ms = ms(t);
     let (root, _keep) = source.into_root();
     let file_count = walk_count(&root);
-    println!("phase A  open cold (extract -> scratch cache): {extract_ms:8.1} ms  ({file_count} files)");
+    println!(
+        "phase A  open cold (extract -> scratch cache): {extract_ms:8.1} ms  ({file_count} files)"
+    );
 
     let t = Instant::now();
     let warm = pulpit_ext::PackageSource::open_with_cache_root(
@@ -108,8 +113,7 @@ fn coldstart_end_to_end_manager() {
     std::fs::copy(&asar, dir.path().join("deckboard-commands.asar")).unwrap();
 
     let t = Instant::now();
-    let (manager, _events) =
-        pulpit_ext::ExtManager::load(dir.path(), &json!(null), &[]);
+    let (manager, _events) = pulpit_ext::ExtManager::load(dir.path(), &json!(null), &[]);
     let scan_ms = ms(t);
     println!("manager load (scan/classify): {scan_ms:8.1} ms");
     assert!(manager.has_action("run-command"), "action registered");

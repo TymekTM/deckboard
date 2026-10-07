@@ -107,7 +107,10 @@ fn colors_icons_and_title_agree_between_the_wires() {
     let style = style_of(&tile);
     assert_eq!(style.color.as_deref(), legacy["color"].as_str());
     assert_eq!(legacy["color2"].as_str(), Some(""));
-    assert!(style.color2.is_none(), "no type default -> absent on the wire");
+    assert!(
+        style.color2.is_none(),
+        "no type default -> absent on the wire"
+    );
 }
 
 #[test]
@@ -340,7 +343,8 @@ fn shared_style_fields_agree_between_legacy_and_v2() {
             .filter(|v| !v.is_empty())
             .map(str::to_string)
     };
-    let get_int = |key: &str| -> Option<i64> { legacy.get(key).and_then(serde_json::Value::as_i64) };
+    let get_int =
+        |key: &str| -> Option<i64> { legacy.get(key).and_then(serde_json::Value::as_i64) };
 
     assert_eq!(get("color").as_deref(), style.color.as_deref(), "color");
     assert_eq!(
@@ -494,7 +498,11 @@ fn spotify_dual_state_kinds_agree_between_the_wires() {
     assert_eq!(legacy["extra"], "spotify-playing");
     assert_eq!(tile.manifest.kind, WidgetKind::Toggle);
     assert_eq!(tile.manifest.interactions, vec![Interaction::Tap]);
-    let state = tile.manifest.state.as_ref().expect("toggle watches a channel");
+    let state = tile
+        .manifest
+        .state
+        .as_ref()
+        .expect("toggle watches a channel");
     assert_eq!(state.channel, "ext.spotify-playing");
     assert_eq!(style_of(&tile).color.as_deref(), Some("#1DB954"));
 
@@ -516,7 +524,11 @@ fn spotify_dual_state_kinds_agree_between_the_wires() {
         assert_eq!(legacy["app"], "custom-value", "{kind}");
         assert_eq!(legacy["extra"], key, "{kind}");
         assert_eq!(tile.manifest.kind, WidgetKind::Toggle, "{kind}");
-        let state = tile.manifest.state.as_ref().expect("{kind} watches a channel");
+        let state = tile
+            .manifest
+            .state
+            .as_ref()
+            .expect("{kind} watches a channel");
         assert_eq!(state.channel, format!("ext.{key}"), "{kind}");
         assert_eq!(style_of(&tile).color.as_deref(), Some(color), "{kind}");
         assert_eq!(
@@ -553,13 +565,24 @@ fn spotify_button_kinds_agree_between_the_wires() {
 #[test]
 fn spotify_slider_kinds_agree_between_the_wires() {
     // volume watches its own kind, seek watches the pushed progress key
-    for (kind, key) in [("spotify-volume", "spotify-volume"), ("spotify-seek", "spotify-progress")] {
+    for (kind, key) in [
+        ("spotify-volume", "spotify-volume"),
+        ("spotify-seek", "spotify-progress"),
+    ] {
         let (legacy, tile) = both(&row(kind, "slider", None));
         assert_eq!(legacy["mode"], "slider", "{kind}");
         assert_eq!(legacy["extra"], key, "{kind}");
         assert_eq!(tile.manifest.kind, WidgetKind::Slider, "{kind}");
-        assert_eq!(tile.manifest.interactions, vec![Interaction::Slide], "{kind}");
-        let state = tile.manifest.state.as_ref().expect("{kind} watches a channel");
+        assert_eq!(
+            tile.manifest.interactions,
+            vec![Interaction::Slide],
+            "{kind}"
+        );
+        let state = tile
+            .manifest
+            .state
+            .as_ref()
+            .expect("{kind} watches a channel");
         assert_eq!(state.channel, format!("ext.{key}"), "{kind}");
         assert_eq!(state.shape, pulpit_proto::StateShape::Scalar, "{kind}");
     }

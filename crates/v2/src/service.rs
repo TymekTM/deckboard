@@ -816,7 +816,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         assert_eq!(body_json(resp).await["code"], "request-in-flight");
 
-        assert_eq!(poll_until_decided(&f.state, &id).await["status"], "approved");
+        assert_eq!(
+            poll_until_decided(&f.state, &id).await["status"],
+            "approved"
+        );
         // the gate saw a sanitized name and the code the tablet shows
         let seen = seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1);
@@ -844,7 +847,10 @@ mod tests {
         let body = body_json(resp).await;
         let id = body["request_id"].as_str().unwrap().to_string();
         let code = body["code"].as_str().unwrap().to_string();
-        assert_eq!(poll_until_decided(&f.state, &id).await["status"], "rejected");
+        assert_eq!(
+            poll_until_decided(&f.state, &id).await["status"],
+            "rejected"
+        );
         assert!(!f.state.pairing.take_pre_approved(&code));
         // the slot is free again
         let resp = pair_request_create(

@@ -773,8 +773,7 @@ impl Pipe {
                 (unsafe { pipe::WaitForSingleObject(event, wait_ms) }, false)
             } else {
                 let handles = [event, wake];
-                let w =
-                    unsafe { pipe::WaitForMultipleObjects(2, handles.as_ptr(), 0, wait_ms) };
+                let w = unsafe { pipe::WaitForMultipleObjects(2, handles.as_ptr(), 0, wait_ms) };
                 if w == WAIT_WAKE {
                     (pipe::WAIT_TIMEOUT, true)
                 } else {
@@ -891,8 +890,11 @@ impl Conn {
     }
 
     fn wait_for_ready(&mut self, deadline: Instant) -> Result<()> {
-        let Some((op, frame)) =
-            self.wait_frame(deadline, Duration::from_secs(1), WakeHandle(std::ptr::null_mut()))?
+        let Some((op, frame)) = self.wait_frame(
+            deadline,
+            Duration::from_secs(1),
+            WakeHandle(std::ptr::null_mut()),
+        )?
         else {
             return Err(DiscordError::Call("timeout"));
         };
@@ -970,8 +972,11 @@ impl Conn {
         self.pipe
             .write_all(&encode_frame(OP_FRAME, &frame.to_string()))?;
         loop {
-            let Some((op, frame)) =
-                self.wait_frame(deadline, Duration::from_secs(1), WakeHandle(std::ptr::null_mut()))?
+            let Some((op, frame)) = self.wait_frame(
+                deadline,
+                Duration::from_secs(1),
+                WakeHandle(std::ptr::null_mut()),
+            )?
             else {
                 return Err(DiscordError::Call("timeout"));
             };
@@ -1316,7 +1321,12 @@ fn actor_loop(
         // execute() queues a job, so the long tick costs no action
         // latency. A transport failure drops the session so the next
         // action reconnects instead of failing.
-        if conn.as_mut().unwrap().serve(IDLE_TICK, wake.handle()).is_err() {
+        if conn
+            .as_mut()
+            .unwrap()
+            .serve(IDLE_TICK, wake.handle())
+            .is_err()
+        {
             conn = None;
             continue;
         }
