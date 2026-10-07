@@ -63,6 +63,10 @@ jobs:
           npm ci
           npx vite build
 
+      - name: Frontend unit tests
+        working-directory: apps/desktop
+        run: npx vitest run
+
   mobile:
     runs-on: ubuntu-latest
     defaults:
