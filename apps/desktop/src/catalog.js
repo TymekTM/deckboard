@@ -522,6 +522,88 @@ export const CATALOG = [
     color: "#1DB954",
   },
   { divider: true },
+  { header: "Tools" },
+  // native utility tiles (round 5): the state lives on the server
+  // (`~/pulpitApp/tools.json`), so every tablet and the desktop touch
+  // mode show the same value. Taps run through the tools manager before
+  // the builtin dispatcher; rendering is per-surface (ToolTile.vue /
+  // ui/ToolTiles.kt). The deckboard-clock JS extension keeps its own
+  // kinds - these deliberately use new `tool-*` names.
+  {
+    value: "tool-clock",
+    label: "Clock",
+    icon: "clock",
+    color: "#34495e",
+    fields: [
+      {
+        key: "format",
+        kind: "select",
+        label: "Format",
+        options: [
+          { value: "24h", label: "24h" },
+          { value: "12h", label: "12h" },
+        ],
+      },
+      {
+        key: "seconds",
+        kind: "select",
+        label: "Seconds",
+        options: [
+          { value: "no", label: "Hide" },
+          { value: "yes", label: "Show" },
+        ],
+      },
+      {
+        key: "date",
+        kind: "select",
+        label: "Date",
+        options: [
+          { value: "no", label: "Hide" },
+          { value: "yes", label: "Show" },
+        ],
+      },
+      { key: "timezone", label: "Time zone", placeholder: "IANA zone, empty = device" },
+    ],
+  },
+  {
+    value: "tool-timer",
+    label: "Countdown Timer",
+    icon: "hourglass-half",
+    color: "#34495e",
+    fields: [
+      { key: "duration", label: "Duration (mm:ss)", placeholder: "05:00" },
+      {
+        key: "finish_action",
+        kind: "select",
+        label: "On finish",
+        options: [
+          { value: "none", label: "Nothing" },
+          { value: "play", label: "Play a sound" },
+          { value: "board", label: "Switch board" },
+        ],
+      },
+      { key: "sound_path", label: "Sound file path", showIf: { key: "finish_action", value: "play" } },
+      { key: "board_id", kind: "number", label: "Board id", showIf: { key: "finish_action", value: "board" } },
+    ],
+  },
+  {
+    value: "tool-stopwatch",
+    label: "Stopwatch",
+    icon: "stopwatch",
+    color: "#34495e",
+  },
+  {
+    value: "tool-counter",
+    label: "Counter",
+    icon: "calculator",
+    color: "#34495e",
+    fields: [
+      { key: "step", kind: "number", label: "Step", placeholder: "1" },
+      { key: "start_value", kind: "number", label: "Start value", placeholder: "0" },
+      { key: "label", label: "Label", placeholder: "Licznik" },
+    ],
+  },
+  { divider: true },
   { header: "Variables & Logic" },
   {
     value: "custom-value",

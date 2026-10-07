@@ -49,6 +49,7 @@ pub struct SqlBackend {
     spotify_last_error: std::sync::Mutex<Option<String>>,
     http_last_error: std::sync::Mutex<Option<String>>,
     custom_values: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    tools: Option<std::sync::Arc<pulpit_tools::ToolManager>>,
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
     speaker: Mutex<Option<Box<dyn pulpit_os::Speaker>>>,
@@ -72,6 +73,7 @@ impl SqlBackend {
             spotify_last_error: std::sync::Mutex::new(None),
             http_last_error: std::sync::Mutex::new(None),
             custom_values: std::sync::Mutex::new(std::collections::HashMap::new()),
+            tools: None,
             speaker: Mutex::new(None),
             http_agent: pulpit_db::http_agent(std::time::Duration::from_secs(10), true),
         }
@@ -142,6 +144,11 @@ impl SqlBackend {
         self
     }
 
+    pub fn with_tools(mut self, tools: Option<std::sync::Arc<pulpit_tools::ToolManager>>) -> Self {
+        self.tools = tools;
+        self
+    }
+
     pub fn with_extensions(mut self, extensions: std::sync::Arc<ExtManager>) -> Self {
         self.extensions = Some(extensions);
         self
@@ -174,6 +181,18 @@ impl SqlBackend {
     }
 
     /// New 1x1 button placed at (x, y) in `button` mode.
+    /// Ids of every button, for the tools store's lazy GC of entries
+    /// whose tile was deleted. Best effort: a failed read keeps everything.
+    pub fn all_button_ids(&self) -> Vec<i64> {
+        match self.db.lock().unwrap().all_button_ids() {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::error!("all_button_ids failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     pub fn create_button(
         &self,
         board_id: i64,
@@ -411,6 +430,28 @@ impl Backend for SqlBackend {
         }
     }
 
+    fn exec_gesture(
+        &self,
+        button: ButtonRow,
+        gesture: &str,
+        sink: &mut dyn EventSink,
+    ) {
+        let cmd = pulpit_actions::Command::from_row(
+            &button.kind,
+            button.command.as_deref(),
+            button.options.as_deref(),
+            &button.mode,
+        );
+        if pulpit_tools::is_tool_action(&cmd.kind) {
+            if let Some(tools) = &self.tools {
+                let g = gesture.parse().unwrap_or(pulpit_tools::ToolGesture::Tap);
+                tools.execute(button.id, &cmd.kind, cmd.command.as_deref(), g);
+            }
+            return;
+        }
+        self.exec(button, false, sink);
+    }
+
     fn exec(&self, button: ButtonRow, is_tap_start: bool, sink: &mut dyn EventSink) {
         let cmd = pulpit_actions::Command::from_row(
             &button.kind,
@@ -431,8 +472,16 @@ impl Backend for SqlBackend {
         let builtin = pulpit_actions::is_builtin_kind(&cmd.kind);
         self.spotify_last_error.lock().unwrap().take();
         self.http_last_error.lock().unwrap().take();
-        if !builtin && !is_tap_start && self.exec_native(&cmd, sink) {
-            return;
+        if !builtin && !is_tap_start {
+            if pulpit_tools::is_tool_action(&cmd.kind) {
+                if let Some(tools) = &self.tools {
+                    tools.execute(button.id, &cmd.kind, cmd.command.as_deref(), pulpit_tools::ToolGesture::Tap);
+                }
+                return;
+            }
+            if self.exec_native(&cmd, sink) {
+                return;
+            }
         }
         self.with_input(|input| {
             let _ = pulpit_actions::run_command_dispatched(
@@ -490,6 +539,11 @@ impl SqlBackend {
             || self.exec_spotify(cmd, None)
             || self.exec_speaker(cmd, sink)
             || self.exec_play(cmd)
+            || self.exec_tool(cmd)
+    }
+
+    fn exec_tool(&self, cmd: &pulpit_actions::Command) -> bool {
+        pulpit_tools::is_tool_action(&cmd.kind)
     }
 
     /// Full local tap for desktop touch mode and the editor's "Run now":
@@ -1528,6 +1582,23 @@ mod tests {
         backend.delete_board(board).unwrap();
         assert_eq!(backend.get_boards().len(), 1);
     }
+
+    #[test]
+    fn all_button_ids_spans_boards_and_tracks_deletes() {
+        let backend = test_backend();
+        let a = backend.create_board("A", "#2c3e50", 4, 3).unwrap();
+        let b = backend.create_board("B", "#2c3e50", 4, 3).unwrap();
+        let first = backend.create_button(a, "tool-timer", "button", 0, 0).unwrap();
+        let second = backend.create_button(b, "url", "button", 0, 0).unwrap();
+
+        let mut ids = backend.all_button_ids();
+        ids.sort();
+        assert_eq!(ids, vec![first.min(second), first.max(second)]);
+
+        backend.delete_button(second).unwrap();
+        assert_eq!(backend.all_button_ids(), vec![first]);
+    }
+
 
     #[test]
     fn boardjson_import_export_roundtrip() {

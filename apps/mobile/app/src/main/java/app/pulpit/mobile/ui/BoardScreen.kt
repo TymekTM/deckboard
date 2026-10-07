@@ -391,6 +391,7 @@ private fun TileCell(
         image2 = image2,
         statusImage = statusImage,
         statusReceivedAtMs = statusReceivedAtMs,
+        liveElement = live,
         onPressStart = { vm.pressStart(boardId, t) },
         onPressEnd = {
             if (t.kind == V2.KIND_TOGGLE || templateFor(t) == "toggle") {

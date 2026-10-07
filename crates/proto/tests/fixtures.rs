@@ -137,6 +137,20 @@ fn boards_sync() {
     assert_eq!(style.icon2.as_deref(), Some("\u{f028}"));
     let hash2 = button.manifest.asset_hash2.as_deref().expect("img2 hash");
     assert_eq!(hash2.len(), 64);
+    // utility tools (round 5): the widget hint names the tool kind, the
+    // tile config rides params, and the state channel is the per-id
+    // `tool-<id>` key the manager pushes compact state under
+    let tool = &board.tiles[2];
+    assert_eq!(tool.id, 30);
+    assert_eq!(tool.manifest.kind, WidgetKind::Button);
+    assert_eq!(tool.manifest.params["widget"], "tool-timer");
+    assert_eq!(tool.manifest.params["duration"], "05:00");
+    assert_eq!(tool.manifest.params["finish_action"], "play");
+    assert_eq!(tool.manifest.state.as_ref().unwrap().channel, "ext.tool-30");
+    assert_eq!(
+        tool.manifest.interactions,
+        vec![Interaction::Tap, Interaction::LongPress, Interaction::DoubleTap]
+    );
 }
 
 #[test]
@@ -173,6 +187,16 @@ fn state_sync() {
     let (_, sync) = pinned::<StateSync>("state.sync", TYPE_STATE_SYNC);
     assert_eq!(sync.values["ext.speaker-muted"], "OFF");
     assert_eq!(sync.values["discord.microphone-muted"], true);
+    assert_eq!(
+        sync.values["ext.tool-timer"],
+        serde_json::json!({
+            "durationMs": 300000,
+            "elapsedMs": 0,
+            "finished": false,
+            "running": false,
+            "startedAtMs": 0,
+        })
+    );
     assert_eq!(sync.series["ext.si-cpu-usage"], vec![0.1, 0.42, 0.44]);
 }
 

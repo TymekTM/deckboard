@@ -139,6 +139,15 @@ impl Mapper {
         if b.kind == "spotify-playback" && b.command.as_deref() == Some("play") {
             return Some("custom-value".to_string());
         }
+        // utility tools carry their live state (server-authoritative
+        // timer/stopwatch/counter, key `tool-<id>`) through the same
+        // custom-value lane as vol_mute
+        if matches!(
+            b.kind.as_str(),
+            "tool-timer" | "tool-stopwatch" | "tool-counter"
+        ) {
+            return Some("custom-value".to_string());
+        }
         props.app.clone()
     }
 
@@ -172,6 +181,9 @@ impl Mapper {
         // lives in `app_value`, shared with the per-event paths)
         if b.kind == "vol" && command == "vol_mute" {
             extra = "speaker-muted".to_string();
+        }
+        if matches!(b.kind.as_str(), "tool-timer" | "tool-stopwatch" | "tool-counter") {
+            extra = format!("tool-{}", b.id);
         }
 
         let mut o = Map::new();
@@ -446,6 +458,23 @@ mod tests {
         assert_eq!(s["type"], "http-request");
         assert_eq!(s["mode"], "button");
         assert!(s["extra"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tool_tiles_watch_their_per_id_state_key() {
+        let m = Mapper::new();
+        for kind in ["tool-timer", "tool-stopwatch", "tool-counter"] {
+            let s = m.shortcut_payload(&button(kind, None, 0, 0, 1, 1));
+            // the manager pushes compact state and 1 Hz labels under
+            // `tool-<button id>`; the stock client binds custom values
+            // through the app+extra pair, like vol_mute
+            assert_eq!(s["extra"], "tool-10", "{kind}");
+            assert_eq!(s["app"], "custom-value", "{kind}");
+        }
+        // the clock never pushes - no listener, no app override
+        let s = m.shortcut_payload(&button("tool-clock", None, 0, 0, 1, 1));
+        assert_eq!(s["extra"], "");
+        assert!(s.get("app").is_none());
     }
 
     #[test]

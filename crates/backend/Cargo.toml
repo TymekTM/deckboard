@@ -16,6 +16,7 @@ pulpit-vm = { path = "../vm" }
 pulpit-discord = { path = "../discord" }
 pulpit-spotify = { path = "../spotify" }
 pulpit-os = { path = "../os" }
+pulpit-tools = { path = "../tools" }
 pulpit-sysinfo = { path = "../sysinfo" }
 pulpit-aidev = { path = "../aidev" }
 ureq = "3"

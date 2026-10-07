@@ -46,6 +46,8 @@ struct DesktopState {
     /// hammer the API).
     spotify_playlists:
         std::sync::Mutex<Option<(std::time::Instant, Vec<pulpit_spotify::Playlist>)>>,
+    #[allow(dead_code)]
+    tools: Option<Arc<pulpit_tools::ToolManager>>,
 }
 
 impl DesktopState {
@@ -375,6 +377,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             spotify: None,
             spotify_path: None,
             spotify_playlists: std::sync::Mutex::new(None),
+            tools: None,
         };
     }
     let db = db.unwrap();
@@ -416,6 +419,20 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     }
     pulpit_host::register_inputs(&ext_manager);
 
+    let hub = Arc::new(Hub::new());
+    let tools_path = data_dir.join("tools.json");
+    let (tools, tools_rx) = pulpit_tools::spawn_tools(tools_path, hub.clone());
+    // A timer's on-finish "switch board" acts on this host's own touch
+    // mode: the same DOM event a board-switch tile's exec emits.
+    let (tools_board_tx, mut tools_board_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+    tools.set_board_sink(tools_board_tx);
+    let app_for_tools = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(board) = tools_board_rx.recv().await {
+            let _ = app_for_tools.emit("change-board", board);
+        }
+    });
+
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -424,11 +441,30 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 data_dir.join("settings.json"),
             )
             .with_voicemeeter_override(pulpit_vm::load_dll_override(&settings))
-            .with_spotify(spotify.clone()),
+            .with_spotify(spotify.clone())
+            .with_tools(Some(tools.clone())),
     );
-
-    let hub = Arc::new(Hub::new());
     let broadcaster = EditorBroadcaster::new(hub.clone(), backend.clone());
+
+    // Lazy GC: drop tools.json entries whose tile no longer exists
+    // (AUTOINCREMENT ids are never reused, so a kept entry is dead
+    // weight only - the sweep just keeps the file small).
+    {
+        let tools = tools.clone();
+        let backend = backend.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                interval.tick().await;
+                let tools = tools.clone();
+                let backend = backend.clone();
+                let ids = tauri::async_runtime::spawn_blocking(move || backend.all_button_ids())
+                    .await
+                    .unwrap_or_default();
+                tools.clean_deleted(&ids);
+            }
+        });
+    }
 
     // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
     // /v2/pair. Shares the backend with the legacy layer; a broken devices
@@ -531,6 +567,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     tauri::async_runtime::spawn(pulpit_host::speaker_watch(
         feed.clone(),
         backend.clone() as Arc<dyn Backend>,
+    ));
+    tauri::async_runtime::spawn(pulpit_host::forward_producer(
+        feed.clone(),
+        tools_rx,
     ));
 
     // Spotify (when its config is readable): the poller's consumers
@@ -653,6 +693,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         spotify,
         spotify_path: Some(spotify_path),
         spotify_playlists: std::sync::Mutex::new(None),
+        tools: Some(tools),
     }
 }
 
@@ -2901,13 +2942,23 @@ async fn exec_button_gesture(
             }
         }
         let mut sink = UiSink(app, tx);
-        backend.exec_tap(button, &mut sink);
+        // tool tiles carry per-gesture semantics (start/pause, reset) in
+        // the backend; every other kind executes like a desktop tap, so
+        // held keys press and release instead of sticking down
+        if pulpit_tools::is_tool_action(&button.kind) {
+            backend.exec_gesture(button, &gesture, &mut sink);
+        } else {
+            backend.exec_tap(button, &mut sink);
+        }
     })
     .await;
     while let Ok((app_kind, key, value)) = rx.try_recv() {
         pulpit_host::push_values(&feed, app_kind, &serde_json::json!({ key: value })).await;
     }
     if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
+    if let Some(message) = backend_for_error.take_last_http_error() {
         return Err(message);
     }
     Ok(())

@@ -21,6 +21,7 @@ pulpit-proto = { path = "../proto" }
 pulpit-db = { path = "../db" }
 pulpit-actions = { path = "../actions" }
 pulpit-legacy = { path = "../legacy" }
+pulpit-tools = { path = "../tools" }
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }
