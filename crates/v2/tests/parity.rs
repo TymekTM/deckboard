@@ -564,10 +564,12 @@ fn spotify_button_kinds_agree_between_the_wires() {
 
 #[test]
 fn spotify_slider_kinds_agree_between_the_wires() {
-    // volume watches its own kind, seek watches the pushed progress key
-    for (kind, key) in [
-        ("spotify-volume", "spotify-volume"),
-        ("spotify-seek", "spotify-progress"),
+    // volume watches its own kind, seek watches the pushed progress key;
+    // legacy keeps the contractual `extra`, while v2 reads volume from the
+    // 0..1 `spotify-volume-level` channel (`spotify-volume` is percent)
+    for (kind, key, channel) in [
+        ("spotify-volume", "spotify-volume", "spotify-volume-level"),
+        ("spotify-seek", "spotify-progress", "spotify-progress"),
     ] {
         let (legacy, tile) = both(&row(kind, "slider", None));
         assert_eq!(legacy["mode"], "slider", "{kind}");
@@ -583,7 +585,7 @@ fn spotify_slider_kinds_agree_between_the_wires() {
             .state
             .as_ref()
             .expect("{kind} watches a channel");
-        assert_eq!(state.channel, format!("ext.{key}"), "{kind}");
+        assert_eq!(state.channel, format!("ext.{channel}"), "{kind}");
         assert_eq!(state.shape, pulpit_proto::StateShape::Scalar, "{kind}");
     }
 }

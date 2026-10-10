@@ -364,6 +364,7 @@ fun KnobTile(
     val live by rememberUpdatedState(liveValue)
     val sendSlide by rememberUpdatedState(onSlider)
     val value = slide.current(liveValue)
+    LaunchedEffect(liveValue) { slide.onLive(liveValue) }
     val arcColor = tile.style?.color2?.let { hex(it, titleColor) } ?: titleColor
 
     Box(

@@ -88,9 +88,12 @@ class SliderStepLimiter(
  *  - null [dragValue] until somebody drags: the channel's live value
  *    drives the widget then (the desktop's touch mode mirrors the same
  *    way);
- *  - a completed drag keeps its position - the face must not flicker
- *    back while the echo patch travels - a cancelled one hands control
- *    back to live;
+ *  - a completed drag keeps its position only until the channel's live
+ *    value moves off what it was at release: the face must not flicker
+ *    back while the echo patch travels, but once the server reports a
+ *    new value (the echo, or a change made elsewhere) the widget follows
+ *    live again - [onLive] drops the stale drag position. A cancelled
+ *    drag hands control back to live at once;
  *  - every send is throttled except the forced final one, so release
  *    and cancel always converge on the last sampled value;
  *  - step-limited haptic feedback fires light ticks during drag. */
@@ -102,13 +105,33 @@ class SlideDragController(
     var dragValue: Float? by mutableStateOf(null)
         private set
 
-    /** The value to render: the drag's own while it lasts, else live. */
-    fun current(live: Double?): Float =
-        dragValue ?: live?.coerceIn(0.0, 1.0)?.toFloat() ?: 0.5f
+    private var dragging by mutableStateOf(false)
+
+    /** The channel's live value when the finger lifted; the drag's
+     *  position is held for as long as live still reads this. */
+    private var liveAtRelease: Double? by mutableStateOf(null)
+
+    /** The value to render: the drag's own while it lasts (and until
+     *  live moves after release), else live. */
+    fun current(live: Double?): Float {
+        val held = dragValue
+        if (held != null && (dragging || live == liveAtRelease)) return held
+        return live?.coerceIn(0.0, 1.0)?.toFloat() ?: held ?: 0.5f
+    }
+
+    /** Call when the live value changes (a LaunchedEffect keyed on it):
+     *  once a released drag is no longer what live reports, forget the
+     *  drag position so the widget tracks the server from here on. */
+    fun onLive(live: Double?) {
+        if (!dragging && dragValue != null && live != liveAtRelease) {
+            dragValue = null
+        }
+    }
 
     /** The drag begins at [v] (e.g. where the finger landed) - always
      *  sent, so the first positioning is not at the throttle's mercy. */
     fun start(v: Float, send: (Float) -> Unit) {
+        dragging = true
         dragValue = v
         stepLimiter.reset(v)
         throttle.push(v, force = true, send = send)
@@ -130,6 +153,8 @@ class SlideDragController(
      *  server, throttling only smooths the path. */
     fun end(live: Double?, send: (Float) -> Unit) {
         throttle.push(current(live), force = true, send = send)
+        dragging = false
+        liveAtRelease = live
     }
 
     /** A cancelled drag still commits its last sampled position (like

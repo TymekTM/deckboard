@@ -401,6 +401,12 @@ fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<St
     if key.is_empty() && row.mode == "status" {
         key = row.kind.clone();
     }
+    // the spotify volume slider reads a 0..1 fraction; the legacy
+    // `spotify-volume` key carries percent ("55"), which a slider widget
+    // would clamp to full
+    if key == "spotify-volume" && row.mode == "slider" {
+        key = "spotify-volume-level".to_string();
+    }
     if key.is_empty()
         && matches!(
             row.kind.as_str(),
@@ -916,6 +922,23 @@ mod tests {
             "icon2 resolved from the icon2 column"
         );
         assert_eq!(style.color2.as_deref(), Some("#ED4245"));
+    }
+
+    #[test]
+    fn spotify_volume_slider_watches_the_fraction_channel() {
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let tile = build_tile(
+            &row("spotify-volume", "slider", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::Slider);
+        assert_eq!(
+            tile.manifest.state.unwrap().channel,
+            "ext.spotify-volume-level"
+        );
     }
 
     #[test]
