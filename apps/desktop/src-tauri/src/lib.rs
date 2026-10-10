@@ -9,7 +9,7 @@ use pulpit_db::{BoardRow, ButtonRow};
 use pulpit_ext::ExtManager;
 use pulpit_legacy::{AppState, Backend, EditorBroadcaster, Hub};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -973,7 +973,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         // a minimized window still reports visible; clicking it must restore
-        let shown = window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false);
+        let shown = is_window_shown(&window);
         if shown && window.is_focused().unwrap_or(false) {
             HIDDEN_SINCE.store(
                 pulpit_v2::unix_millis(),
@@ -993,6 +993,27 @@ fn toggle_main_window(app: &AppHandle) {
 /// up, via the [`take_pending_touch_toggle`] command.
 static PENDING_TOUCH_TOGGLE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the main window is currently visible and not minimized.
+/// Returns false if the window does not exist (e.g. torn down while hidden in tray),
+/// is hidden (minimized to system tray), or is minimized to taskbar.
+fn is_main_window_not_minimized(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .as_ref()
+        .map(is_window_shown)
+        .unwrap_or(false)
+}
+
+fn is_window_shown(window: &WebviewWindow) -> bool {
+    is_window_shown_state(
+        window.is_visible().unwrap_or(false),
+        window.is_minimized().unwrap_or(false),
+    )
+}
+
+fn is_window_shown_state(visible: bool, minimized: bool) -> bool {
+    visible && !minimized
+}
 
 /// Toggle touch mode from the tray item or the global hotkey (DESK-07).
 /// The idle sweep may have torn the WebView down - emitting
@@ -1023,6 +1044,9 @@ fn toggle_touch_mode(app: &AppHandle) {
 /// (`pulpitApp/editor.json`, default Ctrl+Alt+D - the original's
 /// `toggleTouchMode` concept); an unusable stored combo falls back to the
 /// default with a warning.
+///
+/// The hotkey only triggers when the main window is not minimized
+/// (neither minimized to the taskbar nor minimized/hidden to the system tray).
 fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
     let shortcut = match combo.parse::<tauri_plugin_global_shortcut::Shortcut>() {
@@ -1036,7 +1060,7 @@ fn register_touch_mode_hotkey(app: &AppHandle, combo: &str) -> Result<(), String
     let result = app
         .global_shortcut()
         .on_shortcut(shortcut, |app, _s, event| {
-            if event.state() == ShortcutState::Pressed {
+            if event.state() == ShortcutState::Pressed && is_main_window_not_minimized(app) {
                 toggle_touch_mode(app);
             }
         });
@@ -1900,6 +1924,14 @@ mod tests {
             hotkey_plan("Ctrl+Alt+D", "Ctrl+Alt+D"),
             Ok(HotkeyPlan::Noop)
         ));
+    }
+
+    #[test]
+    fn window_shown_state_only_true_when_visible_and_not_minimized() {
+        assert!(is_window_shown_state(true, false));
+        assert!(!is_window_shown_state(true, true));
+        assert!(!is_window_shown_state(false, false));
+        assert!(!is_window_shown_state(false, true));
     }
 
     #[test]
