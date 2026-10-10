@@ -3618,7 +3618,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-actions"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "enigo",
  "open",
@@ -3630,7 +3630,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-aidev"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "pulpit-db",
@@ -3645,7 +3645,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-backend"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "pulpit-actions",
  "pulpit-aidev",
@@ -3668,7 +3668,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-db"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "dirs 5.0.1",
  "rusqlite",
@@ -3682,7 +3682,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-desktop"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3725,7 +3725,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-discord"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "pulpit-db",
  "serde",
@@ -3738,7 +3738,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-ext"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "boa_engine",
  "dirs 5.0.1",
@@ -3755,7 +3755,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-host"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "base64 0.23.1",
  "dirs 5.0.1",
@@ -3782,7 +3782,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-legacy"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -3798,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-obs"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -3815,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-os"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3831,7 +3831,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-proto"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3840,7 +3840,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-server"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3868,7 +3868,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-spotify"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "base64 0.23.1",
  "pulpit-db",
@@ -3885,7 +3885,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-sysinfo"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -3894,7 +3894,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-tools"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "pulpit-actions",
  "pulpit-db",
@@ -3909,7 +3909,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-v2"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3935,7 +3935,7 @@ dependencies = [
 
 [[package]]
 name = "pulpit-vm"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "pulpit-db",
  "serde",

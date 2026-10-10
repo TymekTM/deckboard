@@ -24,7 +24,7 @@ android {
         // the target tablet (SM-T561, LineageOS) runs Android 7.1 (API 25)
         minSdk = 24
         targetSdk = 34
-        versionCode = 3
+        versionCode = 4
         versionName = workspaceVersion
     }
 
