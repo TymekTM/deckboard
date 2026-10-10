@@ -289,4 +289,34 @@ mod tests {
         assert_eq!(uni.chars().next().unwrap() as u32, 0xf101);
         assert!(r.icon_unicode("no-such-icon", "fas").is_none());
     }
+
+    /// The desktop editor's icon picker (apps/desktop/src/icons.js) offers
+    /// ~1000 names; each must resolve to a glyph here or the tile renders
+    /// blank on the tablets. Reads the picker's own source so the two
+    /// cannot drift apart.
+    #[test]
+    fn every_picker_icon_resolves_to_a_glyph() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src/icons.js"
+        );
+        let src = std::fs::read_to_string(path).expect("icons.js next to the desktop sources");
+        let all = src
+            .split("export const ALL_ICONS = [")
+            .nth(1)
+            .and_then(|rest| rest.split("];").next())
+            .expect("ALL_ICONS list");
+        let r = StyleResolver::global();
+        let mut count = 0;
+        for name in all.split('"').skip(1).step_by(2) {
+            let glyph = r
+                .icon_unicode(name, "fas")
+                .unwrap_or_else(|| panic!("picker icon {name:?} is not in icons.json"));
+            // a few FA6 icons (plus, asterisk, hashtag...) live on ASCII
+            // codepoints, so only emptiness is a failure here
+            assert_eq!(glyph.chars().count(), 1, "{name:?} resolved to {glyph:?}");
+            count += 1;
+        }
+        assert!(count > 900, "picker list suspiciously short: {count}");
+    }
 }

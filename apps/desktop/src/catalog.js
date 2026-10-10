@@ -144,6 +144,57 @@ export const CATALOG = [
     ],
   },
   {
+    // full request action (Home Assistant, webhooks, n8n, REST): the
+    // backend executes it on press and can store the status or an
+    // extracted JSON value into a variable a custom-value tile displays.
+    // Placeholder {{var:klucz}} substitutes a current variable value
+    // (URL-encoded in the URL, raw in headers and the body).
+    value: "http-request",
+    label: "HTTP Request",
+    icon: "paper-plane",
+    color: "#009688",
+    fields: [
+      {
+        key: "method",
+        kind: "select",
+        label: "Metoda",
+        options: [
+          { value: "GET", label: "GET" },
+          { value: "POST", label: "POST" },
+          { value: "PUT", label: "PUT" },
+          { value: "PATCH", label: "PATCH" },
+          { value: "DELETE", label: "DELETE" },
+        ],
+      },
+      { key: "url", label: "URL", placeholder: "https://... ({{var:klucz}} podstawia zmienną)" },
+      { key: "headers", kind: "textarea", label: "Nagłówki", placeholder: "po jednym na linię:\nAuthorization: Bearer ..." },
+      {
+        key: "bodyType",
+        kind: "select",
+        label: "Typ treści",
+        options: [
+          { value: "none", label: "Brak" },
+          { value: "json", label: "JSON" },
+          { value: "form", label: "Formularz" },
+          { value: "text", label: "Tekst" },
+        ],
+      },
+      { key: "body", kind: "textarea", label: "Treść", placeholder: '{"on": true}' },
+      { key: "timeout", kind: "number", label: "Limit czasu (s)", placeholder: "10" },
+      {
+        key: "ignoreCertErrors",
+        kind: "select",
+        label: "Ignoruj błędy certyfikatu",
+        options: [
+          { value: "nie", label: "Nie" },
+          { value: "tak", label: "Tak" },
+        ],
+      },
+      { key: "responseVar", label: "Zapisz odpowiedź do zmiennej", placeholder: "np. lampState" },
+      { key: "jsonPath", label: "Ścieżka JSON", placeholder: "np. /state lub data.temp (bez ścieżki: kod odpowiedzi)" },
+    ],
+  },
+  {
     value: "dir",
     label: "Open Folder",
     icon: "folder",
@@ -216,7 +267,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SET_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
       { key: "value", label: "Value" },
     ],
   },
@@ -228,7 +279,7 @@ export const CATALOG = [
     dual: true,
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
     ],
   },
   {
@@ -238,7 +289,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
       { key: "value", label: "Value" },
     ],
   },
@@ -249,7 +300,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
       { key: "value", label: "Value" },
     ],
   },
@@ -260,7 +311,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SET_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
       { key: "value", label: "Value" },
     ],
   },
@@ -272,7 +323,7 @@ export const CATALOG = [
     dual: true,
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_TOGGLE_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
     ],
   },
   {
@@ -282,7 +333,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
       { key: "value", label: "Value" },
     ],
   },
@@ -293,7 +344,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
       { key: "value", label: "Value" },
     ],
   },
@@ -305,7 +356,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_BUS_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_BUS_INDEX, devices: "vm-bus" },
     ],
   },
   {
@@ -316,7 +367,7 @@ export const CATALOG = [
     color: "#171A21",
     fields: [
       { key: "param", kind: "select", label: "Parameter", options: VM_SLIDER_STRIP_PARAMS },
-      { key: "number", kind: "select", label: "Index", options: VM_INDEX },
+      { key: "number", kind: "select", label: "Index", options: VM_INDEX, devices: "vm-strip" },
     ],
   },
   {
@@ -327,31 +378,54 @@ export const CATALOG = [
   },
   { divider: true },
   { header: "OBS Studio" },
+  // native OBS integration (obs-websocket v5); the `devices: "obs-*"`
+  // pickers are fed from the live connection when OBS is connected and
+  // fall back to free text otherwise. The dual tiles read the pushed
+  // OBS state via the STATE_BINDINGS entries below.
   { value: "obs-scene", label: "Switch Scene", icon: "video", color: "#2980b9", dual: true,
-    fields: [{ key: "scene", label: "Scene name" }] },
+    fields: [{ key: "scene", label: "Scene name", devices: "obs-scenes" }] },
   { value: "obs-source", label: "Toggle Source", icon: "photo-video", color: "#2980b9", dual: true,
-    fields: [{ key: "source", label: "Source name" }] },
+    fields: [{ key: "source", label: "Source name", devices: "obs-sources" }] },
   { value: "obs-device-audio", label: "Toggle Audio Source", icon: "volume-up", color: "#2980b9", dual: true,
-    fields: [{ key: "device", label: "Source name" }] },
+    fields: [{ key: "device", label: "Source name", devices: "obs-inputs" }] },
   { value: "obs-filter", label: "Toggle Filter", icon: "filter", color: "#2980b9", dual: true,
-    fields: [{ key: "filter", label: "Filter name" }] },
+    fields: [
+      { key: "filter", label: "Filter name", devices: "obs-filters" },
+      { key: "source", label: "Source (optional)", devices: "obs-inputs" },
+    ] },
   { value: "obs-studio-mode", label: "Toggle Studio Mode", icon: "columns", color: "#2980b9", dual: true },
+  { value: "obs-record", label: "Toggle Record", icon: "dot-circle", color: "#2980b9", dual: true },
+  { value: "obs-stream", label: "Toggle Stream", icon: "broadcast-tower", color: "#2980b9", dual: true },
+  { value: "obs-replay-save", label: "Save Replay Buffer", icon: "save", color: "#2980b9" },
+  { value: "obs-audio-slider", label: "Audio Slider", mode: "slider", icon: "sliders-h", color: "#2980b9",
+    fields: [{ key: "device", label: "Source name", devices: "obs-inputs" }] },
   { divider: true },
   { header: "Streamlabs & XSplit" },
+  // no native integration: stock boards carry these kinds, so they stay
+  // listed but the picker greys them out (see unavailable in
+  // ActionPicker.vue) and the backend warns once per kind, not per press
   { value: "slobs-scene", label: "SLOBS: Switch Scene", icon: "video", color: "#3070b0", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)",
     fields: [{ key: "scene", label: "Scene name" }] },
   { value: "slobs-source", label: "SLOBS: Toggle Source", icon: "photo-video", color: "#3070b0", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)",
     fields: [{ key: "source", label: "Source name" }] },
   { value: "slobs-device-audio", label: "SLOBS: Toggle Audio Source", icon: "volume-up", color: "#3070b0", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)",
     fields: [{ key: "device", label: "Source name" }] },
   { value: "xsplit-scene", label: "XSplit: Switch Scene", icon: "video", color: "#2d7dd2", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)",
     fields: [{ key: "scene", label: "Scene name" }] },
   { divider: true },
   { header: "Twitch" },
-  { value: "twitch-slow", label: "Slow Mode", icon: "hourglass-half", color: "#9146ff", dual: true },
-  { value: "twitch-follow-only", label: "Followers-Only Mode", icon: "user-plus", color: "#9146ff", dual: true },
-  { value: "twitch-subs-only", label: "Subs-Only Mode", icon: "star", color: "#9146ff", dual: true },
-  { value: "twitch-emote-only", label: "Emote-Only Mode", icon: "smile", color: "#9146ff", dual: true },
+  { value: "twitch-slow", label: "Slow Mode", icon: "hourglass-half", color: "#9146ff", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)" },
+  { value: "twitch-follow-only", label: "Followers-Only Mode", icon: "user-plus", color: "#9146ff", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)" },
+  { value: "twitch-subs-only", label: "Subs-Only Mode", icon: "star", color: "#9146ff", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)" },
+  { value: "twitch-emote-only", label: "Emote-Only Mode", icon: "smile", color: "#9146ff", dual: true,
+    unavailable: "Niedostępne w Pulpit (wymaga rozszerzenia)" },
   { divider: true },
   { header: "AI dev work" },
   {
@@ -471,6 +545,119 @@ export const CATALOG = [
     color: "#1DB954",
   },
   { divider: true },
+  { header: "Tools" },
+  // native utility tiles (round 5): the state lives on the server
+  // (`~/pulpitApp/tools.json`), so every tablet and the desktop touch
+  // mode show the same value. Taps run through the tools manager before
+  // the builtin dispatcher; rendering is per-surface (ToolTile.vue /
+  // ui/ToolTiles.kt). The deckboard-clock JS extension keeps its own
+  // kinds - these deliberately use new `tool-*` names.
+  {
+    value: "tool-clock",
+    label: "Clock",
+    icon: "clock",
+    color: "#34495e",
+    fields: [
+      {
+        key: "format",
+        kind: "select",
+        label: "Format",
+        options: [
+          { value: "24h", label: "24h" },
+          { value: "12h", label: "12h" },
+        ],
+      },
+      {
+        key: "seconds",
+        kind: "select",
+        label: "Seconds",
+        options: [
+          { value: "no", label: "Hide" },
+          { value: "yes", label: "Show" },
+        ],
+      },
+      {
+        key: "date",
+        kind: "select",
+        label: "Date",
+        options: [
+          { value: "no", label: "Hide" },
+          { value: "yes", label: "Show" },
+        ],
+      },
+      { key: "timezone", label: "Time zone", placeholder: "IANA zone, empty = device" },
+    ],
+  },
+  {
+    value: "tool-timer",
+    label: "Countdown Timer",
+    icon: "hourglass-half",
+    color: "#34495e",
+    fields: [
+      { key: "duration", label: "Duration (mm:ss)", placeholder: "05:00" },
+      {
+        key: "finish_action",
+        kind: "select",
+        label: "On finish",
+        options: [
+          { value: "none", label: "Nothing" },
+          { value: "play", label: "Play a sound" },
+          { value: "board", label: "Switch board" },
+        ],
+      },
+      { key: "sound_path", label: "Sound file path", showIf: { key: "finish_action", value: "play" } },
+      { key: "board_id", kind: "number", label: "Board id", showIf: { key: "finish_action", value: "board" } },
+    ],
+  },
+  {
+    value: "tool-stopwatch",
+    label: "Stopwatch",
+    icon: "stopwatch",
+    color: "#34495e",
+  },
+  {
+    value: "tool-counter",
+    label: "Counter",
+    icon: "calculator",
+    color: "#34495e",
+    fields: [
+      { key: "step", kind: "number", label: "Step", placeholder: "1" },
+      { key: "start_value", kind: "number", label: "Start value", placeholder: "0" },
+      { key: "label", label: "Label", placeholder: "Licznik" },
+    ],
+  },
+  { header: "Multimedia (system)" },
+  // natywna integracja SMTC (Windows global media transport): działa dla
+  // dowolnego odtwarzacza widocznego w systemie (przeglądarka, Tidal,
+  // VLC...), nie tylko przez Web API Spotify. Opcjonalny cel "Aplikacja"
+  // edytuje EditTileModal (options column), nie pola command.
+  {
+    value: "media-now-playing",
+    label: "Teraz odtwarzane (wyświetlanie)",
+    mode: "status",
+    icon: "music",
+    color: "#8E44AD",
+  },
+  {
+    value: "media-control",
+    label: "Sterowanie multimediami",
+    icon: "play",
+    color: "#8E44AD",
+    select: [
+      { value: "play-pause", label: "Play / Pause" },
+      { value: "next", label: "Next" },
+      { value: "previous", label: "Previous" },
+      { value: "stop", label: "Stop" },
+    ],
+  },
+  {
+    value: "media-seek",
+    label: "Przewijanie utworu",
+    mode: "slider",
+    icon: "clock",
+    color: "#8E44AD",
+  },
+  { divider: true },
   { header: "Variables & Logic" },
   {
     value: "custom-value",
@@ -529,15 +716,22 @@ export const STATE_BINDINGS = {
   "spotify-shuffle": { watch: "spotify-shuffle" },
   "spotify-repeat": { watch: "spotify-repeat-on" },
   "spotify-like": { watch: "spotify-liked" },
-  // obs/slobs/xsplit/twitch/discord integrations have no live push in
-  // Pulpit (the JS-app extensions that owned the app-state lane are
-  // gone; exec pushes at most a per-key custom value): their dual tiles
-  // fall back to the session tap flip, like the vm toggles below.
-  "obs-studio-mode": {},
-  "obs-scene": {},
-  "obs-source": {},
-  "obs-device-audio": {},
-  "obs-filter": {},
+  // Native OBS (round 5): the connection worker pushes the live state
+  // under the `obs-*` semantic keys (crates/obs/src/state.rs). Scene
+  // pushes the current scene name (compared against the tile's scene),
+  // source/filter/device push name arrays (membership decides), the
+  // argument-less toggles push booleans. OBS offline pushes the empty
+  // values, which read as "unknown" and fall back to the tap flip.
+  "obs-scene": { watch: "obs-scene", cmd: "scene" },
+  "obs-source": { watch: "obs-source", cmd: "source" },
+  "obs-device-audio": { watch: "obs-device-audio", cmd: "device" },
+  "obs-filter": { watch: "obs-filter", cmd: "filter" },
+  "obs-studio-mode": { watch: "obs-studio-mode" },
+  "obs-record": { watch: "obs-record" },
+  "obs-stream": { watch: "obs-stream" },
+  // slobs/xsplit/twitch integrations have no live push in Pulpit (the
+  // JS-app extensions that owned the app-state lane are gone): their
+  // dual tiles fall back to the session tap flip.
   "slobs-scene": {},
   "slobs-source": {},
   "slobs-device-audio": {},

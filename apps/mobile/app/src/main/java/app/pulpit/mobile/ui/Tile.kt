@@ -85,6 +85,10 @@ fun templateFor(tile: Tile): String = when {
     // a clock can arrive as a toggle (the clock extension pushes the time
     // onto a channel); the widget hint outranks the wire kind
     tile.widgetHint() == "clock" -> "clock"
+    tile.widgetHint() == "tool-clock" -> "tool-clock"
+    tile.widgetHint() == "tool-timer" -> "tool-timer"
+    tile.widgetHint() == "tool-stopwatch" -> "tool-stopwatch"
+    tile.widgetHint() == "tool-counter" -> "tool-counter"
     tile.kind == V2.KIND_SLIDER -> "slider"
     tile.kind == V2.KIND_KNOB -> "knob"
     tile.kind == V2.KIND_GRAPH -> "graph"
@@ -114,6 +118,10 @@ fun Tile(
     /** Local receive time of the status payload, for its playback
      *  progress extrapolation. */
     statusReceivedAtMs: Long = 0L,
+    /** The raw live value on the tile's state channel, when it carries
+     *  one: tool tiles (timer/stopwatch/counter) read their compact
+     *  server state object out of it. */
+    liveElement: JsonElement? = null,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
     onSlider: (Float) -> Unit,
@@ -240,6 +248,10 @@ fun Tile(
                 Box(Modifier.matchParentSize().background(Color.White.copy(alpha = scrim)))
             }
             when (template) {
+                "tool-clock" -> ToolClockTile(tile, titleColor)
+                "tool-timer" -> ToolTimerTile(tile, liveElement, titleColor, onPress = onPressEnd, onGesture = onGesture)
+                "tool-stopwatch" -> ToolStopwatchTile(tile, liveElement, titleColor, onPress = onPressEnd, onGesture = onGesture)
+                "tool-counter" -> ToolCounterTile(tile, liveElement, titleColor, onPress = onPressEnd, onGesture = onGesture)
                 "slider" -> SliderTile(tile, color, icon, iconFamily, iconColor, liveValue, onSlider)
                 "knob" -> KnobTile(tile, iconColor, titleColor, liveValue, onSlider)
                 "graph" -> GraphTile(tile, series, liveText, channel, titleColor)
@@ -327,6 +339,7 @@ private fun ButtonTile(
     // release path: their release sends press-end, never a tap.
     val tapFromDetector = tile.interacts(V2.INT_DOUBLE_TAP) &&
         !tile.interacts(V2.INT_PRESS_END)
+    val haptics = LocalHaptics.current
     val wantsSwipe =
         tile.interacts(V2.INT_SWIPE_LEFT) || tile.interacts(V2.INT_SWIPE_RIGHT)
     // icon-only faces (discord voice toggles): the color and the glyph
@@ -356,7 +369,11 @@ private fun ButtonTile(
                             },
                             onDragEnd = {
                                 tracker.moved = true
-                                when (classifySwipe(total.x, total.y, SWIPE_MIN_PX)) {
+                                val swipe = classifySwipe(total.x, total.y, SWIPE_MIN_PX)
+                                if (swipe.isRecognized) {
+                                    haptics.heavy()
+                                }
+                                when (swipe) {
                                     Swipe.Left -> onGestureLatest(V2.INT_SWIPE_LEFT)
                                     Swipe.Right -> onGestureLatest(V2.INT_SWIPE_RIGHT)
                                     Swipe.None -> {}
@@ -374,6 +391,7 @@ private fun ButtonTile(
                     onLongPress = if (tile.interacts(V2.INT_LONG_PRESS)) {
                         { _ ->
                             tracker.longPressed = true
+                            haptics.heavy()
                             onGestureLatest(V2.INT_LONG_PRESS)
                         }
                     } else {
@@ -382,6 +400,7 @@ private fun ButtonTile(
                     onDoubleTap = if (tile.interacts(V2.INT_DOUBLE_TAP)) {
                         { _ ->
                             tracker.doubleTapped = true
+                            haptics.heavy()
                             onGestureLatest(V2.INT_DOUBLE_TAP)
                         }
                     } else {
@@ -397,6 +416,7 @@ private fun ButtonTile(
                     },
                     onPress = {
                         tracker.reset()
+                        haptics.click()
                         pressStart()
                         var released = false
                         try {
@@ -490,6 +510,8 @@ private fun SliderTile(
 ) {
     // one drag protocol with the knob template (MOB-13): see
     // SlideDragController for the live-echo and convergence policy
+    val haptics = LocalHaptics.current
+    val onStepTick: () -> Unit = remember(haptics) { { haptics.sliderTick() } }
     val slide = remember(tile.id) { SlideDragController() }
     // see ButtonTile above: the drag block outlives a live tile edit
     val live by rememberUpdatedState(liveValue)
@@ -508,7 +530,7 @@ private fun SliderTile(
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        slide.move((1f - change.position.y / size.height).coerceIn(0f, 1f), sendSlide)
+                        slide.move((1f - change.position.y / size.height).coerceIn(0f, 1f), onStepTick, sendSlide)
                     },
                     onDragEnd = {
                         // converge: the last sampled value always reaches
@@ -540,4 +562,3 @@ private fun SliderTile(
         }
     }
 }
-

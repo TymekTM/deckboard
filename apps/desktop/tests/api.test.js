@@ -49,13 +49,28 @@ describe("api", () => {
     ["spotifyPlaylists", [], "spotify_playlists", undefined],
     ["spotifyDevices", [], "spotify_devices", undefined],
     ["assetDataUrl", ["h"], "asset_data_url", { hash: "h" }],
+    ["execButtonGesture", [9, "double"], "exec_button_gesture", { id: 9, gesture: "double" }],
+    ["mediaSessions", [], "media_sessions", undefined],
+    ["obsStatus", [], "obs_status", undefined],
+    ["obsApplyConfig", [true, "localhost", 4455, "pw"], "obs_apply_config", { enabled: true, host: "localhost", port: 4455, password: "pw" }],
+    ["obsTestConnection", ["localhost", 4455, null], "obs_test_connection", { host: "localhost", port: 4455, password: null }],
+    ["obsChoices", [], "obs_choices", undefined],
+    ["discordStatus", [], "discord_status", undefined],
+    ["discordSaveConfig", ["id", "secret"], "discord_save_config", { clientId: "id", clientSecret: "secret" }],
+    ["discordAuthorize", [], "discord_authorize", undefined],
+    ["discordDisconnect", [], "discord_disconnect", undefined],
+    ["vmStatus", [], "vm_status", undefined],
+    ["vmSetDllOverride", ["C:/vm.dll"], "vm_set_dll_override", { path: "C:/vm.dll" }],
+    ["vmReconnect", [], "vm_reconnect", undefined],
+    ["vmRun", ["strip"], "vm_run", { vmType: "strip" }],
+    ["vmDevices", [], "vm_devices", undefined],
   ])("%s invokes %s", async (method, args, cmd, payload) => {
     await api[method](...args);
     expect(calls).toEqual([{ cmd, args: payload }]);
   });
 
   it("covers every method in the table above", () => {
-    expect(Object.keys(api)).toHaveLength(42);
+    expect(Object.keys(api)).toHaveLength(57);
   });
 
   it("passes the command's result through", async () => {

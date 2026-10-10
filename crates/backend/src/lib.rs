@@ -10,6 +10,8 @@ use pulpit_actions::{EnigoInput, EventSink};
 use pulpit_db::{BoardRow, ButtonRow, Db};
 use pulpit_discord::DiscordConfig;
 use pulpit_ext::ExtManager;
+mod http_request;
+
 use pulpit_legacy::service::Backend;
 use pulpit_spotify::SpotifyError;
 use pulpit_vm::VoicemeeterState;
@@ -31,6 +33,7 @@ pub struct SqlBackend {
     /// plus the settings path, so fresh tokens can be persisted.
     discord: Mutex<Option<DiscordConfig>>,
     discord_settings_path: Option<std::path::PathBuf>,
+    discord_settings_mtime: Mutex<Option<std::time::SystemTime>>,
     /// Keep-alive Discord connection actor, built on first use: one
     /// authenticated pipe for the process lifetime instead of a fresh
     /// ~450 ms session per click.
@@ -39,11 +42,21 @@ pub struct SqlBackend {
     /// `spotify.json` provides a login; None leaves Spotify actions
     /// claimed-but-logged-out (the design's NeedsLogin surface).
     spotify: Option<pulpit_spotify::Spotify>,
+    /// Native OBS websocket handle, injected by the host when it built
+    /// the producer pump; None leaves OBS actions claimed-but-warned.
+    obs: Option<pulpit_obs::Obs>,
     /// The user-facing message of the last failed Spotify exec/slider
     /// (design §3 error mapping). Cleared on every exec/slider entry and
     /// taken by the host's exec command so a desktop tap surfaces it as
     /// a toast; tablets keep their log-only path.
     spotify_last_error: std::sync::Mutex<Option<String>>,
+    http_last_error: std::sync::Mutex<Option<String>>,
+    custom_values: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    tools: Option<std::sync::Arc<pulpit_tools::ToolManager>>,
+    /// Kinds already greeted with the one "not available in Pulpit"
+    /// warning this run (SLOBS / XSplit / Twitch): the warning is per
+    /// kind per run, never per press.
+    unavailable_warned: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Default-playback control (volume, mute, device switch), built on
     /// first use - the original's speaker service.
     speaker: Mutex<Option<Box<dyn pulpit_os::Speaker>>>,
@@ -61,9 +74,15 @@ impl SqlBackend {
             voicemeeter: Mutex::new(VoicemeeterState::new()),
             discord: Mutex::new(None),
             discord_settings_path: None,
+            discord_settings_mtime: Mutex::new(None),
             discord_client: Mutex::new(None),
             spotify: None,
+            obs: None,
             spotify_last_error: std::sync::Mutex::new(None),
+            http_last_error: std::sync::Mutex::new(None),
+            custom_values: std::sync::Mutex::new(std::collections::HashMap::new()),
+            tools: None,
+            unavailable_warned: std::sync::Mutex::new(std::collections::HashSet::new()),
             speaker: Mutex::new(None),
             http_agent: pulpit_db::http_agent(std::time::Duration::from_secs(10), true),
         }
@@ -74,9 +93,62 @@ impl SqlBackend {
         config: Option<DiscordConfig>,
         settings_path: std::path::PathBuf,
     ) -> Self {
+        let mtime = settings_path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok());
         self.discord = Mutex::new(config);
         self.discord_settings_path = Some(settings_path);
+        self.discord_settings_mtime = Mutex::new(mtime);
         self
+    }
+
+    pub fn with_voicemeeter_override(self, override_path: Option<std::path::PathBuf>) -> Self {
+        self.voicemeeter
+            .lock()
+            .unwrap()
+            .set_override_path(override_path);
+        self
+    }
+
+    pub fn swap_discord_config(&self, config: Option<DiscordConfig>) {
+        *self.discord.lock().unwrap() = config;
+        *self.discord_client.lock().unwrap() = None;
+        if let Some(path) = &self.discord_settings_path {
+            if let Ok(meta) = path.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    *self.discord_settings_mtime.lock().unwrap() = Some(mtime);
+                }
+            }
+        }
+    }
+
+    pub fn get_discord_config(&self) -> Option<DiscordConfig> {
+        self.discord.lock().unwrap().clone()
+    }
+
+    pub fn discord_settings_path(&self) -> Option<&std::path::Path> {
+        self.discord_settings_path.as_deref()
+    }
+
+    pub fn vm_status(&self) -> pulpit_vm::VoicemeeterStatus {
+        self.voicemeeter.lock().unwrap().status()
+    }
+
+    pub fn vm_devices(&self) -> (Vec<pulpit_vm::DeviceItem>, Vec<pulpit_vm::DeviceItem>) {
+        self.voicemeeter.lock().unwrap().devices()
+    }
+
+    pub fn vm_reconnect(&self) -> pulpit_vm::Result<()> {
+        self.voicemeeter.lock().unwrap().reconnect()
+    }
+
+    pub fn vm_run(&self, vm_type: Option<i32>) -> pulpit_vm::Result<()> {
+        self.voicemeeter.lock().unwrap().run_voicemeeter(vm_type)
+    }
+
+    pub fn vm_set_override(&self, path: Option<std::path::PathBuf>) {
+        self.voicemeeter.lock().unwrap().set_override_path(path);
     }
 
     /// Attach the native Spotify integration (None = no `spotify.json`
@@ -84,6 +156,19 @@ impl SqlBackend {
     /// NeedsLogin instead of falling through to the macro dispatcher).
     pub fn with_spotify(mut self, spotify: Option<pulpit_spotify::Spotify>) -> Self {
         self.spotify = spotify;
+        self
+    }
+
+    pub fn with_tools(mut self, tools: Option<std::sync::Arc<pulpit_tools::ToolManager>>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Attach the native OBS integration (None = no obs.json / disabled
+    /// at the file level is still Some - the handle parks itself; None
+    /// means the host could not build the producer pump at all).
+    pub fn with_obs(mut self, obs: Option<pulpit_obs::Obs>) -> Self {
+        self.obs = obs;
         self
     }
 
@@ -125,6 +210,18 @@ impl SqlBackend {
     }
 
     /// New 1x1 button placed at (x, y) in `button` mode.
+    /// Ids of every button, for the tools store's lazy GC of entries
+    /// whose tile was deleted. Best effort: a failed read keeps everything.
+    pub fn all_button_ids(&self) -> Vec<i64> {
+        match self.db.lock().unwrap().all_button_ids() {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::error!("all_button_ids failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     pub fn create_button(
         &self,
         board_id: i64,
@@ -151,6 +248,21 @@ impl SqlBackend {
     }
 
     /// Drag/resize from the editor grid.
+    pub fn move_button_to_board(
+        &self,
+        id: i64,
+        board_id: i64,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+    ) -> pulpit_db::Result<()> {
+        self.db
+            .lock()
+            .unwrap()
+            .update_button_board_and_geometry(id, board_id, x, y, w, h)
+    }
+
     pub fn move_button(&self, id: i64, x: i64, y: i64, w: i64, h: i64) -> pulpit_db::Result<()> {
         self.db
             .lock()
@@ -347,6 +459,23 @@ impl Backend for SqlBackend {
         }
     }
 
+    fn exec_gesture(&self, button: ButtonRow, gesture: &str, sink: &mut dyn EventSink) {
+        let cmd = pulpit_actions::Command::from_row(
+            &button.kind,
+            button.command.as_deref(),
+            button.options.as_deref(),
+            &button.mode,
+        );
+        if pulpit_tools::is_tool_action(&cmd.kind) {
+            if let Some(tools) = &self.tools {
+                let g = gesture.parse().unwrap_or(pulpit_tools::ToolGesture::Tap);
+                tools.execute(button.id, &cmd.kind, cmd.command.as_deref(), g);
+            }
+            return;
+        }
+        self.exec(button, false, sink);
+    }
+
     fn exec(&self, button: ButtonRow, is_tap_start: bool, sink: &mut dyn EventSink) {
         let cmd = pulpit_actions::Command::from_row(
             &button.kind,
@@ -366,8 +495,22 @@ impl Backend for SqlBackend {
         // those tiles.
         let builtin = pulpit_actions::is_builtin_kind(&cmd.kind);
         self.spotify_last_error.lock().unwrap().take();
-        if !builtin && !is_tap_start && self.exec_native(&cmd, sink) {
-            return;
+        self.http_last_error.lock().unwrap().take();
+        if !builtin && !is_tap_start {
+            if pulpit_tools::is_tool_action(&cmd.kind) {
+                if let Some(tools) = &self.tools {
+                    tools.execute(
+                        button.id,
+                        &cmd.kind,
+                        cmd.command.as_deref(),
+                        pulpit_tools::ToolGesture::Tap,
+                    );
+                }
+                return;
+            }
+            if self.exec_native(&cmd, sink) {
+                return;
+            }
         }
         self.with_input(|input| {
             let _ = pulpit_actions::run_command_dispatched(
@@ -388,6 +531,7 @@ impl Backend for SqlBackend {
             &button.mode,
         );
         self.spotify_last_error.lock().unwrap().take();
+        self.http_last_error.lock().unwrap().take();
         if self.exec_runcommand(&cmd)
             || self.exec_extension(&cmd, Some(value))
             || self.exec_sysinfo(&cmd)
@@ -395,7 +539,9 @@ impl Backend for SqlBackend {
             || self.exec_callurl(&cmd)
             || self.exec_voicemeeter(&cmd, Some(value))
             || self.exec_spotify(&cmd, Some(value))
+            || self.exec_obs(&cmd, Some(value))
             || self.exec_speaker_volume(&cmd, value)
+            || self.exec_media(&cmd, Some(value))
         {
             return;
         }
@@ -408,21 +554,32 @@ impl Backend for SqlBackend {
 impl SqlBackend {
     /// The native/extension dispatch chain, shared by top-level tile
     /// presses and multiaction steps: run-command, extension, sysinfo,
-    /// aidev, callurl, voicemeeter, discord, spotify, speaker, play.
-    /// Returns true when one of them claimed the command (the builtin
-    /// dispatcher is skipped, mirroring the original `runCommand`
-    /// default case).
+    /// aidev, callurl, voicemeeter, discord, spotify, speaker, play,
+    /// system media. Returns true when one of them claimed the command
+    /// (the builtin dispatcher is skipped, mirroring the original
+    /// `runCommand` default case).
     fn exec_native(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
         self.exec_runcommand(cmd)
             || self.exec_extension(cmd, None)
+            // unavailable integrations sit right behind the extensions:
+            // a package that actually provides slobs-*/twitch-* must win
+            || self.exec_unavailable(cmd)
             || self.exec_sysinfo(cmd)
             || self.exec_aidev(cmd)
             || self.exec_callurl(cmd)
+            || self.exec_http(cmd, sink)
             || self.exec_voicemeeter(cmd, None)
             || self.exec_discord(cmd, sink)
             || self.exec_spotify(cmd, None)
+            || self.exec_obs(cmd, None)
             || self.exec_speaker(cmd, sink)
             || self.exec_play(cmd)
+            || self.exec_tool(cmd)
+            || self.exec_media(cmd, None)
+    }
+
+    fn exec_tool(&self, cmd: &pulpit_actions::Command) -> bool {
+        pulpit_tools::is_tool_action(&cmd.kind)
     }
 
     /// Full local tap for desktop touch mode and the editor's "Run now":
@@ -512,6 +669,15 @@ impl SqlBackend {
             }
             None => tracing::warn!(kind = "url-to-call", "tile has no urlToCall configured"),
         }
+        true
+    }
+
+    /// Native http-request: full HTTP request action.
+    fn exec_http(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
+        if cmd.kind != "http-request" {
+            return false;
+        }
+        http_request::execute_http_action(self, cmd, sink);
         true
     }
 
@@ -697,6 +863,7 @@ impl SqlBackend {
         if !pulpit_vm::is_vm_action(&cmd.kind) {
             return false;
         }
+        self.maybe_reload_hot_settings();
         let mut args = Self::command_args(cmd);
         if let Some(v) = slider_value {
             if !args.is_object() {
@@ -716,10 +883,43 @@ impl SqlBackend {
     /// refresh token Discord's consent popup shows on the desktop and the
     /// new tokens are saved to settings.json. Returns true when the action
     /// kind belongs to Discord.
+    /// Hot reload for settings.json edits that land behind the process's
+    /// back (a hand edit, or the desktop settings panel writing the file
+    /// the headless server also reads). The mtime is checked on the next
+    /// voicemeeter/discord action - a cheap stat, no file watcher - and a
+    /// change re-reads the Discord config and the Voicemeeter DLL override
+    /// from the file. Simplest correct option over file-watch: config only
+    /// matters when an action runs anyway.
+    fn maybe_reload_hot_settings(&self) {
+        let Some(path) = &self.discord_settings_path else {
+            return;
+        };
+        let Ok(meta) = path.metadata() else { return };
+        let Ok(mtime) = meta.modified() else { return };
+        let mut cached = self.discord_settings_mtime.lock().unwrap();
+        if *cached != Some(mtime) {
+            *cached = Some(mtime);
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let cfg = pulpit_discord::DiscordConfig::from_settings(&val);
+                    *self.discord.lock().unwrap() = cfg;
+                    *self.discord_client.lock().unwrap() = None;
+                    // set_override_path only drops the live VM session
+                    // when the override actually changed
+                    self.voicemeeter
+                        .lock()
+                        .unwrap()
+                        .set_override_path(pulpit_vm::load_dll_override(&val));
+                }
+            }
+        }
+    }
+
     fn exec_discord(&self, cmd: &pulpit_actions::Command, sink: &mut dyn EventSink) -> bool {
         if !pulpit_discord::is_discord_action(&cmd.kind) {
             return false;
         }
+        self.maybe_reload_hot_settings();
         let Some(config) = self.discord.lock().unwrap().clone() else {
             tracing::warn!(kind = %cmd.kind, "discord not configured (no client id in settings)");
             return true;
@@ -803,6 +1003,24 @@ impl SqlBackend {
         Ok(fresh)
     }
 
+    /// Run one system-media (SMTC) tile action against the active or
+    /// options-targeted session (`crates/os` media). The display tile's
+    /// tap is the play/pause toggle, the control tile's select value is
+    /// the raw transport action, the seek slider passes its 0..1 value.
+    /// Failures are logged (fire-and-forget like the Voicemeeter bridge).
+    /// Returns true when the kind belongs to this integration.
+    fn exec_media(&self, cmd: &pulpit_actions::Command, slider_value: Option<f64>) -> bool {
+        let Some((action, target_app)) =
+            media_request(&cmd.kind, cmd.command.as_deref(), cmd.options.as_deref())
+        else {
+            return false;
+        };
+        if let Err(e) = pulpit_os::media::control(target_app.as_deref(), &action, slider_value) {
+            tracing::warn!(kind = %cmd.kind, action = %action, error = %e, "media control failed");
+        }
+        true
+    }
+
     /// Run one Spotify tile action through the native handle
     /// (`crates/spotify`). Slider kinds arrive here a second time from
     /// [`Backend::slider`] with their 0..1 value. Failures surface as
@@ -830,6 +1048,58 @@ impl SqlBackend {
         true
     }
 
+    /// Run one OBS tile action through the native websocket handle
+    /// (`crates/obs`). The exec is fire-and-forget: the handle queues
+    /// the action for its connection actor and returns immediately, so
+    /// a slow OBS never blocks the input thread. Slider kinds arrive
+    /// here a second time from [`Backend::slider`] with their 0..1
+    /// value. Returns true when the kind belongs to OBS.
+    fn exec_obs(&self, cmd: &pulpit_actions::Command, slider_value: Option<f64>) -> bool {
+        if !pulpit_obs::is_obs_action(&cmd.kind) {
+            return false;
+        }
+        let Some(obs) = &self.obs else {
+            // like Spotify's NeedsLogin: claimed, told once, never
+            // falling through to the macro dispatcher
+            tracing::warn!(
+                kind = %cmd.kind,
+                "obs action skipped - OBS is not configured (enable it in the Pulpit settings)"
+            );
+            return true;
+        };
+        obs.exec(
+            &cmd.kind,
+            cmd.command.as_deref().unwrap_or_default(),
+            slider_value,
+        );
+        true
+    }
+
+    /// Claim the integration kinds Pulpit does not implement (SLOBS,
+    /// XSplit, Twitch): stock boards carry those tiles, so they stay
+    /// loadable, but a press can only warn - once per kind per run,
+    /// not per press. An installed extension that actually provides
+    /// the kind wins before this arm runs (see [`SqlBackend::exec_native`]).
+    /// Returns whether THIS call emitted the run's single warning.
+    fn exec_unavailable(&self, cmd: &pulpit_actions::Command) -> bool {
+        let owned = cmd.kind.starts_with("slobs")
+            || cmd.kind.starts_with("xsplit")
+            || cmd.kind.contains("twitch");
+        if !owned {
+            return false;
+        }
+        let mut warned = self.unavailable_warned.lock().unwrap();
+        if warned.insert(cmd.kind.clone()) {
+            tracing::warn!(
+                kind = %cmd.kind,
+                "integration not available in Pulpit - it needs an extension that provides it"
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Take (and clear) the user-facing message of the last failed
     /// Spotify exec/slider. The desktop's exec commands return it as the
     /// command error so the editor's existing flash path shows it;
@@ -837,6 +1107,25 @@ impl SqlBackend {
     /// toast.
     pub fn take_last_spotify_error(&self) -> Option<String> {
         self.spotify_last_error.lock().unwrap().take()
+    }
+
+    pub fn take_last_http_error(&self) -> Option<String> {
+        self.http_last_error.lock().unwrap().take()
+    }
+
+    pub fn set_last_http_error(&self, err: String) {
+        *self.http_last_error.lock().unwrap() = Some(err);
+    }
+
+    pub fn set_custom_value(&self, key: &str, value: &str) {
+        self.custom_values
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
+    }
+
+    pub fn get_custom_value(&self, key: &str) -> Option<String> {
+        self.custom_values.lock().unwrap().get(key).cloned()
     }
 
     fn with_input(&self, f: impl FnOnce(&mut dyn pulpit_actions::Input)) {
@@ -863,6 +1152,48 @@ impl SqlBackend {
 /// anyway blocks the action thread for its whole timeout for nothing.
 fn refresh_failure_needs_popup(err: &pulpit_discord::DiscordError) -> bool {
     !matches!(err, pulpit_discord::DiscordError::Network(_))
+}
+
+/// One system-media command parsed: the transport action plus the
+/// optional target app. Pure so the grammar is unit-testable without
+/// touching WinRT. Grammar:
+///
+/// - `media-now-playing`: tap toggles play/pause (no command),
+/// - `media-control`: the select's raw value (`play-pause` / `next` /
+///   `previous` / `stop`; an empty command defaults to `play-pause`),
+/// - `media-seek`: the slider's 0..1 value rides `slider_value`,
+/// - the optional "Aplikacja" target lives in the options column as
+///   `{"app": "<name substring>"}` on every kind.
+fn media_request(
+    kind: &str,
+    command: Option<&str>,
+    options: Option<&str>,
+) -> Option<(String, Option<String>)> {
+    if !pulpit_os::media::is_media_action(kind) {
+        return None;
+    }
+    let target_app = options
+        .and_then(|opts| serde_json::from_str::<serde_json::Value>(opts).ok())
+        .and_then(|v| {
+            v.get("app")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    let action = match kind {
+        "media-now-playing" => "play-pause".to_string(),
+        "media-seek" => "seek".to_string(),
+        _ => {
+            let raw = command.unwrap_or_default().trim().trim_matches('"');
+            if raw.is_empty() {
+                "play-pause".to_string()
+            } else {
+                raw.to_string()
+            }
+        }
+    };
+    Some((action, target_app))
 }
 
 /// Shell runner for `run-command`, byte-for-byte the same invocation the
@@ -1219,6 +1550,109 @@ mod tests {
         assert_eq!(backend.take_last_spotify_error(), None);
     }
 
+    // ---- obs native arm + unavailable integrations ----------------------
+
+    fn plain_command(kind: &str) -> pulpit_actions::Command {
+        pulpit_actions::Command::from_row(kind, None, None, "button")
+    }
+
+    #[test]
+    fn obs_kinds_stay_claimed_without_configuration() {
+        let backend = test_backend();
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+        backend.exec(
+            button_row("obs-scene", Some(r#"{"scene":"Game"}"#)),
+            false,
+            &mut RecSink::default(),
+        );
+        backend.exec(
+            button_row("obs-studio-mode", None),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(
+            input.effects().is_empty(),
+            "obs kinds are claimed (warned about), never dispatched to the macro layer"
+        );
+        // unimplemented obs kinds are NOT claimed: they fall through to
+        // the builtin dispatcher's stub arm, like before this integration
+        backend.exec(
+            button_row("obs-transition", None),
+            false,
+            &mut RecSink::default(),
+        );
+        assert!(input.effects().is_empty());
+        // the audio slider is claimed on the slider path, with the value
+        let mut row = button_row("obs-audio-slider", Some(r#"{"device":"Mic"}"#));
+        row.mode = "slider".into();
+        backend.slider(row, 0.4);
+        assert!(input.effects().is_empty());
+    }
+
+    #[test]
+    fn unavailable_integrations_warn_once_per_kind_and_stay_claimed() {
+        let backend = test_backend();
+        let input = SharedRecInput::default();
+        inject(&backend, input.clone(), SharedFakeSpeaker::default());
+        for kind in ["slobs-scene", "xsplit-scene", "twitch-slow"] {
+            backend.exec(
+                button_row(kind, Some(r#"{"scene":"S"}"#)),
+                false,
+                &mut RecSink::default(),
+            );
+        }
+        assert!(
+            input.effects().is_empty(),
+            "slobs/xsplit/twitch kinds stay claimed so no macro dispatcher ever fires"
+        );
+        // the presses above carried each kind's single warning for this
+        // run: repeating them stays silent
+        assert!(!backend.exec_unavailable(&plain_command("slobs-scene")));
+        assert!(!backend.exec_unavailable(&plain_command("slobs-scene")));
+        assert!(!backend.exec_unavailable(&plain_command("xsplit-scene")));
+        // a kind not seen yet warns exactly once
+        assert!(backend.exec_unavailable(&plain_command("twitch-emote-only")));
+        assert!(!backend.exec_unavailable(&plain_command("twitch-emote-only")));
+        assert!(backend.exec_unavailable(&plain_command("slobs-source")));
+        // kinds outside the dead integrations are never claimed here
+        assert!(!backend.exec_unavailable(&plain_command("key")));
+        assert!(!backend.exec_unavailable(&plain_command("obs-scene")));
+    }
+
+    #[test]
+    fn an_extension_providing_an_unavailable_kind_wins_over_the_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("slobs-provider");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("index.js"),
+            r#"module.exports = ({ setValue }) => ({
+                name: "slobs provider",
+                inputs: [{ value: "slobs-scene" }],
+                execute: function (action) { setValue({ "slobs-taken": action }); }
+            });"#,
+        )
+        .unwrap();
+        let (manager, mut events) =
+            pulpit_ext::ExtManager::load(dir.path(), &serde_json::Value::Null, &[]);
+        let backend = test_backend().with_extensions(manager);
+        let input = SharedRecInput::default();
+        inject(&backend, input, SharedFakeSpeaker::default());
+
+        backend.exec(
+            button_row("slobs-scene", Some(r#"{"scene":"S"}"#)),
+            false,
+            &mut RecSink::default(),
+        );
+        // the extension's setValue push proves the extension executed -
+        // the unavailable stub never ran for this press
+        match events.try_recv() {
+            Ok(pulpit_ext::ExtEvent::SetValue(v)) => assert_eq!(v["slobs-taken"], "slobs-scene"),
+            other => panic!("expected the extension's setValue event, got {other:?}"),
+        }
+    }
+
     #[test]
     fn failed_spotify_exec_records_the_user_message_and_clears_on_next_exec() {
         let fake = SharedSpotifyFake(std::sync::Arc::new(
@@ -1276,6 +1710,57 @@ mod tests {
         backend.exec(row, false, &mut RecSink::default());
         assert!(input.effects().is_empty());
         assert!(fake.0.last_url().ends_with("/me/player/next"));
+    }
+
+    #[test]
+    fn media_request_parses_the_smtc_grammar() {
+        // tap on the display tile toggles play/pause; the control tile's
+        // select value is the raw action; the slider kind seeks
+        assert_eq!(
+            media_request("media-now-playing", None, None),
+            Some(("play-pause".into(), None))
+        );
+        assert_eq!(
+            media_request("media-control", Some("next"), None),
+            Some(("next".into(), None))
+        );
+        // an emptied / quoted / JSON-quoted command defaults to play-pause
+        assert_eq!(
+            media_request("media-control", Some(""), None),
+            Some(("play-pause".into(), None))
+        );
+        assert_eq!(
+            media_request("media-control", Some("\"stop\""), None),
+            Some(("stop".into(), None))
+        );
+        assert_eq!(
+            media_request("media-seek", None, None),
+            Some(("seek".into(), None))
+        );
+
+        // the optional "Aplikacja" target rides the options column JSON
+        assert_eq!(
+            media_request(
+                "media-control",
+                Some("play-pause"),
+                Some(r#"{"app":"Spotify"}"#)
+            ),
+            Some(("play-pause".into(), Some("Spotify".into())))
+        );
+        // blank app strings mean "no target", not an empty pattern
+        assert_eq!(
+            media_request("media-now-playing", None, Some(r#"{"app":"  "}"#)),
+            Some(("play-pause".into(), None))
+        );
+        // non-JSON options (other tiles' dialects) parse as no target
+        assert_eq!(
+            media_request("media-seek", None, Some("windows:5h")),
+            Some(("seek".into(), None))
+        );
+
+        // foreign kinds stay unclaimed
+        assert_eq!(media_request("vol", Some("play"), None), None);
+        assert_eq!(media_request("media-future", None, None), None);
     }
 
     #[test]
@@ -1393,8 +1878,34 @@ mod tests {
 
         let other = backend.create_board("Keeper", "#2c3e50", 4, 3).unwrap();
         backend.create_button(other, "key", "button", 0, 0).unwrap();
+
+        let created_button = backend.create_button(board, "key", "button", 0, 0).unwrap();
+        backend
+            .move_button_to_board(created_button, other, 1, 2, 1, 1)
+            .unwrap();
+        let moved_across = backend.get_button(created_button).unwrap();
+        assert_eq!(moved_across.board_id, other);
+        assert_eq!((moved_across.x.unwrap(), moved_across.y.unwrap()), (1, 2));
         backend.delete_board(board).unwrap();
         assert_eq!(backend.get_boards().len(), 1);
+    }
+
+    #[test]
+    fn all_button_ids_spans_boards_and_tracks_deletes() {
+        let backend = test_backend();
+        let a = backend.create_board("A", "#2c3e50", 4, 3).unwrap();
+        let b = backend.create_board("B", "#2c3e50", 4, 3).unwrap();
+        let first = backend
+            .create_button(a, "tool-timer", "button", 0, 0)
+            .unwrap();
+        let second = backend.create_button(b, "url", "button", 0, 0).unwrap();
+
+        let mut ids = backend.all_button_ids();
+        ids.sort();
+        assert_eq!(ids, vec![first.min(second), first.max(second)]);
+
+        backend.delete_button(second).unwrap();
+        assert_eq!(backend.all_button_ids(), vec![first]);
     }
 
     #[test]

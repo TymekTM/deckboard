@@ -260,7 +260,7 @@ describe("stateActive", () => {
   });
 
   it("leaves empty bindings and unbound types on the tap flip", () => {
-    for (const type of ["obs-scene", "vm-toggle-strip", "discord-toggle-mute", "vmod-voice", "key"]) {
+    for (const type of ["slobs-scene", "vm-toggle-strip", "discord-toggle-mute", "vmod-voice", "key"]) {
       expect(stateActive({ type, command: "" }, {}, { [type]: "ON", anything: "ON" }, {})).toBeNull();
     }
   });

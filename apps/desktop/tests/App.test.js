@@ -257,7 +257,7 @@ describe("App boards and tiles", () => {
     await w.vm.tileMoved(t, 2, 1, 1, 1);
     expect(t.x).toBe(0);
     expect(cmds("list_boards")).toHaveLength(2);
-    expect(w.vm.flash).toContain("Moving the tile failed");
+    expect(w.vm.flash).toContain("Przesuwanie kafla nie powiodło się");
   });
 
   it("creates a tile in two steps and reopens it for editing", async () => {
@@ -302,7 +302,11 @@ describe("App boards and tiles", () => {
     await w.vm.tileDeleted(t);
     expect(cmds("delete_button")).toHaveLength(0);
     await w.vm.tileDeleted(t);
-    expect(dialog.ask).toHaveBeenLastCalledWith('Delete tile "t11"?', { title: "Delete tile", kind: "warning" });
+    expect(dialog.ask).toHaveBeenLastCalledWith('Delete tile "t11"?', {
+      title: "Delete tile",
+      okLabel: "Delete",
+      kind: "warning",
+    });
     expect(cmds("delete_button")[0].args).toEqual({ id: 11, boardId: 1 });
   });
 
@@ -373,7 +377,15 @@ describe("App clipboard and context menus", () => {
     const w = await mountApp();
     const t = w.vm.boards[0].buttons[0];
     await w.find('[data-tile-id="11"] .tile').trigger("contextmenu", { clientX: 5, clientY: 5 });
-    expect(w.findAll(".ctx-menu .menu-item").map((b) => b.text())).toEqual(["Edit tile", "Run now", "Copy", "Delete"]);
+    expect(w.findAll(".ctx-menu .menu-item").map((b) => b.text())).toEqual([
+      "Edit tile",
+      "Run now",
+      "Copy",
+      "Duplikuj",
+      "Przenieś do tablicy...",
+      "Kopiuj do tablicy...",
+      "Delete",
+    ]);
     await w.findAll(".ctx-menu .menu-item")[1].trigger("click");
     await flushPromises();
     expect(cmds("exec_button")[0].args).toEqual({ id: 11 });
@@ -458,7 +470,7 @@ describe("App shell", () => {
     const w = await mountApp();
     vi.useFakeTimers();
     await w.vm.doImport();
-    expect(w.vm.flash).toBe("Importing boards failed: too many tiles");
+    expect(w.vm.flash).toBe("Import tablic nie powiódł się: too many tiles");
     vi.advanceTimersByTime(6000);
     expect(w.vm.flash).toBeNull();
   });

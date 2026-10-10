@@ -43,6 +43,16 @@ pub trait Backend: Send + Sync + 'static {
         is_tap_start: bool,
         sink: &mut dyn pulpit_actions::EventSink,
     );
+    /// Execute an interaction gesture on a button (default calls `exec(button, false, sink)`).
+    fn exec_gesture(
+        &self,
+        button: pulpit_db::ButtonRow,
+        gesture: &str,
+        sink: &mut dyn pulpit_actions::EventSink,
+    ) {
+        let _ = gesture;
+        self.exec(button, false, sink);
+    }
     fn slider(&self, button: pulpit_db::ButtonRow, value: f64);
     /// M2 speaker watcher snapshots: master volume percent, muted flag.
     /// Defaults suit backends without speaker support.

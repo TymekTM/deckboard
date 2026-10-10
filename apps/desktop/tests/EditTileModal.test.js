@@ -5,6 +5,13 @@ import ActionPicker from "../src/components/ActionPicker.vue";
 import SelectField from "../src/components/SelectField.vue";
 import { calls, dialog, handle } from "./tauri.js";
 
+// the gestures section reuses the .dual-head class, so match by text
+const hasSecondState = (w) =>
+  w.findAll(".dual-head").some((h) => h.text().startsWith("Second state"));
+
+// opening the editor refreshes the Voicemeeter device list in the background
+const userCalls = () => calls.filter((c) => c.cmd !== "vm_devices");
+
 const boards = [
   { id: 1, name: "Main" },
   { id: 2, name: "Stream" },
@@ -112,14 +119,30 @@ describe("EditTileModal basics", () => {
     await w.find(".overlay").trigger("click");
     expect(w.emitted("close")).toHaveLength(1);
     await fieldInput(w, "Label").setValue("changed");
+    // dirty: the discard confirmation decides
+    dialog.ask.mockResolvedValueOnce(false);
     await w.find(".overlay").trigger("click");
+    await flushPromises();
+    expect(dialog.ask).toHaveBeenLastCalledWith("Zamknąć okno i porzucić niezapisane zmiany?", {
+      title: "Niezapisane zmiany",
+      okLabel: "Porzuć zmiany",
+      cancelLabel: "Wróć",
+      kind: "warning",
+    });
     expect(w.emitted("close")).toHaveLength(1);
+    dialog.ask.mockResolvedValueOnce(true);
+    await w.find(".overlay").trigger("click");
+    await flushPromises();
+    expect(w.emitted("close")).toHaveLength(2);
   });
 
   it("counts a command-field edit as dirty", async () => {
     const w = mountEdit(existing());
     await fieldInput(w, "Keystroke").setValue("ALT + F4");
+    dialog.ask.mockResolvedValueOnce(false);
     await w.find(".overlay").trigger("click");
+    await flushPromises();
+    expect(dialog.ask).toHaveBeenCalledTimes(1);
     expect(w.emitted("close")).toBeUndefined();
   });
 });
@@ -302,13 +325,47 @@ describe("EditTileModal action switching", () => {
 
   it("shows second-state styling for dual actions and toggle tiles", async () => {
     const w = mountCreate();
-    expect(w.find(".dual-head").exists()).toBe(false);
+    expect(hasSecondState(w)).toBe(false);
     await pickAction(w, "obs-scene");
-    expect(w.find(".dual-head").exists()).toBe(true);
+    expect(hasSecondState(w)).toBe(true);
     const toggle = mountEdit(existing({ mode: "toggle" }));
-    expect(toggle.find(".dual-head").exists()).toBe(true);
+    expect(hasSecondState(toggle)).toBe(true);
     const styled = mountEdit(existing({ icon2: "stop" }));
-    expect(styled.find(".dual-head").exists()).toBe(true);
+    expect(hasSecondState(styled)).toBe(true);
+  });
+
+  describe("icon picker", () => {
+    const openIcons = async (w) => {
+      await w.findAll(".prop-row").find((r) => r.text().startsWith("Icon") && !r.text().startsWith("Icon Color")).trigger("click");
+    };
+
+    it("lists curated groups and sets the icon from a cell", async () => {
+      const w = mountEdit(existing());
+      await openIcons(w);
+      const groups = w.findAll(".icon-group").map((g) => g.text());
+      expect(groups).toContain("Media");
+      expect(groups).toContain("Arrows");
+      expect(w.findAll(".icon-cell").length).toBeGreaterThan(300);
+      await w.find('.icon-cell[title="rocket"]').trigger("click");
+      expect(w.find('.icon-cell[title="rocket"]').classes()).toContain("on");
+      const out = await save(w);
+      expect(out.icon).toBe("rocket");
+    });
+
+    it("searches the whole shared set and says when nothing matches", async () => {
+      const w = mountEdit(existing());
+      await openIcons(w);
+      await w.find(".icon-search").setValue("hourglass");
+      const names = w.findAll(".icon-cell").map((c) => c.attributes("title"));
+      expect(names[0].startsWith("hourglass")).toBe(true);
+      expect(names).toContain("hourglass-half");
+      expect(w.find(".icon-group").exists()).toBe(false);
+      await w.find(".icon-search").setValue("zzzzzz");
+      expect(w.findAll(".icon-cell")).toHaveLength(0);
+      expect(w.find(".icon-empty").text()).toContain("zzzzzz");
+      await w.find(".icon-search").setValue("");
+      expect(w.findAll(".icon-group").length).toBeGreaterThan(5);
+    });
   });
 
   it("toggles plan usage windows into the options token", async () => {
@@ -458,9 +515,12 @@ describe("EditTileModal properties and images", () => {
     const w = mountEdit(existing());
     await w.findAll(".prop-row").find((r) => r.text().startsWith("Image")).trigger("click");
     await flushPromises();
-    expect(calls).toEqual([{ cmd: "read_image_data", args: { path: "C:/pic.png" } }]);
+    expect(userCalls()).toEqual([{ cmd: "read_image_data", args: { path: "C:/pic.png" } }]);
     expect(w.find(".prev-img").attributes("src")).toBe("data:image/png;base64,QQ==");
+    dialog.ask.mockResolvedValueOnce(false);
     await w.find(".overlay").trigger("click");
+    await flushPromises();
+    expect(dialog.ask).toHaveBeenCalledTimes(1);
     expect(w.emitted("close")).toBeUndefined();
   });
 
@@ -468,7 +528,7 @@ describe("EditTileModal properties and images", () => {
     const w = mountEdit(existing());
     await w.findAll(".prop-row").find((r) => r.text().startsWith("Image")).trigger("click");
     await flushPromises();
-    expect(calls).toHaveLength(0);
+    expect(userCalls()).toHaveLength(0);
   });
 
   it("shows an image read error under the second-state section", async () => {

@@ -39,20 +39,84 @@ const withCustom = computed(() => {
 
 // ---- search + visible items ------------------------------------------------
 
+
+const recentValues = ref(loadRecentActions());
+
+function loadRecentActions() {
+  try {
+    const raw = localStorage.getItem("pulpit_recent_actions");
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function recordRecentAction(val) {
+  try {
+    const recents = [val, ...recentValues.value.filter((v) => v !== val)].slice(0, 5);
+    recentValues.value = recents;
+    localStorage.setItem("pulpit_recent_actions", JSON.stringify(recents));
+  } catch {}
+}
+
+const recentGroup = computed(() => {
+  if (!recentValues.value.length) return null;
+  const allItems = withCustom.value.flatMap((g) => g.items);
+  const items = [];
+  for (const v of recentValues.value) {
+    const it = allItems.find((entry) => entry.value === v);
+    if (it && !items.some((existing) => existing.value === it.value)) {
+      items.push(it);
+    }
+  }
+  if (!items.length) return null;
+  return {
+    header: "Niedawno używane",
+    items,
+  };
+});
+
 const query = ref("");
 const visibleGroups = computed(() => {
   const q = query.value.trim().toLowerCase();
-  if (!q) return withCustom.value;
-  return withCustom.value
-    .map((g) => ({
-      header: g.header,
-      items: g.items.filter(
-        (it) =>
-          it.label.toLowerCase().includes(q) ||
-          String(it.value).toLowerCase().includes(q)
-      ),
-    }))
-    .filter((g) => g.items.length);
+  const groups = [];
+
+  if (recentGroup.value) {
+    const rGroupMatches = recentGroup.value.header.toLowerCase().includes(q);
+    const rItems = recentGroup.value.items.filter(
+      (it) =>
+        !q ||
+        rGroupMatches ||
+        it.label.toLowerCase().includes(q) ||
+        String(it.value).toLowerCase().includes(q)
+    );
+    if (rItems.length) {
+      groups.push({
+        header: recentGroup.value.header,
+        items: rItems,
+      });
+    }
+  }
+
+  for (const g of withCustom.value) {
+    const groupMatches = g.header.toLowerCase().includes(q);
+    const items = g.items.filter(
+      (it) =>
+        !q ||
+        groupMatches ||
+        it.label.toLowerCase().includes(q) ||
+        String(it.value).toLowerCase().includes(q)
+    );
+    if (items.length) {
+      groups.push({
+        header: g.header,
+        items,
+      });
+    }
+  }
+
+  return groups;
 });
 const flat = computed(() => visibleGroups.value.flatMap((g) => g.items));
 
@@ -78,7 +142,14 @@ watch(hlIdx, scrollHl);
 function moveHl(delta) {
   const n = flat.value.length;
   if (!n) return;
-  hlIdx.value = (hlIdx.value + delta + n) % n;
+  // unavailable entries are skipped: highlight lands on a pickable one
+  for (let i = 0; i < n; i += 1) {
+    const next = (hlIdx.value + delta * i + delta + n * 2) % n;
+    if (!flat.value[next].unavailable) {
+      hlIdx.value = next;
+      return;
+    }
+  }
 }
 function idxOfItem(it) {
   return flat.value.indexOf(it);
@@ -102,6 +173,10 @@ function closePop(refocus = true) {
   if (refocus) trigger.value?.focus();
 }
 function pick(it) {
+  if (it.unavailable) return;
+  // the gesture editor's "tile's own action" entry (value "") is not an
+  // action - it must not land in the recent list
+  if (it.value !== "") recordRecentAction(it.value);
   emit("update:modelValue", it.value);
   closePop();
 }
@@ -143,7 +218,7 @@ function onSearchKeydown(e) {
   } else if (e.key === "Enter") {
     e.preventDefault();
     const it = flat.value[hlIdx.value];
-    if (it) pick(it);
+    if (it && !it.unavailable) pick(it);
   } else if (e.key === "Escape") {
     e.preventDefault();
     e.stopPropagation();
@@ -196,20 +271,29 @@ function onSearchKeydown(e) {
             <div class="ghead">{{ g.header }}</div>
             <div
               v-for="it in g.items"
-              :key="it.value"
+              :key="`${g.header}-${it.value}`"
               :id="`${uid}-opt-${idxOfItem(it)}`"
               class="item"
               role="option"
               :aria-selected="it.value === modelValue"
-              :class="{ sel: it.value === modelValue, hl: flat[hlIdx] === it }"
+              :aria-disabled="Boolean(it.unavailable)"
+              :class="{
+                sel: it.value === modelValue,
+                hl: flat[hlIdx] === it,
+                unavailable: Boolean(it.unavailable),
+              }"
+              :title="it.unavailable || ''"
               @click="pick(it)"
-              @mouseenter="hlIdx = idxOfItem(it)"
+              @mouseenter="!it.unavailable && (hlIdx = idxOfItem(it))"
             >
               <span class="chip" :style="{ background: it.color || '#7f8c8d' }">
                 <i class="fas" :class="'fa-' + (it.icon || 'puzzle-piece')"></i>
               </span>
               <span class="ilabel">{{ it.label }}</span>
-              <i v-if="it.value === modelValue" class="fas fa-check selcheck"></i>
+              <span v-if="it.unavailable" class="unavail-tag" :title="it.unavailable">
+                <i class="fas fa-lock"></i>
+              </span>
+              <i v-else-if="it.value === modelValue" class="fas fa-check selcheck"></i>
             </div>
           </template>
           <div v-if="!flat.length" class="empty">
@@ -326,11 +410,34 @@ function onSearchKeydown(e) {
   user-select: none;
   transition: background 100ms ease-out;
 }
+.item.unavailable {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.5);
+}
+.item.unavailable:hover,
+.item.unavailable.hl {
+  background: transparent;
+}
+.unavail-tag {
+  font-size: 11px;
+  color: var(--modal-muted);
+  flex: none;
+}
 .item.hl { background: var(--modal-field); }
 .item.sel { background: #e6f7f2; font-weight: 500; }
 .item.hl.sel { background: #dcf3ec; }
 .ilabel { flex: 1; min-width: 0; }
 .selcheck { flex: none; font-size: 12px; color: #0f7e69; }
+/* unavailable integrations: listed for honesty, not pickable */
+.item.dead { cursor: default; opacity: 0.45; }
+.item.dead .chip { filter: grayscale(0.7); }
+.deadhint {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--modal-muted);
+  text-align: right;
+}
 .empty {
   padding: 16px 10px;
   font-size: 13px;

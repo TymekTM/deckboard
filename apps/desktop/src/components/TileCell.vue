@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watchEffect } from "vue";
+import { computed, onUnmounted, ref, watchEffect } from "vue";
 import {
   stateActive,
   VM_SLIDER_RESET,
@@ -8,6 +8,7 @@ import {
   mmss,
 } from "../catalog";
 import { resolveStatusArt, payloadReceivedAt, windowVisible } from "../statusMedia";
+import ToolTile from "./tiles/ToolTile.vue";
 
 // One tile. Isolated so a live state push re-renders only the tiles that
 // read the pushed key, not the whole board. Geometry (grid position,
@@ -25,8 +26,9 @@ const props = defineProps({
   // editor-preview dual-state flip from the parent's session Set
   active: { type: Boolean, default: false },
   dragging: { type: Boolean, default: false },
+  selected: { type: Boolean, default: false },
 });
-const emit = defineEmits(["open", "ctx", "down", "resize", "tap", "slider"]);
+const emit = defineEmits(["open", "ctx", "down", "resize", "tap", "slider", "gesture"]);
 
 function metaOf(tile) {
   return props.typeMeta?.[tile.type] || {};
@@ -39,6 +41,25 @@ const cmd = computed(() => {
   } catch {
     return {};
   }
+});
+
+// ---- utility tools (round 5) -----------------------------------------------
+// Compact server state arrives under `tool-<button id>`; time is
+// extrapolated inside ToolTile. While a legacy stock client is
+// connected, the 1 Hz lane pushes a plain formatted label string under
+// the same key - the last object view is kept so the tile does not
+// flicker between the rich and the text-only rendering.
+const isTool = computed(() =>
+  String(props.tile.type || "").startsWith("tool-"),
+);
+const toolState = ref(null);
+watchEffect(() => {
+  if (!isTool.value) {
+    toolState.value = null;
+    return;
+  }
+  const v = props.customValues[`tool-${props.tile.id}`];
+  if (v && typeof v === "object") toolState.value = v;
 });
 
 // Whether the tile renders its second state. A known live state wins
@@ -376,6 +397,124 @@ const tileAriaLabel = computed(() => {
   return metaOf(props.tile).label || String(props.tile.type).replace(/-/g, " ");
 });
 
+// ---- custom gestures (M5), desktop touch mode ------------------------------
+
+// Gestures this tile declares, from its options JSON: the `gestures` list
+// plus every `gesture_actions` key the editor wrote. Only declared
+// gestures fire, mirroring the server's per-event gate for tablets -
+// a hand-edited tile without declarations keeps its plain tap.
+const declaredGestures = computed(() => {
+  const names = new Set();
+  try {
+    const opts = JSON.parse(props.tile.options || "{}");
+    if (opts && typeof opts === "object" && !Array.isArray(opts)) {
+      if (Array.isArray(opts.gestures)) {
+        for (const g of opts.gestures) if (typeof g === "string") names.add(g);
+      }
+      for (const g of Object.keys(opts.gesture_actions || {})) names.add(g);
+    }
+  } catch {}
+  return names;
+});
+
+// Whether the current press runs through the gesture path; when armed the
+// click event must not fire too (the pointer handlers own the tap).
+let gestureArmed = false;
+let touchState = null;
+let longPressTimer = null;
+let singleTapTimer = null;
+let lastTapTime = 0;
+
+function clearGestureTimers() {
+  clearTimeout(longPressTimer);
+  clearTimeout(singleTapTimer);
+}
+
+onUnmounted(clearGestureTimers);
+
+function onTilePointerDown(e) {
+  emit("down", e);
+  gestureArmed = false;
+  if (!props.touch) return;
+  if (props.tile.mode === "slider") return;
+  if (!declaredGestures.value.size) return;
+  gestureArmed = true;
+
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const startTime = Date.now();
+  touchState = { startX, startY, startTime, moved: false };
+
+  if (declaredGestures.value.has("long-press")) {
+    longPressTimer = setTimeout(() => {
+      if (touchState && !touchState.moved) {
+        touchState = null;
+        emit("gesture", { tile: props.tile, gesture: "long-press" });
+      }
+    }, 450);
+  }
+}
+
+function onTilePointerMove(e) {
+  if (!touchState) return;
+  if (Math.hypot(e.clientX - touchState.startX, e.clientY - touchState.startY) > 10) {
+    touchState.moved = true;
+    clearTimeout(longPressTimer);
+  }
+}
+
+function onTilePointerUp(e) {
+  if (!touchState) return;
+  clearTimeout(longPressTimer);
+  const { moved } = touchState;
+  const dx = e.clientX - touchState.startX;
+  const dy = e.clientY - touchState.startY;
+  const dt = Date.now() - touchState.startTime;
+  touchState = null;
+
+  if (dt < 400 && Math.abs(dx) > 35 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+    const gesture = dx < 0 ? "swipe-left" : "swipe-right";
+    if (declaredGestures.value.has(gesture)) {
+      emit("gesture", { tile: props.tile, gesture });
+    }
+    return;
+  }
+
+  if (!moved && dt < 300) {
+    const now = Date.now();
+    if (declaredGestures.value.has("double-tap")) {
+      if (lastTapTime && now - lastTapTime < 300) {
+        clearTimeout(singleTapTimer);
+        lastTapTime = 0;
+        emit("gesture", { tile: props.tile, gesture: "double-tap" });
+        return;
+      }
+      // possible first tap of a pair: hold the single tap back briefly
+      lastTapTime = now;
+      singleTapTimer = setTimeout(() => {
+        lastTapTime = 0;
+        onTap();
+      }, 260);
+      return;
+    }
+    lastTapTime = 0;
+    onTap();
+  }
+}
+
+function onTilePointerCancel() {
+  clearGestureTimers();
+  touchState = null;
+  lastTapTime = 0;
+}
+
+function onTileClick() {
+  // a gesture-declaring tile routes taps through the pointer handlers;
+  // the trailing click would double-fire the delayed single tap
+  if (gestureArmed) return;
+  onTap();
+}
+
 function onTap() {
   if (props.tile.type === "ai-tokens-hour" && graphData.value?.rows?.length) {
     // the hour tile's tap flips between the shared sparkline and the
@@ -411,6 +550,15 @@ function sliderValue() {
   if (props.tile.type === "speaker-volume") {
     const live = Number(props.customValues["speaker-volume"]);
     if (Number.isFinite(live)) return Math.min(1, Math.max(0, live));
+  }
+  // OBS audio slider: the live input volume rides the pushed
+  // obs-audio-slider_<source> key (crates/obs snapshot)
+  if (props.tile.type === "obs-audio-slider") {
+    const device = cmd.value.device || cmd.value.source;
+    if (device) {
+      const live = Number(props.customValues[`obs-audio-slider_${device}`]);
+      if (Number.isFinite(live)) return Math.min(1, Math.max(0, live));
+    }
   }
   return 0.5;
 }
@@ -502,7 +650,7 @@ function onTileKeydown(event) {
     <div
       v-if="tile.id !== null"
       class="tile"
-      :class="{ dragging }"
+      :class="{ dragging, selected }"
       :style="{
         background: tileBg(tile),
         borderColor: tileBorder(),
@@ -514,8 +662,11 @@ function onTileKeydown(event) {
       :aria-pressed="tile.mode === 'toggle' ? activeState : undefined"
       @dblclick="!touch && emit('open')"
       @contextmenu.prevent="emit('ctx', $event)"
-      @pointerdown="emit('down', $event)"
-      @click.stop="onTap"
+      @pointerdown="onTilePointerDown"
+      @pointermove="onTilePointerMove"
+      @pointerup="onTilePointerUp"
+      @pointercancel="onTilePointerCancel"
+      @click.stop="onTileClick"
       @keydown="onTileKeydown"
     >
       <img
@@ -525,9 +676,21 @@ function onTileKeydown(event) {
         alt=""
       />
       <img v-else-if="tile.img" class="tile-img" :src="tile.img" alt="" />
+      <!-- tool tiles (clock/timer/stopwatch/counter): the whole face is
+           the tool's own renderer; gestures live there in touch mode -->
+      <ToolTile
+        v-if="isTool"
+        :tile="tile"
+        :cmd="cmd"
+        :state="toolState"
+        :touch="touch"
+        :title-color="tileTitleColor() || '#ffffff'"
+        @tap="onTap"
+      />
       <i
         v-if="
           tileIcon(tile) &&
+          !isTool &&
           !graphData &&
           !(tile.mode === 'status' && statusData) &&
           !(tile.mode === 'custom-value' && !tile.title && customValueLabel)
@@ -700,7 +863,7 @@ function onTileKeydown(event) {
         </template>
       </div>
       <span
-        v-if="boardTileTitle"
+        v-if="boardTileTitle && !isTool"
         class="tile-title"
         :class="`pos-${tileTitlePos()}`"
         :style="{
@@ -733,7 +896,12 @@ function onTileKeydown(event) {
 </template>
 
 <style scoped>
-.touch .tile { cursor: pointer; }
+.touch .tile.selected {
+  outline: 2px solid var(--accent, #1abc9c);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px rgba(26, 188, 156, 0.35);
+}
+.tile { cursor: pointer; }
 .touch .tile:active { transform: scale(0.96); }
 .tile {
   position: relative;

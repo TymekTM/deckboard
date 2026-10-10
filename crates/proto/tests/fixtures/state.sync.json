@@ -1,1 +1,1 @@
-{"v":2,"type":"state.sync","payload":{"values":{"discord.microphone-muted":true,"ext.speaker-muted":"OFF"},"series":{"ext.si-cpu-usage":[0.1,0.42,0.44]}}}
+{"v":2,"type":"state.sync","payload":{"values":{"discord.microphone-muted":true,"ext.speaker-muted":"OFF","ext.tool-timer":{"durationMs":300000,"elapsedMs":0,"finished":false,"running":false,"startedAtMs":0}},"series":{"ext.si-cpu-usage":[0.1,0.42,0.44]}}}

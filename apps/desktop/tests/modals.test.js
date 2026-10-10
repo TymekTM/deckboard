@@ -99,6 +99,7 @@ describe("BoardModal edit", () => {
     await flushPromises();
     expect(dialog.ask).toHaveBeenLastCalledWith('Clear every tile from "Main"?', {
       title: "Clear board",
+      okLabel: "Clear",
       kind: "warning",
     });
     expect(calls).toEqual([{ cmd: "clear_board", args: { boardId: 3 } }]);

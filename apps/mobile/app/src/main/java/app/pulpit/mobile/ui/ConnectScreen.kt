@@ -18,8 +18,13 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.draw.clip
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -78,10 +83,14 @@ fun ConnectScreen(vm: PulpitViewModel) {
         onDispose { nsd?.stop() }
     }
 
+    val hapticConfig by vm.hapticConfig.collectAsState()
+    val scrollState = rememberScrollState()
+
     Column(
         Modifier
             .fillMaxSize()
             .background(DeckColors.background)
+            .verticalScroll(scrollState)
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -271,6 +280,13 @@ fun ConnectScreen(vm: PulpitViewModel) {
             )
         }
 
+        HapticsSettings(
+            config = hapticConfig,
+            onEnabledChange = vm::setHapticsEnabled,
+            onIntensityChange = vm::setHapticIntensity,
+            modifier = Modifier.padding(top = 16.dp),
+        )
+
         if (!paired && autoMode) {
             // the auto flow is self-contained: picking a desktop starts
             // the request and approval connects on its own
@@ -308,5 +324,82 @@ fun ConnectScreen(vm: PulpitViewModel) {
 private fun TextButton(text: String, onClick: () -> Unit) {
     androidx.compose.material3.TextButton(onClick = onClick) {
         Text(text, color = Color.White.copy(alpha = 0.7f))
+    }
+}
+
+@Composable
+fun HapticsSettings(
+    config: HapticConfig,
+    onEnabledChange: (Boolean) -> Unit,
+    onIntensityChange: (HapticIntensity) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val haptics = LocalHaptics.current
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.White.copy(alpha = 0.05f))
+            .padding(12.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column {
+                Text(
+                    text = "Wibracje",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = Color.White,
+                )
+                Text(
+                    text = if (config.enabled) "Włączone (${config.intensity.label})" else "Wyłączone",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.6f),
+                )
+            }
+            Switch(
+                checked = config.enabled,
+                onCheckedChange = {
+                    onEnabledChange(it)
+                    if (it) haptics.click()
+                },
+            )
+        }
+
+        if (config.enabled) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                HapticIntensity.values().forEach { intensity ->
+                    val selected = config.intensity == intensity
+                    if (selected) {
+                        Button(
+                            onClick = {
+                                onIntensityChange(intensity)
+                                haptics.click()
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(intensity.label, style = MaterialTheme.typography.labelMedium)
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = {
+                                onIntensityChange(intensity)
+                                haptics.click()
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(intensity.label, style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { ref } from "vue";
+
+export const vmDevicesState = ref({ strips: [], buses: [] });
 
 export const api = {
   serverStatus: () => invoke("server_status"),
@@ -16,6 +19,10 @@ export const api = {
   deleteButton: (id, boardId) => invoke("delete_button", { id, boardId }),
   clearBoard: (boardId) => invoke("clear_board", { boardId }),
   execButton: (id) => invoke("exec_button", { id }),
+  // tool tiles (timer/stopwatch/counter): alternative triggers of the
+  // tile's action - double-tap / long-press / reset gestures
+  execButtonGesture: (id, gesture) =>
+    invoke("exec_button_gesture", { id, gesture }),
   execSlider: (id, value) => invoke("exec_slider", { id, value }),
   getSettings: () => invoke("get_settings"),
   setHotkey: (combo) => invoke("set_touch_mode_hotkey", { combo }),
@@ -46,5 +53,31 @@ export const api = {
   spotifyLogout: () => invoke("spotify_logout"),
   spotifyPlaylists: () => invoke("spotify_playlists"),
   spotifyDevices: () => invoke("spotify_devices"),
+  mediaSessions: () => invoke("media_sessions"),
+  obsStatus: () => invoke("obs_status"),
+  obsApplyConfig: (enabled, host, port, password) =>
+    invoke("obs_apply_config", { enabled, host, port, password }),
+  obsTestConnection: (host, port, password) =>
+    invoke("obs_test_connection", { host, port, password }),
+  obsChoices: () => invoke("obs_choices"),
   assetDataUrl: (hash) => invoke("asset_data_url", { hash }),
+  discordStatus: () => invoke("discord_status"),
+  discordSaveConfig: (clientId, clientSecret) =>
+    invoke("discord_save_config", { clientId, clientSecret }),
+  discordAuthorize: () => invoke("discord_authorize"),
+  discordDisconnect: () => invoke("discord_disconnect"),
+  vmStatus: () => invoke("vm_status"),
+  vmSetDllOverride: (path) => invoke("vm_set_dll_override", { path }),
+  vmReconnect: () => invoke("vm_reconnect"),
+  vmRun: (vmType) => invoke("vm_run", { vmType }),
+  vmDevices: () => invoke("vm_devices"),
 };
+
+export async function refreshVmDevices() {
+  try {
+    const res = await api.vmDevices();
+    vmDevicesState.value = res || { strips: [], buses: [] };
+  } catch {
+    vmDevicesState.value = { strips: [], buses: [] };
+  }
+}
