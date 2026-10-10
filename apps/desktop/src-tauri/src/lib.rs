@@ -842,6 +842,8 @@ fn show_main_window(app: &AppHandle) {
     HIDDEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
     match app.get_webview_window("main") {
         Some(window) => {
+            // show() alone leaves a minimized window minimized
+            let _ = window.unminimize();
             let _ = window.show();
             let _ = window.set_focus();
         }
@@ -949,8 +951,11 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
+            // Click fires for the press AND the release; reacting to both
+            // toggled the window twice per click
             if let tauri::tray::TrayIconEvent::Click {
                 button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
                 ..
             } = event
             {
@@ -963,7 +968,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
+        // a minimized window still reports visible; clicking it must restore
+        let shown = window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false);
+        if shown && window.is_focused().unwrap_or(false) {
             HIDDEN_SINCE.store(
                 pulpit_v2::unix_millis(),
                 std::sync::atomic::Ordering::Relaxed,
