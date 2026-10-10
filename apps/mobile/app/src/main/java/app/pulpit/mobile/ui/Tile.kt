@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -517,6 +518,7 @@ private fun SliderTile(
     val live by rememberUpdatedState(liveValue)
     val sendSlide by rememberUpdatedState(onSlider)
     val value = slide.current(liveValue)
+    LaunchedEffect(liveValue) { slide.onLive(liveValue) }
     val fill = tile.style?.color2?.let { hex(it, baseColor.copy(alpha = 0.6f)) }
         ?: baseColor.copy(alpha = 0.55f)
 

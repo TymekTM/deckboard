@@ -551,6 +551,12 @@ function sliderValue() {
     const live = Number(props.customValues["speaker-volume"]);
     if (Number.isFinite(live)) return Math.min(1, Math.max(0, live));
   }
+  // Spotify volume: `spotify-volume` is a percent string, the 0..1 slider
+  // position rides `spotify-volume-level` (crates/spotify snapshot)
+  if (props.tile.type === "spotify-volume") {
+    const live = Number(props.customValues["spotify-volume-level"]);
+    if (Number.isFinite(live)) return Math.min(1, Math.max(0, live));
+  }
   // OBS audio slider: the live input volume rides the pushed
   // obs-audio-slider_<source> key (crates/obs snapshot)
   if (props.tile.type === "obs-audio-slider") {

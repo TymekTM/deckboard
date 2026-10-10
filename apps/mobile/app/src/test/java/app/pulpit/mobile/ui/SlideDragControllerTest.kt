@@ -42,8 +42,36 @@ class SlideDragControllerTest {
         // release always delivers the last sampled value
         slide.end(live = 0.9, send = sent::add)
         assertEquals(listOf(0.1f, 0.8f), sent)
-        // and a completed drag keeps its position (no echo flicker)
+        // and until live moves, the completed drag keeps its position
+        // (no echo flicker while the patch travels)
         assertEquals(0.8f, slide.current(0.9))
+    }
+
+    @Test
+    fun releasedDragFollowsLiveOnceItMoves() {
+        val slide = controller()
+        slide.start(0.7f) {}
+        slide.end(live = 0.4, send = {})
+        // the echo has not arrived: live still reads what it did at release
+        assertEquals(0.7f, slide.current(0.4))
+        slide.onLive(0.4)
+        assertEquals(0.7f, slide.dragValue)
+        // the server reports a new value (the echo): the widget follows it
+        assertEquals(0.68f, slide.current(0.68))
+        slide.onLive(0.68)
+        assertNull(slide.dragValue)
+        // and keeps following later changes - even back to the old reading
+        assertEquals(0.4f, slide.current(0.4))
+        assertEquals(0.2f, slide.current(0.2))
+    }
+
+    @Test
+    fun liveChangesDuringADragDoNotMoveTheThumb() {
+        val slide = controller()
+        slide.start(0.5f) {}
+        slide.move(0.6f) {}
+        slide.onLive(0.9)
+        assertEquals(0.6f, slide.current(0.9))
     }
 
     @Test

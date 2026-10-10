@@ -468,6 +468,11 @@ describe("TileCell sliders", () => {
     );
   });
 
+  it("starts the spotify fader at the 0..1 level, not the percent string", () => {
+    const w = slider({ type: "spotify-volume" }, { customValues: { "spotify-volume": "50", "spotify-volume-level": "0.5" } });
+    expect(w.find(".slider-fill").attributes("style")).toContain("height: 50%");
+  });
+
   it("steps the fader with arrow keys and clamps", async () => {
     const w = slider({}, { customValues: { "speaker-volume": 0.98 } });
     await tileEl(w).trigger("keydown", { key: "ArrowUp" });

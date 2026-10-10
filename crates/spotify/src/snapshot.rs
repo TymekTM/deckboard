@@ -173,10 +173,18 @@ fn now_playing_payload(player: Option<&Value>) -> Value {
 ///
 /// Keys (design §4): `spotify-playing`, `spotify-shuffle`,
 /// `spotify-repeat`, `spotify-repeat-on`, `spotify-liked`,
-/// `spotify-volume`, `spotify-progress`, `spotify-device`,
+/// `spotify-volume`, `spotify-volume-level`, `spotify-progress`, `spotify-device`,
 /// `spotify-now-playing`, `spotify-auth`, plus the internal
 /// `spotify-art-url` (**host-consumed; the host must strip it before
 /// forwarding the snapshot to clients**).
+/// The volume as a 0..1 slider position. `spotify-volume` stays the
+/// legacy percent string ("55"), but slider widgets read their live value
+/// as a 0..1 fraction - the same scale `exec_slider` writes - so the
+/// v2 slider tile watches this key instead.
+fn volume_level(percent: u32) -> String {
+    format!("{:.2}", f64::from(percent.min(100)) / 100.0)
+}
+
 pub fn build_snapshot(
     player: Option<&Value>,
     liked: Option<bool>,
@@ -191,6 +199,7 @@ pub fn build_snapshot(
             "spotify-repeat-on": "OFF",
             "spotify-liked": "OFF",
             "spotify-volume": last_volume.unwrap_or(100).to_string(),
+            "spotify-volume-level": volume_level(last_volume.unwrap_or(100)),
             "spotify-progress": "0.000",
             "spotify-device": "",
             "spotify-auth": auth.as_str(),
@@ -234,6 +243,7 @@ pub fn build_snapshot(
         "spotify-repeat-on": on_off(repeat != "off"),
         "spotify-liked": on_off(liked.unwrap_or(false)),
         "spotify-volume": volume.to_string(),
+        "spotify-volume-level": volume_level(volume),
         "spotify-progress": progress,
         "spotify-device": player.map(device_name).unwrap_or_default(),
         "spotify-auth": auth.as_str(),
@@ -282,6 +292,7 @@ mod tests {
         assert_eq!(snapshot["spotify-repeat-on"], "ON");
         assert_eq!(snapshot["spotify-liked"], "ON");
         assert_eq!(snapshot["spotify-volume"], "55");
+        assert_eq!(snapshot["spotify-volume-level"], "0.55");
         assert_eq!(snapshot["spotify-progress"], "0.305");
         assert_eq!(snapshot["spotify-device"], "Kitchen");
         assert_eq!(snapshot["spotify-auth"], "ok");
@@ -309,8 +320,21 @@ mod tests {
                 "spotify-repeat-on",
                 "spotify-shuffle",
                 "spotify-volume",
+                "spotify-volume-level",
             ]
         );
+    }
+
+    #[test]
+    fn volume_level_is_the_percent_as_a_fraction() {
+        assert_eq!(volume_level(0), "0.00");
+        assert_eq!(volume_level(7), "0.07");
+        assert_eq!(volume_level(100), "1.00");
+        // a bogus API value never leaves the slider's 0..1 range
+        assert_eq!(volume_level(250), "1.00");
+        let logged_out = build_snapshot(None, None, AuthState::NeedsLogin, Some(30));
+        assert_eq!(logged_out["spotify-volume"], "30");
+        assert_eq!(logged_out["spotify-volume-level"], "0.30");
     }
 
     #[test]
