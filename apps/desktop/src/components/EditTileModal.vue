@@ -1,10 +1,12 @@
 <script setup>
 import { computed, reactive, ref, watch } from "vue";
-import { open, ask } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
+import { ask } from "../confirm";
 import { CATALOG, parsePlanWindows, setPlanWindows } from "../catalog";
 import { api, vmDevicesState, refreshVmDevices } from "../api";
 import SelectField from "./SelectField.vue";
 import ActionPicker from "./ActionPicker.vue";
+import { ICON_GROUPS, searchIcons } from "../icons";
 
 const props = defineProps({
   button: { type: Object, default: null }, // null = create mode
@@ -704,6 +706,8 @@ async function requestClose() {
   }
   const ok = await ask("Zamknąć okno i porzucić niezapisane zmiany?", {
     title: "Niezapisane zmiany",
+    okLabel: "Porzuć zmiany",
+    cancelLabel: "Wróć",
     kind: "warning",
   });
   if (ok) emit("close");
@@ -753,18 +757,11 @@ function closeProps() {
   openProp.value = null;
 }
 
-const ICONS = [
-  "keyboard", "mouse", "font", "link", "folder", "cog", "file", "camera",
-  "play", "pause", "stop", "forward", "backward", "volume-up", "volume-mute",
-  "microphone", "microphone-slash", "headphones", "music", "video", "image",
-  "star", "heart", "bell", "bookmark", "calendar", "check", "clock", "cloud",
-  "comment", "compass", "copy", "download", "upload", "edit", "envelope",
-  "eye", "eye-slash", "fire", "flag", "gamepad", "hand-pointer", "home",
-  "lightbulb", "list", "lock", "unlock", "map-marker", "moon", "sun",
-  "paper-plane", "phone", "plus", "power-off", "redo", "undo", "sync",
-  "sliders-h", "trash", "user", "users", "wifi", "wrench", "bolt", "tv",
-  "desktop", "mobile", "puzzle-piece", "rocket", "search", "share", "tag",
-];
+// searchable picker: curated groups by default, the full shared FA set
+// (desktop webfont ∩ Android font) once the user types a query
+const iconQuery = ref("");
+const iconMatches = computed(() => searchIcons(iconQuery.value));
+
 
 // preview falls back to the action's own icon/color like the original
 const effIcon = computed(() => form.icon || catalogEntry.value?.icon || "");
@@ -887,17 +884,40 @@ function colorOr(val, fallback) {
                       <input v-model="form.icon" placeholder="fontawesome 5 icon name" @keydown.enter.prevent />
                       <i v-if="form.icon" class="fas big" :class="'fa-' + form.icon"></i>
                     </div>
+                    <input
+                      v-model="iconQuery"
+                      class="icon-search"
+                      type="search"
+                      placeholder="Search icons (e.g. mic, arrow, chart)"
+                      @keydown.enter.prevent
+                    />
                     <div class="icon-grid">
-                      <button
-                        v-for="ic in ICONS"
-                        :key="ic"
-                        class="icon-cell"
-                        :class="{ on: form.icon === ic }"
-                        :title="ic"
-                        @click="form.icon = ic"
-                      >
-                        <i class="fas" :class="'fa-' + ic"></i>
-                      </button>
+                      <template v-if="iconQuery.trim()">
+                        <p v-if="!iconMatches.length" class="icon-empty">No icons match "{{ iconQuery.trim() }}"</p>
+                        <button
+                          v-for="ic in iconMatches"
+                          :key="ic"
+                          class="icon-cell"
+                          :class="{ on: form.icon === ic }"
+                          :title="ic"
+                          @click="form.icon = ic"
+                        >
+                          <i class="fas" :class="'fa-' + ic"></i>
+                        </button>
+                      </template>
+                      <template v-else v-for="group in ICON_GROUPS" :key="group.label">
+                        <div class="icon-group">{{ group.label }}</div>
+                        <button
+                          v-for="ic in group.icons"
+                          :key="ic"
+                          class="icon-cell"
+                          :class="{ on: form.icon === ic }"
+                          :title="ic"
+                          @click="form.icon = ic"
+                        >
+                          <i class="fas" :class="'fa-' + ic"></i>
+                        </button>
+                      </template>
                     </div>
                   </template>
 
@@ -1283,9 +1303,21 @@ function colorOr(val, fallback) {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   gap: 2px;
-  max-height: 168px;
+  max-height: 232px;
   overflow-y: auto;
 }
+.icon-search { width: 100%; padding: 6px 8px; font-size: 13px; margin-bottom: 6px; box-sizing: border-box; }
+.icon-group {
+  grid-column: 1 / -1;
+  padding: 8px 2px 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--modal-muted);
+}
+.icon-group:first-child { padding-top: 2px; }
+.icon-empty { grid-column: 1 / -1; margin: 10px 0; font-size: 12.5px; color: var(--modal-muted); text-align: center; }
 .icon-cell {
   height: 30px;
   border-radius: 4px;

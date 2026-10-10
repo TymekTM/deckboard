@@ -71,7 +71,6 @@ export const api = {
   vmReconnect: () => invoke("vm_reconnect"),
   vmRun: (vmType) => invoke("vm_run", { vmType }),
   vmDevices: () => invoke("vm_devices"),
-  execButtonGesture: (id, gesture) => invoke("exec_button_gesture", { id, gesture }),
 };
 
 export async function refreshVmDevices() {

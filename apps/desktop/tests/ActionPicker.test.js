@@ -35,6 +35,8 @@ const highlighted = (w) => w.find(".item.hl .ilabel").text();
 
 afterEach(() => {
   document.body.innerHTML = "";
+  // picks are remembered in the "recently used" group; keep tests independent
+  localStorage.clear();
 });
 
 describe("ActionPicker trigger", () => {

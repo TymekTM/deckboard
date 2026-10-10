@@ -1,7 +1,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
-import { save, open, ask } from "@tauri-apps/plugin-dialog";
+import { save, open } from "@tauri-apps/plugin-dialog";
+import { ask, confirmState } from "./confirm";
 import { api } from "./api";
 import { CATALOG, clamp } from "./catalog";
 import GridEditor from "./components/GridEditor.vue";
@@ -9,6 +10,7 @@ import EditTileModal from "./components/EditTileModal.vue";
 import BoardModal from "./components/BoardModal.vue";
 import SettingsOverlay from "./components/SettingsOverlay.vue";
 import OperatorAskModal from "./components/OperatorAskModal.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 import {
   createEditorHistory,
   tileCreateCommand,
@@ -234,6 +236,8 @@ async function deleteSelectedTiles() {
       : `Usunąć ${count} zaznaczonych kafli?`,
     {
       title: "Usuń kafle",
+      okLabel: "Usuń",
+      cancelLabel: "Anuluj",
       kind: "warning",
     }
   );
@@ -785,6 +789,8 @@ function boardContextMenu(board, event) {
       run: async () => {
         const ok = await ask(`Clear every tile from "${board.name}"?`, {
           title: "Clear board",
+    okLabel: "Clear",
+          okLabel: "Clear",
           kind: "warning",
         });
         if (ok) {
@@ -808,6 +814,8 @@ function boardContextMenu(board, event) {
       run: async () => {
         const ok = await ask(`Delete board "${board.name}"?`, {
           title: "Delete board",
+    okLabel: "Delete",
+          okLabel: "Delete",
           kind: "warning",
         });
         if (ok) {
@@ -1082,6 +1090,7 @@ async function tileDeleted(tile) {
   // edit dialog's Delete button (012 A9)
   const ok = await ask(`Delete tile "${tile.title || tile.type}"?`, {
     title: "Delete tile",
+    okLabel: "Delete",
     kind: "warning",
   });
   if (!ok) return;
@@ -1134,6 +1143,7 @@ async function clearCurrentBoard() {
   if (!currentBoard.value) return;
   const ok = await ask(`Clear every tile from "${currentBoard.value.name}"?`, {
     title: "Clear board",
+    okLabel: "Clear",
     kind: "warning",
   });
   if (!ok) return;
@@ -1154,6 +1164,7 @@ async function deleteCurrentBoard() {
   if (!currentBoard.value) return;
   const ok = await ask(`Delete board "${currentBoard.value.name}"?`, {
     title: "Delete board",
+    okLabel: "Delete",
     kind: "warning",
   });
   if (!ok) return;
@@ -1283,6 +1294,8 @@ function isModalActive() {
 }
 
 function onKeydown(event) {
+  // the confirm popup owns the keyboard while it is up
+  if (confirmState.open) return;
   if (event.key === "Escape") {
     closeContextMenu();
     if (selectedTileIds.value.size > 0) {
@@ -1709,6 +1722,9 @@ function onKeydown(event) {
 
     <!-- operator gates (B2 trust / M8 pair-request) as in-app popups -->
     <OperatorAskModal />
+
+    <!-- in-app confirmations (delete / clear / discard) instead of OS dialogs -->
+    <ConfirmDialog />
   </div>
 </template>
 

@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask } from "../confirm";
 import { api } from "../api";
 import { MAX_BOARD_DIM, boardDim } from "../catalog";
 
@@ -67,6 +67,7 @@ async function save() {
 async function clearBoard() {
   const ok = await ask(`Clear every tile from "${props.board.name}"?`, {
     title: "Clear board",
+    okLabel: "Clear",
     kind: "warning",
   });
   if (!ok) return;
@@ -84,6 +85,7 @@ async function clearBoard() {
 async function deleteBoard() {
   const ok = await ask(`Delete board "${props.board.name}"?`, {
     title: "Delete board",
+    okLabel: "Delete",
     kind: "warning",
   });
   if (!ok) return;
