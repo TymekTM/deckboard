@@ -358,6 +358,11 @@ impl pulpit_host::ClientFeed for DesktopFeed {
 /// ADR-001), load extensions and start the embedded legacy server. A failure
 /// keeps the UI alive with `backend: None` so the window can explain why.
 fn setup_core(app: tauri::AppHandle) -> DesktopState {
+    // Several crates (obs, tools, ...) start their background workers with a
+    // bare tokio::spawn while the state is built. This runs on the plain
+    // main thread, so enter tauri's runtime for the whole construction -
+    // without it the release exe panics at startup ("no reactor running").
+    let _runtime = tauri::async_runtime::handle().inner().enter();
     // leftover from a self-update: the running exe was renamed aside and
     // replaced; now nothing holds it and it can finally be deleted
     if let Ok(exe) = std::env::current_exe() {
