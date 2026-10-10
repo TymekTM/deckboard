@@ -371,6 +371,7 @@ private fun TileCell(
     // no server timestamp rides the payload (clocks differ): stamp the
     // local receive time once per payload content, for progress
     // extrapolation (design §4)
+    val haptics = LocalHaptics.current
     val statusReceivedAtMs = remember(live) { SystemClock.elapsedRealtime() }
     val active = when {
         watchChannel != null -> isActiveValue(live)
@@ -390,8 +391,15 @@ private fun TileCell(
         image2 = image2,
         statusImage = statusImage,
         statusReceivedAtMs = statusReceivedAtMs,
+        liveElement = live,
         onPressStart = { vm.pressStart(boardId, t) },
-        onPressEnd = { vm.pressEnd(boardId, t) },
+        onPressEnd = {
+            if (t.kind == V2.KIND_TOGGLE || templateFor(t) == "toggle") {
+                positions[t.id] = !(positions[t.id] ?: false)
+                haptics.toggleFlip()
+            }
+            vm.pressEnd(boardId, t)
+        },
         onSlider = { v -> vm.slider(boardId, t, v) },
         onGesture = { name -> vm.gesture(boardId, t, name) },
     )

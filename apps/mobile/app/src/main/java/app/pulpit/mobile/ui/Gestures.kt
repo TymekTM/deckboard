@@ -13,6 +13,9 @@ enum class Swipe {
     Right,
 }
 
+val Swipe.isRecognized: Boolean
+    get() = this != Swipe.None
+
 /** Dominant-axis classification of a completed drag. A swipe must
  *  travel at least [minPx] AND be clearly horizontal (|dx| > |dy|);
  *  anything else reads as None, never as a stray trigger. */

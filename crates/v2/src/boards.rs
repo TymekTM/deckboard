@@ -206,6 +206,24 @@ pub fn hold_repeat_config(params: &Value) -> Option<(u64, u64)> {
 /// and the plan tile's `windows:` option token is normalized into a
 /// params array.
 fn apply_implicit_params(row: &ButtonRow, params: &mut Value) {
+    if pulpit_tools::is_tool_action(&row.kind) {
+        if !params.is_object() {
+            *params = Value::Object(serde_json::Map::new());
+        }
+        let obj = params.as_object_mut().expect("just made an object");
+        obj.insert("widget".into(), Value::String(row.kind.clone()));
+        if let Some(cmd_val) = row
+            .command
+            .as_deref()
+            .and_then(|c| serde_json::from_str::<Value>(c).ok())
+        {
+            if let Some(cmd_obj) = cmd_val.as_object() {
+                for (k, v) in cmd_obj {
+                    obj.entry(k.clone()).or_insert(v.clone());
+                }
+            }
+        }
+    }
     if row.kind == "clock-display-time" {
         if !params.is_object() {
             *params = Value::Object(serde_json::Map::new());
@@ -265,6 +283,23 @@ fn widget_kind_for(
         "list" => (WidgetKind::List, vec![]),
         // ai dev-work display tiles: a read-only row list, no gestures
         "status" => (WidgetKind::List, vec![]),
+        _ if row.kind == "tool-clock" => (WidgetKind::Button, vec![]),
+        _ if matches!(row.kind.as_str(), "tool-timer" | "tool-stopwatch") => (
+            WidgetKind::Button,
+            vec![
+                Interaction::Tap,
+                Interaction::LongPress,
+                Interaction::DoubleTap,
+            ],
+        ),
+        _ if row.kind == "tool-counter" => (
+            WidgetKind::Button,
+            vec![
+                Interaction::Tap,
+                Interaction::DoubleTap,
+                Interaction::LongPress,
+            ],
+        ),
         _ if app == Some("custom-value") => (WidgetKind::Toggle, vec![Interaction::Tap]),
         _ => {
             // Press semantics are declared, not implied: key-style
@@ -285,6 +320,12 @@ fn widget_kind_for(
             (WidgetKind::Button, interactions)
         }
     };
+    // The system now-playing display tile stays a List (it renders the
+    // pushed payload) but is tappable: the backend maps its tap to the
+    // play/pause toggle, like tapping the tile on the desktop.
+    if row.kind == "media-now-playing" && !interactions.contains(&Interaction::Tap) {
+        interactions.insert(0, Interaction::Tap);
+    }
     // M5 custom gestures (`{"gestures": [...]}` in the options JSON):
     // alternative triggers of the tile's action, on top of the kind's
     // defaults. Slider/knob tiles keep the drag surface for the value
@@ -324,6 +365,28 @@ pub fn declared_gestures(params: &Value) -> Vec<Interaction> {
         .collect()
 }
 
+/// The action a declared gesture runs: `gesture_actions` in the options
+/// JSON (`{"gesture_actions": {"long-press": {"type": "media",
+/// "command": "play"}}}`) overrides the tile's own action per gesture.
+/// Returns the `(kind, command)` pair to execute - `None` for the command
+/// half keeps the tile's own command, matching the per-field override the
+/// editor writes. `None` overall when the gesture has no override and the
+/// tile's own action applies (the M5 default). Shared by the v2
+/// interaction handler and the desktop touch-mode command so a gesture
+/// cannot diverge between the tablet and the editor's own screen.
+pub fn gesture_action_override(params: &Value, gesture: &str) -> Option<(String, Option<String>)> {
+    let action = params
+        .get("gesture_actions")
+        .and_then(|actions| actions.get(gesture))?;
+    let kind = action.get("type").and_then(Value::as_str)?;
+    let command = match action.get("command") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) if !other.is_null() => Some(other.to_string()),
+        _ => None,
+    };
+    Some((kind.to_string(), command))
+}
+
 /// State channel + shape, registered with the engine as a side effect so
 /// the channel shows up in `welcome` even before the first push. The
 /// legacy `extra` listener returns an empty key for display-mode tiles
@@ -337,6 +400,14 @@ fn state_ref(row: &ButtonRow, legacy: &Value, engine: &StateEngine) -> Option<St
         .to_string();
     if key.is_empty() && row.mode == "status" {
         key = row.kind.clone();
+    }
+    if key.is_empty()
+        && matches!(
+            row.kind.as_str(),
+            "tool-timer" | "tool-stopwatch" | "tool-counter"
+        )
+    {
+        key = format!("tool-{}", row.id);
     }
     if key.is_empty() {
         return None;
@@ -519,6 +590,107 @@ mod tests {
     }
 
     #[test]
+    fn gesture_action_override_reads_the_editor_shape() {
+        let params: Value = serde_json::from_str(
+            r#"{"gesture_actions": {
+                "long-press": {"type": "media", "command": "play"},
+                "double-tap": {"type": "key", "command": ""},
+                "swipe-left": {"type": "vol"}
+            }}"#,
+        )
+        .unwrap();
+        let (kind, command) = gesture_action_override(&params, "long-press").unwrap();
+        assert_eq!(kind, "media");
+        assert_eq!(command.as_deref(), Some("play"));
+        // an explicit empty command replaces the tile's own (a key
+        // override with no combo must not leak the tile's key)
+        let (kind, command) = gesture_action_override(&params, "double-tap").unwrap();
+        assert_eq!(kind, "key");
+        assert_eq!(command.as_deref(), Some(""));
+        // no command key: the tile's own command applies
+        let (kind, command) = gesture_action_override(&params, "swipe-left").unwrap();
+        assert_eq!(kind, "vol");
+        assert_eq!(command, None);
+        // a gesture without an override falls back to the tile's action
+        assert_eq!(gesture_action_override(&params, "swipe-right"), None);
+    }
+
+    #[test]
+    fn gesture_action_override_ignores_broken_options() {
+        // plain-string program arguments and empty JSON are not an
+        // override source: everything falls back to the tile's action
+        for params in [
+            Value::Null,
+            Value::String("--flag".into()),
+            serde_json::json!({ "windows": "5h" }),
+            serde_json::json!({ "gesture_actions": {} }),
+            serde_json::json!({ "gesture_actions": { "long-press": {"command": "x"} } }),
+        ] {
+            assert_eq!(gesture_action_override(&params, "long-press"), None);
+        }
+        // a non-string command keeps its JSON serialization, the way
+        // numbers land in stored commands
+        let params = serde_json::json!({ "gesture_actions": { "double-tap": {"type": "vol", "command": 5} } });
+        let (kind, command) = gesture_action_override(&params, "double-tap").unwrap();
+        assert_eq!(kind, "vol");
+        assert_eq!(command.as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn tool_tiles_carry_widget_hint_config_and_state_channel() {
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let tile = build_tile(
+            &row(
+                "tool-timer",
+                "button",
+                Some(r#"{"duration":"05:00","finish_action":"play","sound_path":"alert.mp3"}"#),
+            ),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::Button);
+        // the config travels as params so clients never parse legacy
+        // command JSON, and the widget hint names the tool kind
+        assert_eq!(tile.manifest.params["widget"], "tool-timer");
+        assert_eq!(tile.manifest.params["duration"], "05:00");
+        assert_eq!(tile.manifest.params["finish_action"], "play");
+        // state channel: the per-id key the manager pushes compact state
+        // under (the row helper's button id is 10)
+        assert_eq!(tile.manifest.state.as_ref().unwrap().channel, "ext.tool-10");
+        // gestures: tap starts/pauses, long-press/double-tap reset
+        assert_eq!(
+            tile.manifest.interactions,
+            vec![
+                Interaction::Tap,
+                Interaction::LongPress,
+                Interaction::DoubleTap
+            ]
+        );
+
+        // the counter swaps the gesture order (+1 tap, -1 double-tap,
+        // reset long-press); the clock renders client-side and takes no
+        // interactions at all
+        assert_eq!(
+            allowed_interactions(&row("tool-counter", "button", None)),
+            vec![
+                Interaction::Tap,
+                Interaction::DoubleTap,
+                Interaction::LongPress
+            ]
+        );
+        let clock = build_tile(
+            &row("tool-clock", "button", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(clock.manifest.params["widget"], "tool-clock");
+        assert!(clock.manifest.interactions.is_empty());
+    }
+
+    #[test]
     fn vol_mute_maps_to_toggle_with_channel() {
         let (assets, _dir) = asset_store();
         let engine = StateEngine::new(120);
@@ -616,6 +788,27 @@ mod tests {
                 Interaction::PressEnd
             ]
         );
+        assert!(tile.manifest.state.is_none());
+    }
+
+    #[test]
+    fn http_request_tile_is_a_plain_button_on_the_v2_wire() {
+        // the config lives in the command column (server-side execution);
+        // the client needs no kind-specific treatment, just the tap
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+        let tile = build_tile(
+            &row(
+                "http-request",
+                "button",
+                Some(r#"{"method":"POST","url":"http://ha.local/api"}"#),
+            ),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::Button);
+        assert_eq!(tile.manifest.interactions, vec![Interaction::Tap]);
         assert!(tile.manifest.state.is_none());
     }
 
@@ -787,6 +980,55 @@ mod tests {
             engine.catalog()["ext.ai-plan-limits"].shape,
             StateShape::Scalar
         );
+    }
+
+    #[test]
+    fn system_media_tiles_shape_like_the_spotify_ones() {
+        let (assets, _dir) = asset_store();
+        let engine = StateEngine::new(120);
+
+        // now-playing: a List over the pushed status payload, plus the
+        // tap interaction (tap = play/pause through the backend dispatch)
+        let tile = build_tile(
+            &row("media-now-playing", "status", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::List);
+        assert_eq!(tile.manifest.interactions, vec![Interaction::Tap]);
+        assert_eq!(
+            tile.manifest.state.unwrap().channel,
+            "ext.media-now-playing"
+        );
+        // the per-event gate agrees with the manifest (a tap the manifest
+        // declares must not be rejected server-side)
+        assert_eq!(
+            allowed_interactions(&row("media-now-playing", "status", None)),
+            vec![Interaction::Tap]
+        );
+
+        // seek slider watches the pushed progress fraction
+        let tile = build_tile(
+            &row("media-seek", "slider", None),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::Slider);
+        assert_eq!(tile.manifest.interactions, vec![Interaction::Slide]);
+        assert_eq!(tile.manifest.state.unwrap().channel, "ext.media-progress");
+
+        // transport control: a plain tappable button, no state channel
+        let tile = build_tile(
+            &row("media-control", "button", Some("play-pause")),
+            &HashMap::new(),
+            &assets,
+            &engine,
+        );
+        assert_eq!(tile.manifest.kind, WidgetKind::Button);
+        assert_eq!(tile.manifest.interactions, vec![Interaction::Tap]);
+        assert!(tile.manifest.state.is_none());
     }
 
     #[test]

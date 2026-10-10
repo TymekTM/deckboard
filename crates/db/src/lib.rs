@@ -254,6 +254,19 @@ impl Db {
         }
     }
 
+    /// Ids of every shortcut across all boards, for lazy GCs of
+    /// per-button side state (the tools store drops entries for deleted
+    /// buttons; AUTOINCREMENT ids never get reused).
+    pub fn all_button_ids(&self) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id FROM Shortcuts ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Same row as [`Db::get_button`] with the `img`/`img2` columns left
     /// empty. Taps and slider slides read a button per event and must not
     /// materialize multi-MB base64 image strings; every consumer treats an
@@ -486,6 +499,22 @@ impl Db {
     }
 
     /// Drag/resize on the editor grid only touches placement.
+    pub fn update_button_board_and_geometry(
+        &self,
+        id: i64,
+        board_id: i64,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE Shortcuts SET board_id = ?1, x = ?2, y = ?3, w = ?4, h = ?5 WHERE id = ?6",
+            rusqlite::params![board_id, x, y, w, h, id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_button_geometry(&self, id: i64, x: i64, y: i64, w: i64, h: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE Shortcuts SET x = ?1, y = ?2, w = ?3, h = ?4 WHERE id = ?5",
@@ -811,18 +840,37 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// back as a `Response`).
 ///
 /// Users today: pulpit-discord (OAuth calls), pulpit-aidev (provider
-/// limits + Antigravity quota), pulpit-backend (third-party app pings).
-/// Skip-sized timeouts on purpose: Discord's local pipe API answers
-/// instantly, quota/limits endpoints can be slow. New HTTP consumers -
-/// `crates/spotify` is next - must build their agents through this
-/// instead of rolling another `Agent::config_builder()` chain.
+/// limits + Antigravity quota), pulpit-backend (third-party app pings
+/// and the http-request tile). Skip-sized timeouts on purpose: Discord's
+/// local pipe API answers instantly, quota/limits endpoints can be slow.
+/// New HTTP consumers - `crates/spotify` is next - must build their
+/// agents through this instead of rolling another `Agent::config_builder()`
+/// chain.
 pub fn http_agent(global_timeout: std::time::Duration, status_as_error: bool) -> ureq::Agent {
-    ureq::Agent::config_builder()
+    http_agent_insecure(global_timeout, status_as_error, false)
+}
+
+/// [`http_agent`] with certificate verification optionally disabled, for
+/// the http-request tile's "Ignoruj błędy certyfikatu" opt-in (self-signed
+/// Home Assistant / internal-CA setups). Everything else - timeout policy
+/// and user agent - stays identical to [`http_agent`].
+pub fn http_agent_insecure(
+    global_timeout: std::time::Duration,
+    status_as_error: bool,
+    insecure: bool,
+) -> ureq::Agent {
+    let mut config = ureq::Agent::config_builder()
         .timeout_global(Some(global_timeout))
         .http_status_as_error(status_as_error)
-        .user_agent(concat!("pulpit/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .new_agent()
+        .user_agent(concat!("pulpit/", env!("CARGO_PKG_VERSION")));
+    if insecure {
+        config = config.tls_config(
+            ureq::tls::TlsConfig::builder()
+                .disable_verification(true)
+                .build(),
+        );
+    }
+    config.build().new_agent()
 }
 
 /// `<path>.tmp` in the same directory, so the rename stays on one volume.

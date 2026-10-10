@@ -98,6 +98,33 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+    let hub = Arc::new(Hub::new());
+    let tools_path = data_dir.join("tools.json");
+    let (tools, tools_rx) = pulpit_tools::spawn_tools(tools_path, hub.clone());
+    // A timer's on-finish "switch board" acts on the connected tablets
+    // (there is no local UI here); the sinks are wired once the v2 state
+    // exists below.
+    let (tools_board_tx, mut tools_board_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+    tools.set_board_sink(tools_board_tx);
+
+    // OBS: the same `obs.json` the desktop writes. `PULPIT_OBS_CONFIG`
+    // overrides the location (hermetic runs). A disabled config parks
+    // the connection worker - zero traffic until it is enabled.
+    let obs_path = std::env::var_os("PULPIT_OBS_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("obs.json"));
+    let obs_config = match pulpit_obs::ObsConfig::load(&obs_path) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("obs.json exists but cannot be read: {e} - OBS disabled");
+            pulpit_obs::ObsConfig::default()
+        }
+    };
+    let (obs_push_tx, obs_push_rx) = tokio::sync::mpsc::unbounded_channel();
+    let obs = pulpit_obs::Obs::new(obs_config, Some(obs_path.clone()), obs_push_tx);
+    if !obs.status().await.enabled {
+        tracing::info!("OBS not enabled in obs.json - OBS integration idle");
+    }
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -105,13 +132,38 @@ async fn main() -> anyhow::Result<()> {
                 pulpit_discord::DiscordConfig::from_settings(&settings),
                 data_dir.join("settings.json"),
             )
-            .with_spotify(spotify.clone()),
+            .with_voicemeeter_override(pulpit_vm::load_dll_override(&settings))
+            .with_spotify(spotify.clone())
+            .with_tools(Some(tools.clone()))
+            .with_obs(Some(obs)),
     );
 
+    let concrete_backend = backend.clone();
     let state = Arc::new(AppState {
-        hub: Arc::new(Hub::new()),
+        hub,
         backend: backend as Arc<dyn pulpit_legacy::Backend>,
     });
+
+    // Lazy GC: drop tools.json entries whose tile no longer exists
+    // (AUTOINCREMENT ids are never reused, so a kept entry is dead
+    // weight only - the sweep just keeps the file small). The concrete
+    // backend read runs off the async workers like every DB touch.
+    {
+        let tools = tools.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                interval.tick().await;
+                let ids = tokio::task::spawn_blocking({
+                    let concrete = concrete_backend.clone();
+                    move || concrete.all_button_ids()
+                })
+                .await
+                .unwrap_or_default();
+                tools.clean_deleted(&ids);
+            }
+        });
+    }
 
     // Port 8500 is what the stock Android client hardcodes (and the original
     // app's default); `PULPIT_PORT` overrides it for side-by-side runs.
@@ -179,6 +231,27 @@ async fn main() -> anyhow::Result<()> {
         feed.clone(),
         state.backend.clone(),
     ));
+    tokio::spawn(pulpit_host::forward_producer(feed.clone(), tools_rx));
+    // Timer finish -> switch board: legacy tablets listen on their own
+    // `change_board` event (the same one a board-switch tile's exec
+    // emits), v2 tablets on the typed `board.open` frame.
+    {
+        let legacy_hub = state.hub.clone();
+        let v2_hub = v2.hub.clone();
+        tokio::spawn(async move {
+            use pulpit_proto::{BoardOpen, Frame, TYPE_BOARD_OPEN};
+            while let Some(board) = tools_board_rx.recv().await {
+                legacy_hub
+                    .broadcast("change_board", Some(&format!(r#"{{"boardId":{board}}}"#)))
+                    .await;
+                v2_hub.broadcast_frame(&Frame::push_typed(TYPE_BOARD_OPEN, &BoardOpen { board }));
+            }
+        });
+    }
+    // OBS producer: the connection worker's live-state snapshots ride
+    // the shared producer pump (same lanes and change-gating as every
+    // other producer).
+    tokio::spawn(pulpit_host::forward_producer(feed.clone(), obs_push_rx));
     // Spotify poller: consumers = connected legacy + v2 clients (no
     // host-local UI on the headless server). Snapshots ride the shared
     // spotify pump (internal art key stripped, album art imported).
@@ -197,6 +270,17 @@ async fn main() -> anyhow::Result<()> {
             // a defined state
             tokio::spawn(pulpit_host::spotify::forward_spotify_disabled(feed.clone()));
         }
+    }
+    // System media (SMTC): always on where the OS supports it - no
+    // config file gates it. The poller idles when no client watches, and
+    // on non-Windows the receiver closes immediately (no-op pump).
+    {
+        let consumers = pulpit_host::consumer_reader(state.hub.clone(), Some(v2.hub.clone()), None);
+        tokio::spawn(pulpit_host::media::forward_media(
+            feed.clone(),
+            pulpit_os::media::spawn_push(consumers),
+            Some(v2.assets.clone()),
+        ));
     }
     tokio::spawn(pulpit_host::activity_loop(
         ext_manager.clone(),

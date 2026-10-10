@@ -357,6 +357,8 @@ fun KnobTile(
 ) {
     // one drag protocol with the slider template (MOB-13): see
     // SlideDragController for the live-echo and convergence policy
+    val haptics = LocalHaptics.current
+    val onStepTick: () -> Unit = remember(haptics) { { haptics.sliderTick() } }
     val slide = remember(tile.id) { SlideDragController() }
     // see ButtonTile (Tile.kt): the drag block outlives a live tile edit
     val live by rememberUpdatedState(liveValue)
@@ -385,7 +387,7 @@ fun KnobTile(
                         val clamped = raw.coerceIn(0.0, 1.0).toFloat()
                         val scaled = if (radius < dead) cur else clamped
                         if (scaled != cur) {
-                            slide.move(scaled, send = sendSlide)
+                            slide.move(scaled, onStepTick, send = sendSlide)
                         }
                     },
                     onDragEnd = {

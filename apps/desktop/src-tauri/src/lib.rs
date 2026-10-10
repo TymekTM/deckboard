@@ -42,11 +42,18 @@ struct DesktopState {
     spotify: Option<pulpit_spotify::Spotify>,
     /// `pulpitApp/spotify.json` - the Spotify config (client id + tokens).
     spotify_path: Option<std::path::PathBuf>,
+    /// Native OBS websocket handle (cheap clone; the backend exec chain
+    /// and the Settings panel share it). Always present unless the
+    /// runtime itself failed to start. The obs.json path travels inside
+    /// the handle (`ObsConfig::save` on apply).
+    obs: Option<pulpit_obs::Obs>,
     /// Editor picker cache: the user's playlists (the `spotify_playlists`
     /// command caches them for 60 s so opening the tile dialog does not
     /// hammer the API).
     spotify_playlists:
         std::sync::Mutex<Option<(std::time::Instant, Vec<pulpit_spotify::Playlist>)>>,
+    #[allow(dead_code)]
+    tools: Option<Arc<pulpit_tools::ToolManager>>,
 }
 
 impl DesktopState {
@@ -236,7 +243,22 @@ pub fn run() {
             spotify_logout,
             spotify_playlists,
             spotify_devices,
+            media_sessions,
+            obs_status,
+            obs_apply_config,
+            obs_test_connection,
+            obs_choices,
             asset_data_url,
+            discord_status,
+            discord_save_config,
+            discord_authorize,
+            discord_disconnect,
+            vm_status,
+            vm_set_dll_override,
+            vm_reconnect,
+            vm_run,
+            vm_devices,
+            exec_button_gesture,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -378,7 +400,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             aidev_config: Some(aidev_config),
             spotify: None,
             spotify_path: None,
+            obs: None,
+
             spotify_playlists: std::sync::Mutex::new(None),
+            tools: None,
         };
     }
     let db = db.unwrap();
@@ -400,6 +425,25 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         }
     };
 
+    // PULPIT_OBS_CONFIG overrides the config location (profiling /
+    // hermetic runs), like PULPIT_SPOTIFY_CONFIG for Spotify. The handle
+    // is always built: a disabled or missing obs.json parks its
+    // connection worker (zero traffic) and the Settings panel can enable
+    // it without an app restart. Only an unreadable file starts from the
+    // defaults - failing closed instead of overwriting the user's config.
+    let obs_path = std::env::var_os("PULPIT_OBS_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("obs.json"));
+    let obs_config = match pulpit_obs::ObsConfig::load(&obs_path) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("obs.json exists but cannot be read: {e} - starting from defaults");
+            pulpit_obs::ObsConfig::default()
+        }
+    };
+    let (obs_push_tx, obs_push_rx) = tokio::sync::mpsc::unbounded_channel();
+    let obs_handle = pulpit_obs::Obs::new(obs_config, Some(obs_path.clone()), obs_push_tx);
+
     let settings: serde_json::Value = std::fs::read_to_string(data_dir.join("settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -420,6 +464,20 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
     }
     pulpit_host::register_inputs(&ext_manager);
 
+    let hub = Arc::new(Hub::new());
+    let tools_path = data_dir.join("tools.json");
+    let (tools, tools_rx) = pulpit_tools::spawn_tools(tools_path, hub.clone());
+    // A timer's on-finish "switch board" acts on this host's own touch
+    // mode: the same DOM event a board-switch tile's exec emits.
+    let (tools_board_tx, mut tools_board_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+    tools.set_board_sink(tools_board_tx);
+    let app_for_tools = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(board) = tools_board_rx.recv().await {
+            let _ = app_for_tools.emit("change-board", board);
+        }
+    });
+
     let backend = Arc::new(
         SqlBackend::new(db)
             .with_extensions(ext_manager.clone())
@@ -427,11 +485,32 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
                 pulpit_discord::DiscordConfig::from_settings(&settings),
                 data_dir.join("settings.json"),
             )
-            .with_spotify(spotify.clone()),
+            .with_voicemeeter_override(pulpit_vm::load_dll_override(&settings))
+            .with_spotify(spotify.clone())
+            .with_tools(Some(tools.clone()))
+            .with_obs(Some(obs_handle.clone())),
     );
-
-    let hub = Arc::new(Hub::new());
     let broadcaster = EditorBroadcaster::new(hub.clone(), backend.clone());
+
+    // Lazy GC: drop tools.json entries whose tile no longer exists
+    // (AUTOINCREMENT ids are never reused, so a kept entry is dead
+    // weight only - the sweep just keeps the file small).
+    {
+        let tools = tools.clone();
+        let backend = backend.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                interval.tick().await;
+                let tools = tools.clone();
+                let backend = backend.clone();
+                let ids = tauri::async_runtime::spawn_blocking(move || backend.all_button_ids())
+                    .await
+                    .unwrap_or_default();
+                tools.clean_deleted(&ids);
+            }
+        });
+    }
 
     // Protocol v2 (docs/protocol-v2.md): same port, /v2/ws + /assets +
     // /v2/pair. Shares the backend with the legacy layer; a broken devices
@@ -532,6 +611,7 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         feed.clone(),
         backend.clone() as Arc<dyn Backend>,
     ));
+    tauri::async_runtime::spawn(pulpit_host::forward_producer(feed.clone(), tools_rx));
 
     // Spotify (when its config is readable): the poller's consumers
     // signal counts connected legacy + v2 clients plus this host's extra
@@ -568,6 +648,35 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
             }
         }
     }
+
+    // System media (SMTC): always on where the OS supports it - no config
+    // file gates it. The same consumers signal as Spotify (a tray-hidden
+    // window renders nothing, so the poller idles); thumbnails ride the
+    // shared media pump into the v2 asset store.
+    {
+        let app_for_consumers = app.clone();
+        let extra: Arc<dyn Fn() -> usize + Send + Sync> = Arc::new(move || {
+            app_for_consumers
+                .get_webview_window("main")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false) as usize
+        });
+        let consumers = pulpit_host::consumer_reader(
+            hub.clone(),
+            v2.as_ref().map(|v2| v2.hub.clone()),
+            Some(extra),
+        );
+        tauri::async_runtime::spawn(pulpit_host::media::forward_media(
+            feed.clone(),
+            pulpit_os::media::spawn_push(consumers),
+            v2.as_ref().map(|v2| v2.assets.clone()),
+        ));
+    }
+
+    // OBS producer: the connection worker's live-state snapshots ride
+    // the shared producer pump (same lanes and change-gating as every
+    // other producer, CORE-06).
+    tauri::async_runtime::spawn(pulpit_host::forward_producer(feed.clone(), obs_push_rx));
 
     let state = Arc::new(AppState {
         hub: hub.clone(),
@@ -652,7 +761,10 @@ fn setup_core(app: tauri::AppHandle) -> DesktopState {
         aidev_config: Some(aidev_config),
         spotify,
         spotify_path: Some(spotify_path),
+        obs: Some(obs_handle),
+
         spotify_playlists: std::sync::Mutex::new(None),
+        tools: Some(tools),
     }
 }
 
@@ -1021,6 +1133,16 @@ fn list_known_inputs(state: State<'_, DesktopState>) -> Vec<serde_json::Value> {
         }));
     }
     for (value, icon, color, mode) in pulpit_spotify::input_declarations() {
+        out.push(serde_json::json!({
+            "value": value,
+            "icon": icon,
+            "color": color,
+            "mode": mode,
+            "command": serde_json::Value::Null,
+            "source": "device",
+        }));
+    }
+    for (value, icon, color, mode) in pulpit_os::media::input_declarations() {
         out.push(serde_json::json!({
             "value": value,
             "icon": icon,
@@ -2241,10 +2363,33 @@ async fn move_button(
     h: i64,
 ) -> Result<(), String> {
     let backend = state.backend()?;
-    tauri::async_runtime::spawn_blocking(move || backend.move_button(id, x, y, w, h))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let prev_board_id = {
+        let backend = backend.clone();
+        tauri::async_runtime::spawn_blocking(move || backend.get_button(id).map(|b| b.board_id))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+
+    let moved_backend = backend.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        moved_backend.move_button_to_board(id, board_id, x, y, w, h)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    if let Some(prev) = prev_board_id {
+        if prev != board_id {
+            if let Ok(broadcaster) = state.broadcaster() {
+                broadcaster.refresh_board(prev).await;
+            }
+            state.publish_v2(vec![pulpit_proto::BoardOp::TileRemove {
+                board: prev,
+                tile: id,
+            }]);
+        }
+    }
+
     state.broadcaster()?.refresh_board(board_id).await;
     state.publish_tile_set(board_id, id);
     Ok(())
@@ -2347,9 +2492,13 @@ async fn exec_button(
         pulpit_host::push_values(&feed, app_kind, &serde_json::json!({ key: value })).await;
     }
     // Spotify failures (design §3: Premium required / no active device /
-    // needs login) ride the command's own error -> the editor's existing
-    // flash path shows them; other kinds never record anything.
+    // needs login) and http-request failures ride the command's own
+    // error -> the editor's existing flash path shows them; other kinds
+    // never record anything.
     if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
+    if let Some(message) = backend_for_error.take_last_http_error() {
         return Err(message);
     }
     Ok(())
@@ -2369,8 +2518,12 @@ async fn exec_slider(state: State<'_, DesktopState>, id: i64, value: f64) -> Res
         backend.slider(button, value);
     })
     .await;
-    // same failure surface as exec_button (spotify slider kinds)
+    // same failure surface as exec_button (spotify slider kinds and the
+    // http-request tile)
     if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
+    if let Some(message) = backend_for_error.take_last_http_error() {
         return Err(message);
     }
     Ok(())
@@ -2810,6 +2963,200 @@ async fn spotify_devices(
         .map_err(|e| e.to_string())?
 }
 
+/// Touch mode gesture execution: run a tile's action for a detected
+/// gesture ("long-press" / "double-tap" / "swipe-left" / "swipe-right").
+/// An editor-configured `gesture_actions` override in the options JSON
+/// replaces the tile's kind/command for that gesture; without one the
+/// gesture fires the tile's own action, like the v2 interaction path.
+#[tauri::command]
+async fn exec_button_gesture(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    id: i64,
+    gesture: String,
+) -> Result<(), String> {
+    use pulpit_actions::EventSink;
+
+    let backend = state.backend()?;
+    let backend_for_error = backend.clone();
+    let feed = DesktopFeed {
+        app: app.clone(),
+        engine: state.v2.as_ref().map(|v2| v2.engine.clone()),
+        hub: state
+            .hub
+            .clone()
+            .ok_or_else(|| "database unavailable".to_string())?,
+    };
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<(pulpit_host::StatusApp, String, String)>();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        struct UiSink(
+            AppHandle,
+            tokio::sync::mpsc::UnboundedSender<(pulpit_host::StatusApp, String, String)>,
+        );
+        impl EventSink for UiSink {
+            fn change_board(&mut self, board_id: i64) {
+                let _ = self.0.emit("change-board", board_id);
+            }
+            fn app_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::CustomValue,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+            fn third_party_value(&mut self, key: &str, value: &str) {
+                let _ = self.1.send((
+                    pulpit_host::StatusApp::ThirdParty,
+                    key.to_string(),
+                    value.to_string(),
+                ));
+            }
+        }
+        // per-tap lookup, inside the blocking closure and image-less
+        // (CORE-02), like exec_button: a gesture exec never reads img/img2
+        let Some(mut button) = backend.get_button_meta(id) else {
+            return;
+        };
+        // an editor-configured `gesture_actions` override replaces the
+        // kind/command per field (same helper the v2 interaction handler
+        // uses, so a gesture cannot diverge between tablet and desktop
+        // touch mode); without one the tile's own action fires
+        let params: serde_json::Value =
+            serde_json::from_str(button.options.as_deref().unwrap_or(""))
+                .unwrap_or(serde_json::Value::Null);
+        if let Some((kind, command)) = pulpit_v2::boards::gesture_action_override(&params, &gesture)
+        {
+            button.kind = kind;
+            if let Some(command) = command {
+                button.command = Some(command);
+            }
+        }
+        let mut sink = UiSink(app, tx);
+        // tool tiles carry per-gesture semantics (start/pause, reset) in
+        // the backend; every other kind executes like a desktop tap, so
+        // held keys press and release instead of sticking down
+        if pulpit_tools::is_tool_action(&button.kind) {
+            backend.exec_gesture(button, &gesture, &mut sink);
+        } else {
+            backend.exec_tap(button, &mut sink);
+        }
+    })
+    .await;
+    while let Ok((app_kind, key, value)) = rx.try_recv() {
+        pulpit_host::push_values(&feed, app_kind, &serde_json::json!({ key: value })).await;
+    }
+    if let Some(message) = backend_for_error.take_last_spotify_error() {
+        return Err(message);
+    }
+    if let Some(message) = backend_for_error.take_last_http_error() {
+        return Err(message);
+    }
+    Ok(())
+}
+
+/// Friendly names of the live system-media (SMTC) sessions for the
+/// editor's "Aplikacja" picker on the media tiles. WinRT calls block:
+/// like the Spotify pickers, this runs on the blocking pool.
+#[tauri::command]
+async fn media_sessions() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pulpit_os::media::list_sessions().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---- OBS Studio (Ustawienia; round 5) ---------------------------------------
+
+/// OBS connection state for the settings panel: enabled, live connection
+/// outcome (connected / auth failed / unreachable), the OBS version once
+/// identified, and whether a password is stored (never the value).
+#[tauri::command]
+async fn obs_status(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let obs = state
+        .obs
+        .as_ref()
+        .ok_or_else(|| "OBS wyłączony.".to_string())?;
+    let status = obs.status().await;
+    Ok(serde_json::json!({
+        "enabled": status.enabled,
+        "connected": status.connected,
+        "authFailed": status.auth_failed,
+        "version": status.version,
+        "host": status.host,
+        "port": status.port,
+        "hasPassword": status.has_password,
+    }))
+}
+
+/// Persist and apply the OBS settings (obs.json, written atomically);
+/// the connection worker reconnects - or parks - without an app
+/// restart. Password handling: `None` keeps the stored one (the editor
+/// never receives it back), an empty string clears it, text replaces it.
+#[tauri::command]
+async fn obs_apply_config(
+    state: State<'_, DesktopState>,
+    enabled: bool,
+    host: String,
+    port: u16,
+    password: Option<String>,
+) -> Result<(), String> {
+    let obs = state
+        .obs
+        .as_ref()
+        .ok_or_else(|| "OBS wyłączony.".to_string())?;
+    let mut config = obs.config_async().await;
+    config.enabled = enabled;
+    let host = host.trim().to_string();
+    config.host = if host.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    };
+    config.port = port;
+    match password {
+        None => {}
+        Some(p) if p.is_empty() => config.password = None,
+        Some(p) => config.password = Some(p),
+    }
+    obs.apply_config(config).await
+}
+
+/// One-shot connect + auth probe for "Testuj połączenie": reads what the
+/// form holds right now, independent of the stored config. Returns the
+/// OBS websocket version on success.
+#[tauri::command]
+async fn obs_test_connection(
+    host: String,
+    port: u16,
+    password: Option<String>,
+) -> Result<String, String> {
+    let config = pulpit_obs::ObsConfig {
+        enabled: false,
+        host: if host.trim().is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            host.trim().to_string()
+        },
+        port,
+        password: password.filter(|p| !p.is_empty()),
+    };
+    pulpit_obs::Obs::test_connection(&config).await
+}
+
+/// Scene / source / input / filter names for the tile dialog's OBS
+/// pickers; empty lists while OBS is offline, so the fields fall back
+/// to free text.
+#[tauri::command]
+async fn obs_choices(state: State<'_, DesktopState>) -> Result<pulpit_obs::ObsChoices, String> {
+    let obs = state
+        .obs
+        .as_ref()
+        .ok_or_else(|| "OBS wyłączony.".to_string())?;
+    Ok(obs.choices().await)
+}
+
 /// One stored asset as a data URL for the WebView (the desktop TileCell
 /// resolves `spotify-now-playing` art this way; the spotify-art lane
 /// memoizes the result per hash). Reads like [`read_image_data`]: file
@@ -2839,4 +3186,263 @@ async fn asset_data_url(state: State<'_, DesktopState>, hash: String) -> Result<
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ---- Discord & Voicemeeter (integ) -----------------------------------------
+//
+// Settings UI for the two native integrations. Saving hot-swaps the
+// backend config in place (SqlBackend::swap_discord_config / vm_set_override)
+// so no app restart is needed; the headless server picks the same file up
+// through the mtime re-read on its next action. Commands return redacted
+// values only - the client secret never travels back to the UI.
+
+/// The shared settings.json path a backend was built with (the UI writes
+/// the same file both surfaces read).
+fn integ_settings_path(backend: &SqlBackend) -> std::path::PathBuf {
+    backend
+        .discord_settings_path()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| pulpit_db::data_dir().join("settings.json"))
+}
+
+/// Redacted Discord status for the settings panel: the secret is reported
+/// as a boolean, never echoed. The probe opens a throwaway RPC connection
+/// (up to ~1.5 s), so it runs on the blocking pool.
+#[tauri::command]
+async fn discord_status(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let backend = state.backend()?;
+    let config = backend.get_discord_config().unwrap_or_default();
+    let has_secret = !config.client_secret.trim().is_empty();
+    let client_id = config.client_id.clone();
+    let status =
+        tauri::async_runtime::spawn_blocking(move || pulpit_discord::probe_status(&config))
+            .await
+            .map_err(|e| e.to_string())?;
+    let (status_type, status_line, username): (&str, String, Option<String>) = match status {
+        pulpit_discord::DiscordStatus::NotConfigured => {
+            ("not_configured", "nie skonfigurowano".into(), None)
+        }
+        pulpit_discord::DiscordStatus::NotRunning => {
+            ("not_running", "Discord nie działa".into(), None)
+        }
+        pulpit_discord::DiscordStatus::NeedsAuth => (
+            "needs_auth",
+            "nie połączono (wymaga autoryzacji)".into(),
+            None,
+        ),
+        pulpit_discord::DiscordStatus::Connected { username } => (
+            "connected",
+            format!("połączono jako {username}"),
+            Some(username),
+        ),
+        pulpit_discord::DiscordStatus::Error { message } => {
+            ("error", format!("błąd: {message}"), None)
+        }
+    };
+    Ok(serde_json::json!({
+        "configured": !client_id.is_empty(),
+        "clientId": client_id,
+        "hasSecret": has_secret,
+        "statusType": status_type,
+        "statusLine": status_line,
+        "username": username,
+    }))
+}
+
+#[tauri::command]
+async fn discord_save_config(
+    state: State<'_, DesktopState>,
+    client_id: String,
+    client_secret: String,
+) -> Result<(), String> {
+    let backend = state.backend()?;
+    let path = integ_settings_path(&backend);
+
+    let client_id_trimmed = client_id.trim().to_string();
+    let client_secret_trimmed = client_secret.trim().to_string();
+
+    // the UI never echoes the stored secret: an empty input with a secret
+    // already saved means "keep it", not "erase it"
+    let has_secret = backend
+        .get_discord_config()
+        .map(|c| !c.client_secret.trim().is_empty())
+        .unwrap_or(false);
+    let secret_arg = if client_secret_trimmed.is_empty() && has_secret {
+        None
+    } else {
+        Some(client_secret_trimmed)
+    };
+
+    let path_clone = path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        pulpit_discord::save_config(&path_clone, &client_id_trimmed, secret_arg.as_deref())
+            .map_err(|e| format!("Nie udało się zapisać konfiguracji Discorda: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // hot reload: swap the backend's config so the next discord action
+    // (or status probe) uses the fresh credentials without a restart
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(val) = serde_json::from_str(&raw) {
+            let fresh = pulpit_discord::DiscordConfig::from_settings(&val);
+            backend.swap_discord_config(fresh);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn discord_authorize(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let backend = state.backend()?;
+    let config = backend
+        .get_discord_config()
+        .ok_or_else(|| "Najpierw skonfiguruj Client ID i Client Secret.".to_string())?;
+    if config.client_id.trim().is_empty() || config.client_secret.trim().is_empty() {
+        return Err("Wprowadź i zapisz Client ID oraz Client Secret.".into());
+    }
+    let path = integ_settings_path(&backend);
+
+    // the user approves inside the Discord client; the RPC popup gets a
+    // minute before the flow gives up
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let tokens = tauri::async_runtime::spawn_blocking(move || {
+        pulpit_discord::authorize(&config, deadline).map_err(|e| match e {
+            pulpit_discord::DiscordError::NotRunning => "Discord nie działa.".to_string(),
+            pulpit_discord::DiscordError::AuthCancelled => {
+                "Anulowano autoryzację w aplikacji Discord.".to_string()
+            }
+            pulpit_discord::DiscordError::AuthRejected => "Odrzucono autoryzację.".to_string(),
+            other => format!("Błąd autoryzacji: {other}"),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    pulpit_discord::save_tokens(&path, &tokens)
+        .map_err(|e| format!("Nie udało się zapisać tokenów: {e}"))?;
+
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let fresh = pulpit_discord::DiscordConfig::from_settings(&val);
+    backend.swap_discord_config(fresh.clone());
+
+    // confirm the fresh tokens actually connect and grab the display name
+    // (probe opens its own short-lived session; the keep-alive client is
+    // rebuilt lazily on the next action)
+    let username = tauri::async_runtime::spawn_blocking(move || {
+        // from_settings just wrote these fields, so the Option is Some in
+        // practice; a default degrades to username = None, not a panic
+        match pulpit_discord::probe_status(&fresh.unwrap_or_default()) {
+            pulpit_discord::DiscordStatus::Connected { username } => Some(username),
+            _ => None,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "statusType": "connected",
+        "username": username,
+    }))
+}
+
+#[tauri::command]
+async fn discord_disconnect(state: State<'_, DesktopState>) -> Result<(), String> {
+    let backend = state.backend()?;
+    let path = integ_settings_path(&backend);
+
+    let path_clone = path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        pulpit_discord::clear_tokens(&path_clone)
+            .map_err(|e| format!("Nie udało się wyczyścić tokenów: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // keep id + secret, drop only the tokens; swap so the backend stops
+    // using the revoked access token immediately
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(val) = serde_json::from_str(&raw) {
+            let fresh = pulpit_discord::DiscordConfig::from_settings(&val);
+            backend.swap_discord_config(fresh);
+        }
+    }
+    Ok(())
+}
+
+/// Voicemeeter status for the settings panel. The first query opens and
+/// logs into the remote DLL (its login starts Voicemeeter when the app is
+/// closed), so this runs on the blocking pool like every other FFI call.
+#[tauri::command]
+async fn vm_status(state: State<'_, DesktopState>) -> Result<pulpit_vm::VoicemeeterStatus, String> {
+    let backend = state.backend()?;
+    tauri::async_runtime::spawn_blocking(move || backend.vm_status())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vm_set_dll_override(
+    state: State<'_, DesktopState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let backend = state.backend()?;
+    let settings_path = integ_settings_path(&backend);
+
+    // an empty string clears the override again
+    let clean = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let clean_clone = clean.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        pulpit_vm::save_dll_override(&settings_path, clean_clone.as_deref())
+            .map_err(|e| format!("Nie udało się zapisać override Voicemeeter: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // hot reload: swap the DLL the backend will open next; only an actual
+    // change drops the live session (VoicemeeterState::set_override_path)
+    backend.vm_set_override(clean.map(std::path::PathBuf::from));
+    tauri::async_runtime::spawn_blocking(move || backend.vm_reconnect())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vm_reconnect(state: State<'_, DesktopState>) -> Result<(), String> {
+    let backend = state.backend()?;
+    tauri::async_runtime::spawn_blocking(move || backend.vm_reconnect())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vm_run(state: State<'_, DesktopState>, vm_type: Option<i32>) -> Result<(), String> {
+    let backend = state.backend()?;
+    tauri::async_runtime::spawn_blocking(move || backend.vm_run(vm_type))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// Strip/bus labels for the tile-editor dropdowns. Never connects on its
+/// own: without a live session it returns empty lists and the editor falls
+/// back to the static catalog indices.
+#[tauri::command]
+async fn vm_devices(state: State<'_, DesktopState>) -> Result<serde_json::Value, String> {
+    let backend = state.backend()?;
+    let (strips, buses) = tauri::async_runtime::spawn_blocking(move || backend.vm_devices())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "strips": strips,
+        "buses": buses,
+    }))
 }

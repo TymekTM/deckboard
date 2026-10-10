@@ -1,8 +1,8 @@
 <script setup>
-import { computed, reactive, ref } from "vue";
-import { open } from "@tauri-apps/plugin-dialog";
+import { computed, reactive, ref, watch } from "vue";
+import { open, ask } from "@tauri-apps/plugin-dialog";
 import { CATALOG, parsePlanWindows, setPlanWindows } from "../catalog";
-import { api } from "../api";
+import { api, vmDevicesState, refreshVmDevices } from "../api";
 import SelectField from "./SelectField.vue";
 import ActionPicker from "./ActionPicker.vue";
 
@@ -22,6 +22,7 @@ const props = defineProps({
 });
 const emit = defineEmits(["save", "create", "delete", "close"]);
 
+refreshVmDevices();
 const isCreate = computed(() => !props.button);
 
 // editable copy: every column the dialog touches. Shallow spread, not a
@@ -69,6 +70,47 @@ function setPlanWindow(key, event) {
     ...planWindows.value,
     [key]: event.target.checked,
   });
+}
+
+// SMTC media tiles: the optional target app ("Aplikacja") lives in the
+// options column as {"app": "<name substring>"} - the now-playing status
+// tile keys its live payload by `command || type`, so the command must
+// stay empty. The dropdown lists the live system playback sessions; a
+// failed fetch leaves the picker empty (the current session stays the
+// default), and clearing it back selects exactly that.
+const isMediaTile = computed(() =>
+  ["media-now-playing", "media-control", "media-seek"].includes(form.type)
+);
+const mediaApps = ref([]);
+const mediaApp = computed(() => {
+  try {
+    return JSON.parse(form.options || "{}")?.app || "";
+  } catch {
+    return "";
+  }
+});
+watch(
+  isMediaTile,
+  (yes) => {
+    if (yes && !mediaApps.value.length) {
+      api
+        .mediaSessions()
+        .then((list) => (mediaApps.value = Array.isArray(list) ? list : []))
+        .catch(() => {});
+    }
+  },
+  { immediate: true }
+);
+function setMediaApp(name) {
+  let obj = {};
+  try {
+    obj = JSON.parse(form.options || "{}") || {};
+  } catch {
+    obj = {};
+  }
+  if (name) obj.app = name;
+  else delete obj.app;
+  form.options = Object.keys(obj).length ? JSON.stringify(obj) : "";
 }
 
 // ---- action catalog (static groups + live extension inputs) ----------------
@@ -142,9 +184,11 @@ const actionGroups = computed(() => {
 
 // catalog fields may declare a dynamic option source; "audio" is the
 // audio endpoint list for speaker-device tiles, "spotify"/
-// "spotify-playlists" the Spotify device/playlist pickers. A picker
-// whose list is empty or failed to load (not logged in, API error)
-// falls back to the raw text field, so the URI/name can always be typed.
+// "spotify-playlists" the Spotify device/playlist pickers, "obs-*" the
+// live OBS connection (scenes / sources / inputs / filters). A picker
+// whose list is empty or failed to load (not logged in, OBS offline,
+// API error) falls back to the raw text field, so the URI/name can
+// always be typed.
 function catalogFieldShape(f) {
   if (f.devices === "audio") {
     return {
@@ -170,19 +214,74 @@ function catalogFieldShape(f) {
       options: props.spotifyPlaylists.map((p) => ({ value: p.uri, label: p.name })),
     };
   }
+  if (f.devices === "vm-strip" && vmDevicesState.value.strips.length) {
+    return {
+      key: f.key,
+      label: f.label,
+      kind: "select",
+      options: vmDevicesState.value.strips,
+    };
+  }
+  if (f.devices === "vm-bus" && vmDevicesState.value.buses.length) {
+    return {
+      key: f.key,
+      label: f.label,
+      kind: "select",
+      options: vmDevicesState.value.buses,
+    };
+  }
+  if (String(f.devices || "").startsWith("obs-")) {
+    const list =
+      f.devices === "obs-scenes"
+        ? obsChoices.value.scenes
+        : f.devices === "obs-sources"
+          ? obsChoices.value.sources
+          : f.devices === "obs-filters"
+            ? obsChoices.value.filters
+            : obsChoices.value.inputs;
+    if (list.length) {
+      return {
+        key: f.key,
+        label: f.label,
+        kind: "select",
+        options: list.map((n) => ({ value: n, label: n })),
+      };
+    }
+  }
   return f;
 }
-const catalogFields = computed(() =>
-  (catalogEntry.value?.fields || []).map(catalogFieldShape)
-);
-
-const catalogEntry = computed(
-  () =>
-    CATALOG.find((c) => c.value === form.type) ||
+// catalog entry for any action type (static catalog or extension group);
+// shared by the main form and the per-gesture action overrides
+function catalogEntryFor(type) {
+  return (
+    CATALOG.find((c) => c.value === type) ||
     actionGroups.value
       .flatMap((g) => g.items)
-      .find((c) => c.value === form.type) ||
+      .find((c) => c.value === type) ||
     null
+  );
+}
+function fieldsShapeFor(type) {
+  return (catalogEntryFor(type)?.fields || []).map(catalogFieldShape);
+}
+const catalogFields = computed(() => fieldsShapeFor(form.type));
+
+const catalogEntry = computed(() => catalogEntryFor(form.type));
+
+// OBS pickers: fetched once per dialog open when the selected action's
+// fields ask for them (`devices: "obs-*"`); empty when OBS is offline,
+// which leaves the fields as free text.
+const obsChoices = ref({ scenes: [], sources: [], inputs: [], filters: [] });
+watch(
+  () => (catalogEntry.value?.fields || []).some((f) => String(f.devices || "").startsWith("obs-")),
+  (need) => {
+    if (!need) return;
+    api
+      .obsChoices()
+      .then((c) => (obsChoices.value = c))
+      .catch(() => (obsChoices.value = { scenes: [], sources: [], inputs: [], filters: [] }));
+  },
+  { immediate: true },
 );
 const showDual = computed(
   () =>
@@ -346,6 +445,204 @@ function stepTypeMeta(type) {
   return stepConfig.value?.types.find((t) => t.value === type) || null;
 }
 
+// ---- gesture editor ("Gesty") ----------------------------------------------
+
+// Custom gestures live in the options column as JSON, the same shape the
+// server and the tablet client already read:
+//   {"gestures": ["long-press"], "gesture_actions": {"long-press": {...}}}
+// A declared gesture without a `gesture_actions` entry fires the tile's own
+// action; an entry ({type, command}) replaces it per gesture. Only
+// button/toggle tiles offer the section - sliders keep their drag surface
+// and display modes have nothing to trigger.
+const GESTURE_DEFS = [
+  { key: "long-press", label: "Przytrzymanie" },
+  { key: "double-tap", label: "Podwójne tapnięcie" },
+  { key: "swipe-left", label: "Przeciągnięcie w lewo" },
+  { key: "swipe-right", label: "Przeciągnięcie w prawo" },
+];
+
+const gestures = reactive({});
+function loadGestures() {
+  for (const k of Object.keys(gestures)) delete gestures[k];
+  let obj = null;
+  try {
+    const parsed = JSON.parse(form.options || "");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) obj = parsed;
+  } catch {}
+  const declared = new Set(
+    Array.isArray(obj?.gestures) ? obj.gestures.filter((g) => typeof g === "string") : []
+  );
+  const actions =
+    obj?.gesture_actions && typeof obj.gesture_actions === "object"
+      ? obj.gesture_actions
+      : {};
+  for (const def of GESTURE_DEFS) {
+    const action = actions[def.key];
+    const g = {
+      enabled: declared.has(def.key) || Boolean(action),
+      type: action && typeof action === "object" ? String(action.type || "") : "",
+      command: action && typeof action === "object" ? String(action.command ?? "") : "",
+      fields: {},
+    };
+    gestures[def.key] = g;
+    loadGestureFields(def.key);
+  }
+}
+
+// same field machinery as the main form, scoped to one gesture's picked
+// action: fields load from the stored command and merge back into it
+function loadGestureFields(key) {
+  const g = gestures[key];
+  for (const k of Object.keys(g.fields)) delete g.fields[k];
+  const shaped = fieldsShapeFor(g.type);
+  if (!shaped.length) return;
+  let obj = {};
+  if (shaped.some((f) => f.key !== "")) {
+    try {
+      obj = JSON.parse(g.command || "{}") || {};
+    } catch {
+      obj = {};
+    }
+  }
+  for (const f of shaped) {
+    g.fields[f.key] = f.key === "" ? g.command || "" : obj[f.key] ?? "";
+  }
+  for (const f of shaped) {
+    if (f.kind === "select" && g.fields[f.key] === "" && f.options.length) {
+      g.fields[f.key] = f.options[0].value;
+    }
+  }
+}
+
+function gestureFieldVisible(g, f) {
+  return !f.showIf || g.fields[f.showIf.key] === f.showIf.value;
+}
+
+function applyGestureFields(key) {
+  const g = gestures[key];
+  const shaped = fieldsShapeFor(g.type);
+  if (!shaped.length) return;
+  if (shaped.every((f) => f.key === "")) {
+    g.command = g.fields[""] ?? "";
+    return;
+  }
+  let obj = {};
+  try {
+    obj = JSON.parse(g.command || "{}") || {};
+  } catch {
+    obj = {};
+  }
+  for (const f of shaped) {
+    const raw = g.fields[f.key];
+    if (f.kind === "number") {
+      if (raw !== "" && raw !== null && !Number.isNaN(Number(raw))) {
+        obj[f.key] = Number(raw);
+      } else if (gestureFieldVisible(g, f) && (raw === "" || raw === null)) {
+        delete obj[f.key];
+      }
+    } else if (raw !== "") {
+      obj[f.key] = raw;
+    } else if (gestureFieldVisible(g, f)) {
+      delete obj[f.key];
+    }
+  }
+  g.command = JSON.stringify(obj);
+}
+
+function onGestureTypePicked(key, value) {
+  const g = gestures[key];
+  g.type = value;
+  if (!value) g.command = "";
+  loadGestureFields(key);
+}
+
+// picker groups for a gesture's action override: a leading entry for "run
+// the tile's own action" (value "") on top of the shared action catalog
+const gesturePickerGroups = computed(() => [
+  {
+    header: "Gest",
+    items: [
+      { value: "", label: "Akcja kafla (domyślnie)", icon: "hand-pointer", color: "#4a6a8a" },
+    ],
+  },
+  ...actionGroups.value,
+]);
+
+function gestureFieldList(key) {
+  return fieldsShapeFor(gestures[key].type);
+}
+
+// the tile modes gestures make sense for; slider/knob keep the drag
+// surface for the value and display modes have nothing to trigger
+const gesturesAvailable = computed(() =>
+  ["button", "toggle"].includes(form.mode || "button")
+);
+
+const gesturesActive = computed(() =>
+  GESTURE_DEFS.some((def) => gestures[def.key]?.enabled)
+);
+
+// gestures ride the options JSON object, so the field cannot simultaneously
+// be the plain-string program arguments of the Run Program tile - an
+// inline conflict instead of a silent data loss on save
+const gestureError = computed(() => {
+  if (!gesturesActive.value) return "";
+  const raw = String(form.options || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return "";
+  } catch {}
+  return "Pole „Opcje” zawiera już argumenty programu - gesty wymagają zapisu JSON i nie mogą współdzielić tego pola.";
+});
+
+function applyGestures() {
+  const enabled = GESTURE_DEFS.filter((def) => gestures[def.key].enabled);
+  const raw = String(form.options || "").trim();
+  if (!enabled.length) {
+    // nothing declared: strip the gesture keys from an options JSON that
+    // carries them (a previous configuration), leave any other options
+    // byte-identical
+    if (!raw) return true;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return true;
+      if (!("gestures" in parsed) && !("gesture_actions" in parsed)) return true;
+      delete parsed.gestures;
+      delete parsed.gesture_actions;
+      form.options = JSON.stringify(parsed);
+    } catch {}
+    return true;
+  }
+  if (gestureError.value) return false;
+  let obj = {};
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return false;
+      }
+      obj = parsed;
+    } catch {
+      return false;
+    }
+  }
+  const list = [];
+  const actions = {};
+  for (const def of enabled) {
+    applyGestureFields(def.key);
+    list.push(def.key);
+    const g = gestures[def.key];
+    if (g.type) actions[def.key] = { type: g.type, command: g.command ?? "" };
+  }
+  obj.gestures = list;
+  if (Object.keys(actions).length) obj.gesture_actions = actions;
+  else delete obj.gesture_actions;
+  form.options = JSON.stringify(obj);
+  return true;
+}
+loadGestures();
+
 // ---- image -----------------------------------------------------------------
 
 const imageError = ref("");
@@ -380,7 +677,8 @@ function removeTile() {
 // Overlay click only closes the dialog when nothing was edited (012 A9):
 // an accidental click outside must not discard a configured tile. The
 // snapshot covers every writer: the form copy plus the command-mapping
-// reactives (fields, steps, boardId) that merge into form.command on save.
+// reactives (fields, steps, boardId) that merge into form.command and the
+// gesture states that merge into form.options on save.
 // img/img2 are excluded - stringifying up to ~20 MB of base64 on every
 // keystroke stutters the dialog (DESK-04); those fields only change
 // through pickImage, which flips imagesDirty above.
@@ -393,13 +691,26 @@ function formSnapshot() {
     fields: { ...fields },
     steps: steps.value,
     boardId: boardId.value,
+    gestures: JSON.parse(JSON.stringify(gestures)),
   });
 }
 const initialSnapshot = formSnapshot();
 const dirty = computed(() => formSnapshot() !== initialSnapshot || imagesDirty.value);
 
+async function requestClose() {
+  if (!dirty.value) {
+    emit("close");
+    return;
+  }
+  const ok = await ask("Zamknąć okno i porzucić niezapisane zmiany?", {
+    title: "Niezapisane zmiany",
+    kind: "warning",
+  });
+  if (ok) emit("close");
+}
+
 function overlayClose() {
-  if (!dirty.value) emit("close");
+  requestClose();
 }
 
 function save() {
@@ -408,6 +719,7 @@ function save() {
   applyFields();
   if (form.type === "board") applyBoardId();
   if (stepConfig.value) applySteps();
+  if (!applyGestures()) return; // inline gesture conflict (see gestureError)
   emit(isCreate.value ? "create" : "save", { ...form, ...resolveTypeMeta() });
 }
 
@@ -721,6 +1033,21 @@ function colorOr(val, fallback) {
             <input v-model="form.command" placeholder="command" @keydown.enter.prevent />
           </label>
 
+          <template v-if="isMediaTile">
+            <div class="field sel-field">
+              <span class="sel-label">Aplikacja (opcjonalnie)</span>
+              <SelectField
+                :model-value="mediaApp"
+                :options="[
+                  { value: '', label: '- bieżąca sesja -' },
+                  ...mediaApps.map((a) => ({ value: a, label: a })),
+                ]"
+                label="Aplikacja"
+                @update:model-value="setMediaApp"
+              />
+            </div>
+          </template>
+
           <template v-if="isPlanTile">
             <div class="field">
               Usage windows
@@ -773,12 +1100,60 @@ function colorOr(val, fallback) {
             </button>
             <div v-if="imageError" class="dual-error">{{ imageError }}</div>
           </template>
+
+          <!-- custom gestures (desktop touch mode + tablets) -->
+          <template v-if="gesturesAvailable">
+            <div class="dual-head">Gesty</div>
+            <p class="gesture-note">
+              Zaznacz gest i opcjonalnie wybierz akcję - bez wyboru gest uruchamia
+              akcję kafla. Działa w trybie dotykowym i na tabletach.
+            </p>
+            <div v-for="def in GESTURE_DEFS" :key="def.key" class="gesture-row">
+              <label class="gesture-check">
+                <input type="checkbox" v-model="gestures[def.key].enabled" />
+                {{ def.label }}
+              </label>
+              <template v-if="gestures[def.key].enabled">
+                <div class="field sel-field gesture-action">
+                  <span class="sel-label">Akcja</span>
+                  <ActionPicker
+                    :model-value="gestures[def.key].type"
+                    :groups="gesturePickerGroups"
+                    @update:model-value="onGestureTypePicked(def.key, $event)"
+                  />
+                </div>
+                <template v-for="f in gestureFieldList(def.key).filter((f) => gestureFieldVisible(gestures[def.key], f))" :key="f.key">
+                  <div v-if="f.kind === 'select'" class="field sel-field">
+                    <span class="sel-label">{{ f.label }}</span>
+                    <SelectField v-model="gestures[def.key].fields[f.key]" :options="f.options" :label="f.label" />
+                  </div>
+                  <label v-else class="field">
+                    {{ f.label }}
+                    <textarea
+                      v-if="f.kind === 'textarea'"
+                      v-model="gestures[def.key].fields[f.key]"
+                      rows="2"
+                      :placeholder="f.placeholder"
+                    ></textarea>
+                    <input
+                      v-else
+                      v-model="gestures[def.key].fields[f.key]"
+                      :inputmode="f.kind === 'number' ? 'numeric' : undefined"
+                      :placeholder="f.placeholder"
+                      @keydown.enter.prevent
+                    />
+                  </label>
+                </template>
+              </template>
+            </div>
+            <div v-if="gestureError" class="dual-error">{{ gestureError }}</div>
+          </template>
         </div>
       </div>
 
       <div class="modal-actions">
         <button v-if="!isCreate" class="btn-text danger left" @click="removeTile">Delete</button>
-        <button class="btn-text" @click="emit('close')">Cancel</button>
+        <button class="btn-text" @click="requestClose">Cancel</button>
         <button class="btn-text accent" @click="save">{{ isCreate ? "Add" : "Save" }}</button>
       </div>
     </div>
@@ -986,6 +1361,23 @@ function colorOr(val, fallback) {
 .dual-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .color-inline { height: 36px; padding: 3px; cursor: pointer; }
 .dual-error { font-size: 12px; color: var(--danger); margin-top: 6px; overflow-wrap: anywhere; }
+
+.gesture-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--modal-muted);
+  margin: 0 0 10px;
+}
+.gesture-row { margin-bottom: 10px; }
+.gesture-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13.5px;
+  color: var(--modal-text);
+  cursor: pointer;
+}
+.gesture-action { margin-top: 8px; }
 
 .modal-actions {
   border-top: 1px solid var(--modal-line);

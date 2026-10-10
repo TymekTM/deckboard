@@ -9,12 +9,15 @@ use serde_json::{json, Map, Value};
 use crate::props::{Props, StyleResolver, FALLBACK_COLOR};
 
 /// Types whose raw command string is sent to the client untouched.
+/// `media-control` is a select-style kind exactly like `vol` (the raw
+/// transport action is the whole command).
 const RAW_COMMAND_TYPES: &[&str] = &[
     "board",
     "obs-control",
     "slobs-control",
     "xsplit-control",
     "vol",
+    "media-control",
 ];
 
 /// Defensive ceiling for board dimensions on the wire
@@ -139,6 +142,15 @@ impl Mapper {
         if b.kind == "spotify-playback" && b.command.as_deref() == Some("play") {
             return Some("custom-value".to_string());
         }
+        // utility tools carry their live state (server-authoritative
+        // timer/stopwatch/counter, key `tool-<id>`) through the same
+        // custom-value lane as vol_mute
+        if matches!(
+            b.kind.as_str(),
+            "tool-timer" | "tool-stopwatch" | "tool-counter"
+        ) {
+            return Some("custom-value".to_string());
+        }
         props.app.clone()
     }
 
@@ -172,6 +184,12 @@ impl Mapper {
         // lives in `app_value`, shared with the per-event paths)
         if b.kind == "vol" && command == "vol_mute" {
             extra = "speaker-muted".to_string();
+        }
+        if matches!(
+            b.kind.as_str(),
+            "tool-timer" | "tool-stopwatch" | "tool-counter"
+        ) {
+            extra = format!("tool-{}", b.id);
         }
 
         let mut o = Map::new();
@@ -300,12 +318,59 @@ fn spotify_listener(kind: &str, command: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// System-media (SMTC) tiles follow the same rule: the seek slider reads
+/// the pushed `media-progress` fraction. The display and control kinds
+/// watch nothing (the payload rides the status lane under the kind).
+fn media_listener(kind: &str) -> Option<&'static str> {
+    match kind {
+        "media-seek" => Some("media-progress"),
+        _ => None,
+    }
+}
+
+/// The obs kinds the native integration (round 5) pushes live state
+/// for: the watch strings follow the stored command JSON shapes the
+/// original wrote (`scene` / `source` / `device` / `filter` fields).
+/// `obs-scene` keeps the raw command text the original mapped; the
+/// others compose `<scene>::<source>[::[<filter>]]` from the parsed
+/// fields - the empty segments stay in, so the keys are stable.
+/// obs-device-audio falls back from `source` to the catalog's `device`
+/// field (it used to resolve to "" and never light anything), and the
+/// argument-less obs toggles watch their kind name so the native
+/// pushes (`obs-studio-mode`, `obs-record`, `obs-stream`) reach the
+/// v2 state channels too.
+fn obs_listener(kind: &str, raw: &str) -> Option<String> {
+    match kind {
+        "obs-scene" => Some(raw.to_string()),
+        "obs-source" => Some(parsed(raw, "scene") + "::" + &parsed(raw, "source")),
+        "obs-filter" => Some(
+            parsed(raw, "scene") + "::" + &parsed(raw, "source") + "::" + &parsed(raw, "filter"),
+        ),
+        "obs-device-audio" => {
+            let source = parsed(raw, "source");
+            if source.is_empty() {
+                Some(parsed(raw, "device"))
+            } else {
+                Some(source)
+            }
+        }
+        "obs-studio-mode" | "obs-record" | "obs-stream" => Some(kind.to_string()),
+        _ => None,
+    }
+}
+
 /// The `extra` field: which state key the client watches for toggles/graphs.
 fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props) -> String {
     if let Some(key) = spotify_listener(kind, command) {
         return key.to_string();
     }
+    if let Some(key) = media_listener(kind) {
+        return key.to_string();
+    }
     let raw = command.unwrap_or_default();
+    if let Some(key) = obs_listener(kind, raw) {
+        return key;
+    }
     if props.json_key.is_some() {
         // jsonKey types use the type as the listener key
         return kind.to_string();
@@ -318,12 +383,8 @@ fn extra_listener(kind: &str, command: Option<&str>, mode: &str, props: &Props) 
         };
     }
     match kind {
-        "obs-scene" | "slobs-scene" => raw.to_string(),
-        "obs-source" => parsed(raw, "scene") + "::" + &parsed(raw, "source"),
-        "obs-filter" => {
-            parsed(raw, "scene") + "::" + &parsed(raw, "source") + "::" + &parsed(raw, "filter")
-        }
-        "slobs-source" | "obs-device-audio" | "slobs-device-audio" => parsed(raw, "source"),
+        "slobs-scene" => raw.to_string(),
+        "slobs-source" | "slobs-device-audio" => parsed(raw, "source"),
         "twitch-chat-box" => raw.to_string(),
         _ => {
             if mode == "slider" {
@@ -425,6 +486,44 @@ mod tests {
         let s = m.shortcut_payload(&b);
         assert_eq!(s["mode"], "graph");
         assert_eq!(s["extra"], "my-key");
+    }
+
+    #[test]
+    fn http_request_kind_passes_through_without_a_mapping_entry() {
+        // the http-request tile carries its config in the command column;
+        // the stock client only renders a pressable button, so the wire
+        // must keep the type and not mangle anything (the command stays
+        // server-side and is intentionally blanked like any unknown kind)
+        let m = Mapper::new();
+        let b = button(
+            "http-request",
+            Some(r#"{"method":"POST","url":"http://ha.local/api"}"#),
+            0,
+            0,
+            1,
+            1,
+        );
+        let s = m.shortcut_payload(&b);
+        assert_eq!(s["type"], "http-request");
+        assert_eq!(s["mode"], "button");
+        assert!(s["extra"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tool_tiles_watch_their_per_id_state_key() {
+        let m = Mapper::new();
+        for kind in ["tool-timer", "tool-stopwatch", "tool-counter"] {
+            let s = m.shortcut_payload(&button(kind, None, 0, 0, 1, 1));
+            // the manager pushes compact state and 1 Hz labels under
+            // `tool-<button id>`; the stock client binds custom values
+            // through the app+extra pair, like vol_mute
+            assert_eq!(s["extra"], "tool-10", "{kind}");
+            assert_eq!(s["app"], "custom-value", "{kind}");
+        }
+        // the clock never pushes - no listener, no app override
+        let s = m.shortcut_payload(&button("tool-clock", None, 0, 0, 1, 1));
+        assert_eq!(s["extra"], "");
+        assert!(s.get("app").is_none());
     }
 
     #[test]
@@ -565,6 +664,82 @@ mod tests {
     }
 
     #[test]
+    fn obs_tiles_watch_the_pushed_keys() {
+        let m = Mapper::new();
+        // scene tiles keep the original's raw-command watch string, and
+        // the new toggles watch their kind name (the keys the native
+        // integration pushes - see crates/obs/src/state.rs to_snapshot)
+        let s = m.shortcut_payload(&button(
+            "obs-scene",
+            Some(r#"{"scene":"Game"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], r#"{"scene":"Game"}"#);
+        for (kind, key) in [
+            ("obs-studio-mode", "obs-studio-mode"),
+            ("obs-record", "obs-record"),
+            ("obs-stream", "obs-stream"),
+        ] {
+            let s = m.shortcut_payload(&button(kind, None, 0, 0, 1, 1));
+            assert_eq!(s["extra"], key, "{kind}");
+        }
+        // source tiles compose scene::source (empty scene stays empty)
+        let s = m.shortcut_payload(&button(
+            "obs-source",
+            Some(r#"{"source":"Webcam"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], "::Webcam");
+        // filters compose scene::source::filter with the optional source
+        let s = m.shortcut_payload(&button(
+            "obs-filter",
+            Some(r#"{"filter":"Blur"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], "::::Blur");
+        let s = m.shortcut_payload(&button(
+            "obs-filter",
+            Some(r#"{"source":"Webcam","filter":"Blur"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], "::Webcam::Blur");
+        // device audio falls back from the empty `source` to the
+        // catalog's `device` field (used to watch "" and never light)
+        let s = m.shortcut_payload(&button(
+            "obs-device-audio",
+            Some(r#"{"device":"Mic"}"#),
+            0,
+            0,
+            1,
+            1,
+        ));
+        assert_eq!(s["extra"], "Mic");
+        // the audio slider keeps the slider spelling: kind + raw command
+        let mut slider = button("obs-audio-slider", Some(r#"{"device":"Mic"}"#), 0, 0, 1, 1);
+        slider.mode = "slider".into();
+        let s = m.shortcut_payload(&slider);
+        assert_eq!(
+            s["extra"],
+            format!("obs-audio-slider_{}", r#"{"device":"Mic"}"#)
+        );
+        // unimplemented obs kinds stay without a watch key
+        let s = m.shortcut_payload(&button("obs-transition", None, 0, 0, 1, 1));
+        assert_eq!(s["extra"], "");
+    }
+
+    #[test]
     fn spotify_tiles_watch_the_pushed_keys() {
         let m = Mapper::new();
         // the play command is a live toggle on the pushed key
@@ -616,6 +791,30 @@ mod tests {
         np.mode = "status".into();
         let s = m.shortcut_payload(&np);
         assert!(s.get("app").is_none());
+        assert_eq!(s["extra"], "");
+    }
+
+    #[test]
+    fn media_tiles_follow_the_spotify_shape() {
+        let m = Mapper::new();
+        // the seek slider reads the pushed progress fraction
+        let mut seek = button("media-seek", None, 0, 0, 1, 1);
+        seek.mode = "slider".into();
+        let s = m.shortcut_payload(&seek);
+        assert_eq!(s["extra"], "media-progress");
+        // transport control: plain button, no state plumbing
+        let s = m.shortcut_payload(&button("media-control", Some("play-pause"), 0, 0, 1, 1));
+        assert_eq!(s["command"], "play-pause");
+        assert!(s.get("app").is_none());
+        assert_eq!(s["extra"], "");
+        // now-playing: status display tile, payload rides the kind
+        let mut np = button("media-now-playing", None, 0, 0, 2, 2);
+        np.mode = "status".into();
+        let s = m.shortcut_payload(&np);
+        assert!(s.get("app").is_none());
+        assert_eq!(s["extra"], "");
+        // the original virtual-media-key kind is untouched
+        let s = m.shortcut_payload(&button("vol", Some("play"), 0, 0, 1, 1));
         assert_eq!(s["extra"], "");
     }
 

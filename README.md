@@ -43,10 +43,32 @@ extensions load in a native runtime.
   whole thing is edited live from Settings (Ustawienia) → AI usage.
 - Native system-info source (CPU and RAM load) replaces the heaviest JS
   extension.
+- **HTTP request tiles**: full method/URL/headers/body requests against Home
+  Assistant, webhooks, n8n or any REST API, executed server-side on press
+  (configurable timeout, optional certificate-error ignore, `{{var:...}}`
+  placeholders substituting current variable values). The status code - or a
+  value extracted from the JSON response via a pointer/dotted path - is stored
+  into a variable any Variable Value (display) tile shows live.
 - **Spotify**: playback, shuffle/repeat, like, playlists, device switch,
   volume and seek sliders, and a now-playing tile with cover art and a
   live progress bar. Talks to the Web API directly; setup and login live
   in the desktop app (see [Spotify](#spotify)).
+- **Utility tools** (catalog group "Tools"): server-authoritative clock,
+  countdown timer, stopwatch and counter tiles. The state lives on the
+  server (`~/pulpitApp/tools.json`), so every tablet and the desktop touch
+  mode show the same value; timers push compact snapshots on change and
+  clients extrapolate the ticking locally (plus a 1 Hz text label for the
+  stock client while something runs). Timer finish can play a sound on the
+  PC or switch the board, and the tile flashes on every surface.
+- **Multimedia (system)**: a global "now playing" source over Windows
+  Global System Media Transport Controls - cover art, title/artist, a live
+  progress bar and play/pause, next/previous/stop transport tiles for ANY
+  player the system reports (browser YouTube, Tidal, VLC, foobar2000),
+  not only Spotify. Tiles can target a specific app by name; the original
+  virtual-media-key "Multimedia" kind is unchanged.
+- **OBS Studio**: scenes, source/filter toggles, input mute, audio slider,
+  studio mode, record/stream toggles and replay-buffer save over
+  obs-websocket v5, with live tile states (see [OBS Studio](#obs-studio)).
 
 **Pairing and clients**
 
@@ -123,7 +145,7 @@ cd apps/mobile && gradle :app:testDebugUnitTest
 
 Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
 `settings.json`, `editor.json`, `aidev.json`, `devices.json`, `spotify.json`,
-`extensions/`, `assets/`, `logs/`. Environment overrides:
+`obs.json`, `extensions/`, `assets/`, `logs/`. Environment overrides:
 
 | Variable              | Default                   | Purpose                                     |
 | --------------------- | ------------------------- | ------------------------------------------- |
@@ -134,6 +156,7 @@ Everything lives in `~/pulpitApp` (`pulpit_db::data_dir`): `database.db`,
 | `PULPIT_NO_SINGLE_INSTANCE` | unset               | Any value: allow side-by-side instances     |
 | `PULPIT_NO_DISCOVERY` | unset                     | Set to `1` to skip the mDNS announcement    |
 | `PULPIT_SPOTIFY_CONFIG` | `~/pulpitApp/spotify.json` | Spotify client id and tokens            |
+| `PULPIT_OBS_CONFIG`   | `~/pulpitApp/obs.json`    | OBS connection settings (host, port, password) |
 
 ## Spotify
 
@@ -179,6 +202,77 @@ about every 3 s while playing and every 20 s while paused. Pulpit sends no
 requests at all while no tablet is connected and the editor window is
 hidden. Tiles extrapolate track progress between polls.
 
+## Discord
+
+Pulpit talks to the local Discord client over its RPC named pipe (native
+`crates/discord`, replacing the `discord-deckboard` extension, which needs
+node sockets). Voice actions work on the desktop and on tablets alike.
+
+**Setup (once)** — Ustawienia → Integracje → Discord:
+
+1. Create an app at <https://discord.com/developers/applications>.
+2. In OAuth2 add the redirect `https://discord.com` exactly as written
+   (never actually opened — the authorization runs over the local pipe).
+3. Paste the client id and client secret into the Discord tile and save,
+   then press *Połącz z Discordem* and approve inside the Discord client.
+
+Credentials live in `~/pulpitApp/settings.json` under the contractual
+`discord-deckboard` package (same field names the original extension used),
+tokens alongside them; *Rozłącz* clears the tokens and keeps id + secret.
+Saving hot-reloads the running app — no restart. The headless server re-reads
+the file (mtime check) before its next Discord action, so edits made in the
+desktop reach it without a restart too. Secrets and tokens are never logged.
+
+## Voicemeeter
+
+Voicemeeter tiles drive the `VoicemeeterRemote64.dll` remote API directly
+(native `crates/vm`). The DLL is auto-detected in the standard install
+locations; a nonstandard install can point at the file explicitly in
+Ustawienia → Integracje → Voicemeeter (stored in `settings.json` under
+`voicemeeter.dllPath`, consulted first). The tile shows what was detected:
+DLL path, Voicemeeter type (Basic/Banana/Potato), version, strip/bus counts,
+and can reconnect or launch Voicemeeter.
+
+Strip/bus pickers in the tile editor show live labels (`0 (Mic)`,
+`0 (A1)`) read from the running Voicemeeter; without a connection they fall
+back to the static indices. Stored values stay the numeric index, so boards
+keep working when Voicemeeter is absent.
+
+## OBS Studio
+
+Pulpit talks to OBS Studio directly over obs-websocket v5 (native
+`crates/obs`, no extension; OBS 28+ ships the plugin built in, default
+`ws://127.0.0.1:4455`). Setup: enable it in Ustawienia → OBS Studio, fill
+in the host, port and the password from OBS's Tools → obs-websocket
+settings, and press "Testuj połączenie". The config lives in
+`~/pulpitApp/obs.json` (override the path with `PULPIT_OBS_CONFIG`),
+written atomically; the password is never logged. Applying settings
+reconnects without an app restart, and a disabled config opens no
+connection at all. The headless server reads the same file.
+
+**Tiles** (catalog group "OBS Studio")
+
+| Kind | Does |
+| --- | --- |
+| `obs-scene` | switch program scene (lit while it is the live scene) |
+| `obs-source` | toggle a scene item in the current program scene (lit while visible) |
+| `obs-device-audio` | toggle input mute (lit while muted) |
+| `obs-filter` | toggle a source filter (lit while enabled; the source is guessed from the filter when omitted) |
+| `obs-studio-mode` | toggle studio mode (lit while on) |
+| `obs-record` | toggle recording (lit while recording) |
+| `obs-stream` | toggle streaming (lit while live) |
+| `obs-replay-save` | save the replay buffer |
+| `obs-audio-slider` | input volume fader, follows the live volume |
+
+Dual tiles light up from the real OBS state on every surface (events are
+pushed through the same live-state lane as Spotify and system info), and
+the tile dialog offers scene/source/input/filter pickers fed from the
+connection while it is up. The Streamlabs (SLOBS), XSplit and Twitch kinds
+from the original app are not implemented: they stay listed greyed-out in
+the picker, load from stock boards, and a press warns once per kind
+instead of once per press — an installed extension that provides one of
+those kinds still wins.
+
 ## Architecture
 
 One Cargo workspace, thin crates with a single job each:
@@ -197,6 +291,7 @@ One Cargo workspace, thin crates with a single job each:
 | `crates/ext`     | Extension host: original Deckboard extensions on an embedded JS engine |
 | `crates/vm`      | Native Voicemeeter integration                                         |
 | `crates/discord` | Native Discord local-RPC integration                                   |
+| `crates/obs`     | Native OBS Studio integration (obs-websocket v5)                       |
 | `apps/desktop`   | Tauri 2 + Vue 3 editor and touch surface                               |
 | `apps/server`    | Headless server binary (legacy + v2)                                   |
 | `apps/mobile`    | Kotlin/Compose Android client                                          |

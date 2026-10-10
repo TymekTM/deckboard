@@ -33,6 +33,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import app.pulpit.mobile.ui.HapticConfig
+import app.pulpit.mobile.ui.HapticIntensity
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
@@ -63,6 +65,27 @@ class PulpitViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _config = MutableStateFlow(loadConfig())
     val config: StateFlow<ServerConfig> = _config
+
+    private val _hapticConfig = MutableStateFlow(loadHapticConfig())
+    val hapticConfig: StateFlow<HapticConfig> = _hapticConfig
+
+    private fun loadHapticConfig(): HapticConfig {
+        val enabled = prefs.getBoolean(HapticConfig.PREF_KEY_ENABLED, true)
+        val intensityStr = prefs.getString(HapticConfig.PREF_KEY_INTENSITY, HapticIntensity.Normal.name)
+        return HapticConfig.fromPreferences(enabled, intensityStr)
+    }
+
+    fun setHapticsEnabled(enabled: Boolean) {
+        val updated = _hapticConfig.value.copy(enabled = enabled)
+        _hapticConfig.value = updated
+        prefs.edit().putBoolean(HapticConfig.PREF_KEY_ENABLED, enabled).apply()
+    }
+
+    fun setHapticIntensity(intensity: HapticIntensity) {
+        val updated = _hapticConfig.value.copy(intensity = intensity)
+        _hapticConfig.value = updated
+        prefs.edit().putString(HapticConfig.PREF_KEY_INTENSITY, intensity.name).apply()
+    }
 
     private val _connState = MutableStateFlow<ConnState>(ConnState.Disconnected)
     val connState: StateFlow<ConnState> = _connState

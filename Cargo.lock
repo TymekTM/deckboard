@@ -3653,10 +3653,13 @@ dependencies = [
  "pulpit-discord",
  "pulpit-ext",
  "pulpit-legacy",
+ "pulpit-obs",
  "pulpit-os",
  "pulpit-spotify",
  "pulpit-sysinfo",
+ "pulpit-tools",
  "pulpit-vm",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",
@@ -3695,9 +3698,12 @@ dependencies = [
  "pulpit-ext",
  "pulpit-host",
  "pulpit-legacy",
+ "pulpit-os",
+ "pulpit-obs",
  "pulpit-proto",
  "pulpit-spotify",
  "pulpit-sysinfo",
+ "pulpit-tools",
  "pulpit-v2",
  "pulpit-vm",
  "qrcode",
@@ -3722,6 +3728,7 @@ name = "pulpit-discord"
 version = "1.4.0"
 dependencies = [
  "pulpit-db",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -3750,18 +3757,23 @@ dependencies = [
 name = "pulpit-host"
 version = "1.4.0"
 dependencies = [
+ "base64 0.23.1",
  "dirs 5.0.1",
+ "hex",
  "pulpit-actions",
  "pulpit-aidev",
  "pulpit-db",
  "pulpit-discord",
  "pulpit-ext",
  "pulpit-legacy",
+ "pulpit-os",
  "pulpit-spotify",
  "pulpit-sysinfo",
+ "pulpit-tools",
  "pulpit-v2",
  "pulpit-vm",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
@@ -3785,13 +3797,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulpit-obs"
+version = "1.4.0"
+dependencies = [
+ "base64 0.23.1",
+ "futures-util",
+ "pulpit-db",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
 name = "pulpit-os"
 version = "1.4.0"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
  "image",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tracing",
  "windows 0.58.0",
 ]
 
@@ -3818,9 +3852,12 @@ dependencies = [
  "pulpit-ext",
  "pulpit-host",
  "pulpit-legacy",
+ "pulpit-os",
+ "pulpit-obs",
  "pulpit-proto",
  "pulpit-spotify",
  "pulpit-sysinfo",
+ "pulpit-tools",
  "pulpit-v2",
  "pulpit-vm",
  "serde_json",
@@ -3856,6 +3893,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulpit-tools"
+version = "1.4.0"
+dependencies = [
+ "pulpit-actions",
+ "pulpit-db",
+ "pulpit-legacy",
+ "pulpit-os",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pulpit-v2"
 version = "1.4.0"
 dependencies = [
@@ -3869,6 +3921,7 @@ dependencies = [
  "pulpit-db",
  "pulpit-legacy",
  "pulpit-proto",
+ "pulpit-tools",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -3884,7 +3937,10 @@ dependencies = [
 name = "pulpit-vm"
 version = "1.4.0"
 dependencies = [
+ "pulpit-db",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

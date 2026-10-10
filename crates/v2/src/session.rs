@@ -518,15 +518,32 @@ async fn handle_interaction(state: &Arc<V2State>, session: &Arc<V2Session>, fram
             let backend = state.backend.clone();
             tokio::task::spawn_blocking(move || backend.slider(button, value));
         }
-        // M5 custom gestures: alternative triggers of the tile's action
-        // with release semantics - one execution each, no key-hold, no
-        // server-side repeat (that stays with press-start).
         Interaction::LongPress
         | Interaction::DoubleTap
         | Interaction::SwipeLeft
         | Interaction::SwipeRight => {
             ack_ok();
-            exec_once(state, button, false);
+            let mut target_button = button;
+            // an editor-configured `gesture_actions` override replaces the
+            // kind/command per field; without one the tile's own action fires
+            // (tool tiles execute their own gesture semantics instead)
+            let gesture = match payload.interaction {
+                Interaction::LongPress => "long-press",
+                Interaction::DoubleTap => "double-tap",
+                Interaction::SwipeLeft => "swipe-left",
+                _ => "swipe-right",
+            };
+            let params: Value =
+                serde_json::from_str(target_button.options.as_deref().unwrap_or(""))
+                    .unwrap_or(Value::Null);
+            if let Some((kind, command)) = crate::boards::gesture_action_override(&params, gesture)
+            {
+                target_button.kind = kind;
+                if let Some(command) = command {
+                    target_button.command = Some(command);
+                }
+            }
+            exec_gesture(state, target_button, gesture);
         }
         // Unreachable while the allowed-interactions check stands (no tile
         // declares wheel/drag); kept as a defensive typed error.
@@ -579,6 +596,51 @@ fn start_hold(
         tracing::debug!(tile, "hold repeat ended");
     });
     session.insert_hold(tile, handle);
+}
+
+fn exec_gesture(state: &Arc<V2State>, button: ButtonRow, gesture: &str) {
+    let backend = state.backend.clone();
+    let engine = state.engine.clone();
+    let hub = state.hub.clone();
+    let gesture = gesture.to_string();
+    tokio::task::spawn_blocking(move || {
+        exec_gesture_blocking(&backend, &engine, &hub, button, &gesture)
+    });
+}
+
+fn exec_gesture_blocking(
+    backend: &Arc<dyn pulpit_legacy::Backend>,
+    engine: &Arc<StateEngine>,
+    hub: &Arc<crate::hub::V2Hub>,
+    button: ButtonRow,
+    gesture: &str,
+) {
+    let (board_tx, mut board_rx) = mpsc::unbounded_channel::<i64>();
+    let (value_tx, mut value_rx) = mpsc::unbounded_channel::<(String, String)>();
+    struct Sink(
+        tokio::sync::mpsc::UnboundedSender<i64>,
+        tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    );
+    impl EventSink for Sink {
+        fn change_board(&mut self, board_id: i64) {
+            let _ = self.0.send(board_id);
+        }
+        fn app_value(&mut self, key: &str, value: &str) {
+            let _ = self.1.send((key.to_string(), value.to_string()));
+        }
+    }
+    let mut sink = Sink(board_tx, value_tx);
+    backend.exec_gesture(button, gesture, &mut sink);
+    while let Ok(board) = board_rx.try_recv() {
+        hub.broadcast_frame(&Frame::push_typed(TYPE_BOARD_OPEN, &BoardOpen { board }));
+    }
+    while let Ok((key, value)) = value_rx.try_recv() {
+        let channel = ext_channel(&key);
+        engine.set(
+            &channel,
+            serde_json::from_str(&value).unwrap_or(Value::String(value)),
+        );
+    }
 }
 
 /// Executes a tile command off the async workers; its effects (board

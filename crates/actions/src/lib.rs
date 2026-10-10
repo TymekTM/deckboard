@@ -150,6 +150,10 @@ pub trait EventSink {
     /// Push a custom-value label (e.g. `toggle-microphone` -> "OFF") to
     /// clients as APP_CUSTOM_VALUE. Default no-op: not every action pushes.
     fn app_value(&mut self, _key: &str, _value: &str) {}
+    /// Get a custom-value label if known by this sink. Default None.
+    fn get_app_value(&self, _key: &str) -> Option<String> {
+        None
+    }
     /// Push a third-party app state (e.g. `speaker-device` -> endpoint id)
     /// to clients as THIRD_PARTY_APP. Default no-op.
     fn third_party_value(&mut self, _key: &str, _value: &str) {}

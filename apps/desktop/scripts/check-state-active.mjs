@@ -108,8 +108,37 @@ const spotifyLike = { type: "spotify-like", command: "" };
 eq("spotify-like ON is active", stateActive(spotifyLike, {}, { "spotify-liked": "ON" }, {}), true);
 eq("spotify-like unpushed stays unknown", stateActive(spotifyLike, {}, {}, {}), null);
 
+// ---- native OBS watch bindings (round 5) --------------------------------
+// The connection worker pushes: obs-scene -> current scene name,
+// obs-source/obs-filter/obs-device-audio -> name arrays, the toggles ->
+// booleans (crates/obs/src/state.rs to_snapshot). The bound comparisons
+// reuse the speaker-device semantics.
+const obsSource = { type: "obs-source", command: JSON.stringify({ source: "Webcam" }) };
+eq("obs-scene current scene is active", stateActive(obsScene, { scene: "Game" }, { "obs-scene": "Game" }, {}), true);
+eq("obs-scene other scene is inactive", stateActive(obsScene, { scene: "Game" }, { "obs-scene": "Intro" }, {}), false);
+eq("obs-scene empty push reads unknown", stateActive(obsScene, { scene: "Game" }, { "obs-scene": "" }, {}), null);
+eq("obs-scene unpushed stays unknown", stateActive(obsScene, { scene: "Game" }, {}, {}), null);
+eq(
+  "obs-source enabled-in-scene is active",
+  stateActive(obsSource, { source: "Webcam" }, { "obs-source": ["Webcam", "Chat"] }, {}),
+  true,
+);
+eq(
+  "obs-source not in the scene is inactive",
+  stateActive(obsSource, { source: "Webcam" }, { "obs-source": ["Chat"] }, {}),
+  false,
+);
+const obsMute = { type: "obs-device-audio", command: JSON.stringify({ device: "Mic" }) };
+eq("obs-device-audio muted is active", stateActive(obsMute, { device: "Mic" }, { "obs-device-audio": ["Mic"] }, {}), true);
+eq("obs-device-audio live is inactive", stateActive(obsMute, { device: "Mic" }, { "obs-device-audio": [] }, {}), false);
+const obsFilter = { type: "obs-filter", command: JSON.stringify({ filter: "Blur" }) };
+eq("obs-filter enabled is active", stateActive(obsFilter, { filter: "Blur" }, { "obs-filter": ["Blur"] }, {}), true);
+eq("obs-studio-mode boolean push", stateActive({ type: "obs-studio-mode", command: "" }, {}, { "obs-studio-mode": true }, {}), true);
+eq("obs-record off push is inactive", stateActive({ type: "obs-record", command: "" }, {}, { "obs-record": false }, {}), false);
+eq("obs-stream unpushed stays unknown", stateActive({ type: "obs-stream", command: "" }, {}, {}, {}), null);
+
 // ---- dead lanes never light --------------------------------------------
-eq("empty binding stays on the tap flip", stateActive(obsScene, { scene: "Game" }, { anything: "ON" }, {}), null);
+eq("empty binding stays on the tap flip", stateActive({ type: "slobs-scene", command: JSON.stringify({ scene: "Game" }) }, { scene: "Game" }, { anything: "ON" }, {}), null);
 eq("unbound plain type stays on the tap flip", stateActive({ type: "key", command: "" }, {}, { anything: "ON" }, {}), null);
 
 if (failures.length) {

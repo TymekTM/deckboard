@@ -34,6 +34,55 @@ class SlideThrottle(private val throttleMs: Long = SLIDE_THROTTLE_MS) {
     }
 }
 
+/** Slider step haptic rate-limiter: emits tactile ticks when the drag
+ *  crosses a discrete step (~5% by default), rate-limited so rapid flicks
+ *  do not buzz continuously. Zero allocations per frame. Pure clock for
+ *  deterministic unit testing. */
+class SliderStepLimiter(
+    val step: Float = DEFAULT_STEP,
+    val rateLimitMs: Long = DEFAULT_RATE_LIMIT_MS,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    companion object {
+        const val DEFAULT_STEP = 0.05f
+        const val DEFAULT_RATE_LIMIT_MS = 50L
+    }
+
+    private var lastStepIndex: Int? = null
+    private var lastTickTimeMs: Long = 0L
+
+    fun reset(initialValue: Float? = null) {
+        lastStepIndex = initialValue?.let { stepIndex(it) }
+        lastTickTimeMs = 0L
+    }
+
+    fun stepIndex(value: Float): Int {
+        val clamped = value.coerceIn(0f, 1f)
+        return (clamped / step).toInt()
+    }
+
+    /** Returns true if a step boundary was crossed and rate limit permits. */
+    fun onMove(value: Float): Boolean {
+        val currentIndex = stepIndex(value)
+        val previousIndex = lastStepIndex
+
+        if (previousIndex == null) {
+            lastStepIndex = currentIndex
+            return false
+        }
+
+        if (currentIndex != previousIndex) {
+            val now = clock()
+            if (now - lastTickTimeMs >= rateLimitMs) {
+                lastTickTimeMs = now
+                lastStepIndex = currentIndex
+                return true
+            }
+        }
+        return false
+    }
+}
+
 /** Drag state shared by [SliderTile] (Tile.kt) and [KnobTile]
  *  (Widgets.kt), one instance per tile id:
  *  - null [dragValue] until somebody drags: the channel's live value
@@ -43,8 +92,12 @@ class SlideThrottle(private val throttleMs: Long = SLIDE_THROTTLE_MS) {
  *    back while the echo patch travels - a cancelled one hands control
  *    back to live;
  *  - every send is throttled except the forced final one, so release
- *    and cancel always converge on the last sampled value. */
-class SlideDragController(private val throttle: SlideThrottle = SlideThrottle()) {
+ *    and cancel always converge on the last sampled value;
+ *  - step-limited haptic feedback fires light ticks during drag. */
+class SlideDragController(
+    private val throttle: SlideThrottle = SlideThrottle(),
+    val stepLimiter: SliderStepLimiter = SliderStepLimiter(),
+) {
 
     var dragValue: Float? by mutableStateOf(null)
         private set
@@ -57,12 +110,20 @@ class SlideDragController(private val throttle: SlideThrottle = SlideThrottle())
      *  sent, so the first positioning is not at the throttle's mercy. */
     fun start(v: Float, send: (Float) -> Unit) {
         dragValue = v
+        stepLimiter.reset(v)
         throttle.push(v, force = true, send = send)
     }
 
-    fun move(v: Float, send: (Float) -> Unit) {
+    fun move(v: Float, onStepTick: () -> Unit, send: (Float) -> Unit) {
         dragValue = v
+        if (stepLimiter.onMove(v)) {
+            onStepTick()
+        }
         throttle.push(v, send = send)
+    }
+
+    fun move(v: Float, send: (Float) -> Unit) {
+        move(v, onStepTick = {}, send = send)
     }
 
     /** Release: converge - the last sampled value always reaches the
