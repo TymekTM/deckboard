@@ -888,6 +888,10 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
         .inner_size(1280.0, 800.0)
         .min_inner_size(900.0, 600.0)
         .theme(Some(tauri::Theme::Dark))
+        // Tauri's native file-drop handler swallows WebView2's HTML5 drag
+        // events (dragover/drop never reach the page), which killed the
+        // sidebar board reordering. Nothing here takes OS file drops.
+        .disable_drag_drop_handler()
         .additional_browser_args(
             "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
              --disable-background-networking --disable-component-update \
