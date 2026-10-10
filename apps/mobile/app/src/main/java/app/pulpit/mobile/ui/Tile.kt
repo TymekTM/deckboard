@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.CircleShape
@@ -519,8 +520,15 @@ private fun SliderTile(
     val sendSlide by rememberUpdatedState(onSlider)
     val value = slide.current(liveValue)
     LaunchedEffect(liveValue) { slide.onLive(liveValue) }
-    val fill = tile.style?.color2?.let { hex(it, baseColor.copy(alpha = 0.6f)) }
-        ?: baseColor.copy(alpha = 0.55f)
+    // The fill is the tile's colour2 when that differs from the tile colour,
+    // else a translucent white wash like the desktop's. The server falls an
+    // unset colour2 back to the type default, which for most tiles (spotify
+    // volume) is the tile colour itself - filling with that was invisible,
+    // so the slider looked empty whatever its value.
+    val fill = tile.style?.color2
+        ?.let { hex(it, baseColor) }
+        ?.takeIf { it.copy(alpha = 1f) != baseColor.copy(alpha = 1f) }
+        ?: Color.White.copy(alpha = 0.28f)
 
     Box(
         Modifier
@@ -553,7 +561,16 @@ private fun SliderTile(
                 .fillMaxWidth()
                 .fillMaxHeight(value)
                 .background(fill),
-        )
+        ) {
+            // thumb line on the fill's top edge, as on the desktop
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .background(Color.White.copy(alpha = 0.85f)),
+            )
+        }
         if (icon.isNotEmpty()) {
             Text(
                 text = icon,
